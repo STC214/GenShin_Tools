@@ -37,16 +37,16 @@ Run the S02 GUI lifecycle, second-instance, tray, recovery and stress checks:
 ./scripts/test-s02-shell.ps1
 ```
 
-Run the S03 input state-machine, hook lifecycle and real `SendInput` loopback gates:
+Run the S03 input state-machine, hook lifecycle and swallowed real `SendInput` capture gates:
 
 ```powershell
 ./scripts/test-s03-input.ps1
 ```
 
-On a dedicated, idle test desktop only, run keyboard/left/right real-input soaks for 10 minutes each:
+Optionally run a one-minute captured soak for each of keyboard/left/right (about three minutes total):
 
 ```powershell
-./scripts/test-s03-input.ps1 -SoakMinutes 10
+./scripts/test-s03-input.ps1 -SoakMinutes 1
 ```
 
 Clean generated artifacts:

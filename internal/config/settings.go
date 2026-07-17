@@ -8,12 +8,13 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"genshintools/internal/input"
 )
 
-const CurrentSchemaVersion = 2
+const CurrentSchemaVersion = 3
 
 // Settings contains only stable shell settings in S02. Feature settings are
 // added by their implementation stage instead of being guessed in advance.
@@ -21,6 +22,7 @@ type Settings struct {
 	SchemaVersion int          `json:"schemaVersion"`
 	Window        WindowConfig `json:"window"`
 	Input         input.Config `json:"input"`
+	Game          GameConfig   `json:"game"`
 }
 
 type WindowConfig struct {
@@ -28,6 +30,11 @@ type WindowConfig struct {
 	Y      int `json:"y"`
 	Width  int `json:"width"`
 	Height int `json:"height"`
+}
+
+type GameConfig struct {
+	Path             string `json:"path"`
+	CustomExecutable string `json:"customExecutable"`
 }
 
 type LoadResult struct {
@@ -86,6 +93,8 @@ func migrateAndValidate(settings *Settings) error {
 		settings.Input = input.DefaultConfig()
 		settings.SchemaVersion = CurrentSchemaVersion
 	case 2:
+		settings.SchemaVersion = CurrentSchemaVersion
+	case 3:
 	default:
 		return fmt.Errorf("unsupported schema version %d", settings.SchemaVersion)
 	}
@@ -103,6 +112,11 @@ func migrateAndValidate(settings *Settings) error {
 	// always returns to Disabled so stale physical state cannot begin output.
 	normalized.Enabled = false
 	settings.Input = normalized
+	settings.Game.Path = strings.Trim(strings.TrimSpace(settings.Game.Path), `"`)
+	settings.Game.CustomExecutable = strings.Trim(strings.TrimSpace(settings.Game.CustomExecutable), `"`)
+	if settings.Game.CustomExecutable != "" && (filepath.Base(settings.Game.CustomExecutable) != settings.Game.CustomExecutable || !strings.EqualFold(filepath.Ext(settings.Game.CustomExecutable), ".exe")) {
+		return errors.New("game custom executable must be a file name ending in .exe")
+	}
 	return nil
 }
 

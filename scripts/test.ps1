@@ -24,7 +24,15 @@ function Invoke-Checked {
 
 Push-Location $ProjectRoot
 try {
-    $Unformatted = @(gofmt -l .)
+    if (Test-Path (Join-Path $ProjectRoot '.git')) {
+        $GoFiles = @(@(& git ls-files '*.go') + @(& git ls-files --others --exclude-standard '*.go'))
+    } else {
+        $GoFiles = @(& rg --files -g '*.go' -g '!.tmp/**' -g '!.cache/**' -g '!build/**' -g '!dist/**')
+    }
+    $Unformatted = @()
+    if ($GoFiles.Count -gt 0) {
+        $Unformatted = @(gofmt -l @GoFiles)
+    }
     if ($Unformatted.Count -ne 0) {
         throw "gofmt is required for: $($Unformatted -join ', ')"
     }

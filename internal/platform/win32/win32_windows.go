@@ -106,6 +106,32 @@ type ResourceSnapshot struct {
 	USER    uint32
 }
 
+type openFileName struct {
+	Size            uint32
+	Owner           HWND
+	Instance        HINSTANCE
+	Filter          *uint16
+	CustomFilter    *uint16
+	MaxCustomFilter uint32
+	FilterIndex     uint32
+	File            *uint16
+	MaxFile         uint32
+	FileTitle       *uint16
+	MaxFileTitle    uint32
+	InitialDir      *uint16
+	Title           *uint16
+	Flags           uint32
+	FileOffset      uint16
+	FileExtension   uint16
+	DefaultExt      *uint16
+	CustomData      uintptr
+	Hook            uintptr
+	TemplateName    *uint16
+	Reserved        uintptr
+	ReservedValue   uint32
+	FlagsEx         uint32
+}
+
 const (
 	CS_HREDRAW = 0x0002
 	CS_VREDRAW = 0x0001
@@ -194,8 +220,11 @@ var (
 	dwmapi   = windows.NewLazySystemDLL("dwmapi.dll")
 	ole32    = windows.NewLazySystemDLL("ole32.dll")
 	wtsapi32 = windows.NewLazySystemDLL("wtsapi32.dll")
+	comdlg32 = windows.NewLazySystemDLL("comdlg32.dll")
 
 	procRegisterClassExW              = user32.NewProc("RegisterClassExW")
+	procGetOpenFileNameW              = comdlg32.NewProc("GetOpenFileNameW")
+	procCommDlgExtendedError          = comdlg32.NewProc("CommDlgExtendedError")
 	procCreateWindowExW               = user32.NewProc("CreateWindowExW")
 	procDefWindowProcW                = user32.NewProc("DefWindowProcW")
 	procShowWindow                    = user32.NewProc("ShowWindow")
@@ -269,6 +298,39 @@ func UTF16(value string) *uint16 {
 func CopyUTF16(destination []uint16, value string) {
 	encoded, _ := windows.UTF16FromString(value)
 	copy(destination, encoded)
+}
+
+// SelectExecutable shows the native read-only file picker. Cancellation is not
+// an error; selected is false in that case.
+func SelectExecutable(owner HWND, initialDirectory string) (path string, selected bool, err error) {
+	buffer := make([]uint16, 32768)
+	filter := append(syscall.StringToUTF16("Windows executables (*.exe)"), syscall.StringToUTF16("*.exe")...)
+	filter = append(filter, 0)
+	var initial *uint16
+	if initialDirectory != "" {
+		initial = UTF16(initialDirectory)
+	}
+	request := openFileName{
+		Size:        uint32(unsafe.Sizeof(openFileName{})),
+		Owner:       owner,
+		Filter:      &filter[0],
+		FilterIndex: 1,
+		File:        &buffer[0],
+		MaxFile:     uint32(len(buffer)),
+		InitialDir:  initial,
+		Title:       UTF16("选择原神游戏主程序"),
+		Flags:       0x00080000 | 0x00001000 | 0x00000800 | 0x00000008,
+		DefaultExt:  UTF16("exe"),
+	}
+	value, _, _ := procGetOpenFileNameW.Call(uintptr(unsafe.Pointer(&request)))
+	if value != 0 {
+		return windows.UTF16ToString(buffer), true, nil
+	}
+	code, _, _ := procCommDlgExtendedError.Call()
+	if code != 0 {
+		return "", false, fmt.Errorf("GetOpenFileNameW failed with common-dialog error 0x%X", code)
+	}
+	return "", false, nil
 }
 
 func NewCallback(callback any) uintptr { return syscall.NewCallback(callback) }

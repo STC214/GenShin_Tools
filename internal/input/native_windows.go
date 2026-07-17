@@ -46,9 +46,11 @@ const (
 	nativeQueueSize = 256
 )
 
-// injectionMarker is deliberately non-zero and uncommon. Low-level hooks use
-// it in addition to the injected flag to reject our own SendInput events.
-const injectionMarker uintptr = 0x47544F4F4C53 // "GTOOLS"
+// injectionMarker is deliberately non-zero, uncommon, and limited to 32 bits.
+// Mouse low-level hooks can expose only the low 32 bits of dwExtraInfo on some
+// Windows paths, while keyboard hooks preserve the full ULONG_PTR value.
+// Keeping one 32-bit marker makes self-injected filtering consistent for both.
+const injectionMarker uintptr = 0x47544F4C // "GTOL"
 
 type point struct{ X, Y int32 }
 

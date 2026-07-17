@@ -8,6 +8,7 @@ import (
 	"os"
 	"runtime"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 	"unsafe"
@@ -15,6 +16,7 @@ import (
 	"genshintools/internal/buildinfo"
 	"genshintools/internal/config"
 	"genshintools/internal/diagnostics"
+	"genshintools/internal/game"
 	"genshintools/internal/input"
 	"genshintools/internal/paths"
 	"genshintools/internal/platform/win32"
@@ -30,6 +32,7 @@ const (
 	messageSnapshot = win32.WM_APP + 3
 	messageInput    = win32.WM_APP + 4
 	messagePhysical = win32.WM_APP + 5
+	messageGame     = win32.WM_APP + 6
 
 	trayID   = 1
 	menuShow = 1001
@@ -68,15 +71,34 @@ type application struct {
 	inputSnap            input.Snapshot
 	recording            int
 	inputUIError         string
+	gameUpdates          chan gameUpdate
+	gameState            gameViewState
+	gameTask             uint64
 	sessionNotifications bool
 	shutdown             sync.Once
 	cleanExit            bool
 	fatal                bool
 }
 
+type gameViewState struct {
+	Scanning       bool
+	Candidate      *game.Candidate
+	CandidateCount int
+	Size           game.SizeProgress
+	Skipped        uint64
+	Running        []game.ProcessIdentity
+	Status         string
+	Error          string
+}
+
+type gameUpdate struct {
+	taskID uint64
+	state  gameViewState
+}
+
 var navigation = []struct{ title, subtitle string }{
 	{"首页", "启动状态与常用操作将在后续阶段接入。"},
-	{"游戏管理", "S04 将实现路径发现、版本和区服识别。"},
+	{"游戏管理", "S04：只读发现、版本、区服、大小和运行状态。"},
 	{"输入增强", "S03 将优先实现鼠标连点与键盘连按。"},
 	{"插件", "S09/S10 才会启用注入与插件，当前保持隔离。"},
 	{"设置", "S02 已启用便携配置、日志、DPI 和安全退出。"},
@@ -138,6 +160,7 @@ func Run(layout paths.Layout, build buildinfo.Info) (returnErr error) {
 		snapshots:      make(chan win32.ResourceSnapshot, 1),
 		inputUpdates:   make(chan input.Snapshot, 1),
 		physicalEvents: make(chan input.PhysicalEvent, 16),
+		gameUpdates:    make(chan gameUpdate, 1),
 	}
 	active = app
 	defer func() { active = nil }()
@@ -155,6 +178,7 @@ func Run(layout paths.Layout, build buildinfo.Info) (returnErr error) {
 		return fmt.Errorf("start input enhancement: %w", err)
 	}
 	app.startBackgroundDiagnostics()
+	app.startGameScan(os.Getenv("GENSHINTOOLS_S04_GAME_PATH"))
 	app.startSmokeHooks()
 
 	var message win32.Msg
@@ -311,6 +335,18 @@ func (app *application) handleMessage(hwnd win32.HWND, message uint32, wParam, l
 				return 0
 			}
 		}
+	case messageGame:
+		for {
+			select {
+			case update := <-app.gameUpdates:
+				if update.taskID == app.gameTask {
+					app.gameState = update.state
+				}
+			default:
+				win32.Invalidate(hwnd)
+				return 0
+			}
+		}
 	case messageTray:
 		event := uint32(lParam & 0xffff)
 		switch event {
@@ -330,6 +366,8 @@ func (app *application) handleMessage(hwnd win32.HWND, message uint32, wParam, l
 		if selected := app.navigationAt(x, y); selected >= 0 && selected != app.selected {
 			app.selected = selected
 			win32.Invalidate(hwnd)
+		} else if app.selected == 1 && x >= int(win32.Scale(210, app.dpi)) {
+			app.gameClick(x, y)
 		} else if app.selected == 2 && x >= int(win32.Scale(210, app.dpi)) {
 			app.inputClick(x, y)
 		}
@@ -545,7 +583,9 @@ func (app *application) paint(hwnd win32.HWND) {
 	subtitleRect := win32.Rect{Left: contentLeft, Top: win32.Scale(112, app.dpi), Right: client.Right - win32.Scale(30, app.dpi), Bottom: win32.Scale(158, app.dpi)}
 	win32.DrawText(dc, subtitle, &subtitleRect, win32.DT_LEFT|win32.DT_VCENTER|win32.DT_SINGLELINE|win32.DT_END_ELLIPSIS)
 
-	if app.selected == 2 {
+	if app.selected == 1 {
+		app.paintGame(dc, client, contentLeft)
+	} else if app.selected == 2 {
 		app.paintInput(dc, client, contentLeft)
 	} else {
 		cardBrush := win32.CreateSolidBrush(win32.Color(25, 29, 39))
@@ -817,6 +857,217 @@ func virtualKeyName(key uint32) string {
 		return fmt.Sprintf("F%d", key-0x6f)
 	}
 	return fmt.Sprintf("VK 0x%02X", key)
+}
+
+func (app *application) gameClick(_, y int) {
+	sy := func(value int32) int { return int(win32.Scale(value, app.dpi)) }
+	switch {
+	case y >= sy(170) && y < sy(214):
+		app.startGameScan("")
+	case y >= sy(224) && y < sy(268):
+		selected, ok, err := win32.SelectExecutable(app.hwnd, app.settings.Game.Path)
+		if err != nil {
+			app.gameState.Error = err.Error()
+			win32.Invalidate(app.hwnd)
+			return
+		}
+		if !ok {
+			return
+		}
+		candidate, err := game.InspectRoot(selected, "")
+		if err != nil {
+			app.gameState.Error = err.Error()
+			win32.Invalidate(app.hwnd)
+			return
+		}
+		app.settings.Game.Path = candidate.Root
+		app.settings.Game.CustomExecutable = ""
+		if !strings.EqualFold(candidate.ExeName, "YuanShen.exe") && !strings.EqualFold(candidate.ExeName, "GenshinImpact.exe") {
+			app.settings.Game.CustomExecutable = candidate.ExeName
+		}
+		if err := config.Save(app.layout.Config, app.settings); err != nil {
+			app.gameState.Error = "保存游戏路径：" + err.Error()
+			win32.Invalidate(app.hwnd)
+			return
+		}
+		app.startGameScan(candidate.Root)
+	case y >= sy(278) && y < sy(322):
+		if app.gameTask != 0 {
+			app.tasks.Cancel(app.gameTask)
+		}
+		app.gameState.Scanning = false
+		app.gameState.Status = "扫描已取消"
+		win32.Invalidate(app.hwnd)
+	}
+}
+
+func (app *application) startGameScan(manualRoot string) {
+	if app.gameTask != 0 {
+		app.tasks.Cancel(app.gameTask)
+	}
+	app.gameState = gameViewState{Scanning: true, Status: "正在只读扫描本机游戏…"}
+	win32.Invalidate(app.hwnd)
+	gameSettings := app.settings.Game
+	taskID := app.tasks.Run(func(ctx context.Context, id uint64) {
+		state := gameViewState{Scanning: true, Status: "正在验证候选路径…"}
+		publish := func() {
+			update := gameUpdate{taskID: id, state: state}
+			select {
+			case app.gameUpdates <- update:
+			default:
+				select {
+				case <-app.gameUpdates:
+				default:
+				}
+				select {
+				case app.gameUpdates <- update:
+				default:
+				}
+			}
+			win32.PostMessage(app.hwnd, messageGame, 0, 0)
+		}
+
+		var candidate game.Candidate
+		var err error
+		if manualRoot != "" {
+			candidate, err = game.InspectRoot(manualRoot, gameSettings.CustomExecutable)
+			state.CandidateCount = 1
+		} else if gameSettings.Path != "" {
+			candidate, err = game.InspectRoot(gameSettings.Path, gameSettings.CustomExecutable)
+			state.CandidateCount = 1
+		}
+		if manualRoot == "" && (gameSettings.Path == "" || err != nil) {
+			var discovery game.Discovery
+			discovery, err = game.AutoDiscover(ctx, "", gameSettings.CustomExecutable)
+			state.CandidateCount = len(discovery.Candidates)
+			if err == nil {
+				candidate, err = game.SelectSingle(discovery)
+			}
+		}
+		if err != nil {
+			if errors.Is(err, context.Canceled) {
+				return
+			}
+			state.Scanning = false
+			state.Error = err.Error()
+			if state.CandidateCount > 1 {
+				state.Status = fmt.Sprintf("发现 %d 个安装，请手动选择游戏 EXE", state.CandidateCount)
+			} else {
+				state.Status = "未找到有效游戏安装"
+			}
+			publish()
+			return
+		}
+		state.Candidate = &candidate
+		state.Status = "正在计算目录大小（可取消）…"
+		publish()
+		total, skipped, sizeErr := game.DirectorySize(ctx, candidate.Root, func(progress game.SizeProgress) {
+			state.Size = progress
+			publish()
+		})
+		if errors.Is(sizeErr, context.Canceled) {
+			return
+		}
+		state.Size, state.Skipped = total, skipped
+		state.Scanning = false
+		if sizeErr != nil {
+			state.Error = sizeErr.Error()
+		}
+		state.Status = "只读扫描完成"
+		state.Running, _ = game.RunningProcesses(candidate)
+		publish()
+
+		ticker := time.NewTicker(2 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				state.Running, _ = game.RunningProcesses(candidate)
+				publish()
+			}
+		}
+	})
+	app.gameTask = taskID
+}
+
+func (app *application) paintGame(dc win32.HDC, client win32.Rect, left int32) {
+	cardBrush := win32.CreateSolidBrush(win32.Color(25, 29, 39))
+	defer win32.DeleteObject(uintptr(cardBrush))
+	buttonBrush := win32.CreateSolidBrush(win32.Color(35, 40, 54))
+	defer win32.DeleteObject(uintptr(buttonBrush))
+	accentBrush := win32.CreateSolidBrush(win32.Color(52, 66, 112))
+	defer win32.DeleteObject(uintptr(accentBrush))
+	right := client.Right - win32.Scale(42, app.dpi)
+	row := func(top, bottom int32, brush win32.HBRUSH) win32.Rect {
+		rect := win32.Rect{Left: left, Top: win32.Scale(top, app.dpi), Right: right, Bottom: win32.Scale(bottom, app.dpi)}
+		win32.FillRect(dc, &rect, brush)
+		return rect
+	}
+	draw := func(text string, rect win32.Rect, color uint32) {
+		win32.SetTextColor(dc, color)
+		rect.Left += win32.Scale(18, app.dpi)
+		rect.Right -= win32.Scale(12, app.dpi)
+		win32.DrawText(dc, text, &rect, win32.DT_LEFT|win32.DT_VCENTER|win32.DT_SINGLELINE|win32.DT_END_ELLIPSIS)
+	}
+	draw("自动重新扫描", row(170, 214, accentBrush), win32.Color(235, 238, 248))
+	draw("手动选择游戏 EXE（支持自定义文件名）", row(224, 268, buttonBrush), win32.Color(225, 229, 242))
+	cancelText := "取消当前扫描"
+	if !app.gameState.Scanning {
+		cancelText = "停止后台状态刷新"
+	}
+	draw(cancelText, row(278, 322, buttonBrush), win32.Color(190, 197, 216))
+
+	state := app.gameState
+	statusColor := win32.Color(145, 154, 180)
+	if state.Error != "" {
+		statusColor = win32.Color(255, 126, 126)
+	}
+	draw(state.Status, row(340, 380, cardBrush), statusColor)
+	if state.Candidate == nil {
+		if state.Error != "" {
+			draw("详情："+state.Error, row(390, 434, cardBrush), win32.Color(255, 126, 126))
+		}
+		return
+	}
+	candidate := state.Candidate
+	draw("路径："+candidate.Root, row(390, 430, cardBrush), win32.Color(225, 229, 242))
+	draw(fmt.Sprintf("程序：%s    版本：%s    区服：%s", candidate.ExeName, valueOrUnknown(candidate.Version), candidate.Server.String()), row(440, 480, cardBrush), win32.Color(190, 197, 216))
+	running := "未运行"
+	if len(state.Running) > 0 {
+		if state.Running[0].VerifiedPath {
+			running = fmt.Sprintf("运行中（PID %d，路径和创建时间已核验）", state.Running[0].PID)
+		} else {
+			running = fmt.Sprintf("可能运行中（PID %d，权限不足，仅名称匹配）", state.Running[0].PID)
+		}
+	}
+	draw(fmt.Sprintf("大小：%s（%d 个文件，跳过 %d）    状态：%s", formatBytes(state.Size.Bytes), state.Size.Files, state.Skipped, running), row(490, 534, cardBrush), win32.Color(166, 174, 197))
+}
+
+func valueOrUnknown(value string) string {
+	if strings.TrimSpace(value) == "" {
+		return "未知"
+	}
+	return value
+}
+
+func formatBytes(value uint64) string {
+	const (
+		kiB = 1024
+		miB = 1024 * kiB
+		giB = 1024 * miB
+	)
+	switch {
+	case value >= giB:
+		return fmt.Sprintf("%.2f GiB", float64(value)/giB)
+	case value >= miB:
+		return fmt.Sprintf("%.2f MiB", float64(value)/miB)
+	case value >= kiB:
+		return fmt.Sprintf("%.2f KiB", float64(value)/kiB)
+	default:
+		return fmt.Sprintf("%d B", value)
+	}
 }
 
 func (app *application) startBackgroundDiagnostics() {

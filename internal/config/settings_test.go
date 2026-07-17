@@ -84,3 +84,23 @@ func TestInputEnableIsNotRestoredAcrossRestart(t *testing.T) {
 		t.Fatalf("interval = %d, want 100", loaded.Settings.Input.IntervalMS)
 	}
 }
+
+func TestSchemaTwoMigratesGameSettingsAndValidatesCustomExecutable(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	data := []byte(`{"schemaVersion":2,"window":{"x":1,"y":2,"width":1100,"height":720},"input":{"mode":0,"triggerKey":119,"outputKey":70,"stopKey":123,"intervalMs":50},"game":{"path":"  C:\\\\Games\\\\原神  ","customExecutable":"Custom.exe"}}`)
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Settings.SchemaVersion != CurrentSchemaVersion || loaded.Settings.Game.CustomExecutable != "Custom.exe" || loaded.Settings.Game.Path != `C:\\Games\\原神` {
+		t.Fatalf("migrated settings = %+v", loaded.Settings)
+	}
+	settings := Default()
+	settings.Game.CustomExecutable = `..\\evil.exe`
+	if err := Save(filepath.Join(t.TempDir(), "bad.json"), settings); err == nil {
+		t.Fatal("path-like custom executable accepted")
+	}
+}

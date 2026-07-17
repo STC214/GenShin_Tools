@@ -27,28 +27,28 @@ try {
     Write-Host '[S03] 200 native hook install/uninstall cycles'
     Invoke-GoTest -GoArguments @('-run', 'TestNativeHooksStartAndClose', '-count=200', './internal/input')
 
-    Write-Host '[S03] Direct SendInput keyboard/left/right loopback'
-    $env:GENSHINTOOLS_INPUT_INTEGRATION = '1'
-    Invoke-GoTest -GoArguments @('-run', 'TestSendInputLoopback', '-v', './internal/input')
+    Write-Host '[S03] Direct SendInput keyboard/left/right capture (events swallowed)'
+    $env:GENSHINTOOLS_INPUT_CAPTURE = '1'
+    Invoke-GoTest -GoArguments @('-run', 'TestCapturedSendInputPairs', '-v', './internal/input')
 
-    Write-Host '[S03] Full engine cadence grid: 30/50/100/250 ms x keyboard/left/right'
-    Invoke-GoTest -GoArguments @('-run', 'TestNativeEngineLoopback', '-v', './internal/input')
+    Write-Host '[S03] Full engine captured cadence grid: 30/50/100/250 ms x keyboard/left/right'
+    Invoke-GoTest -GoArguments @('-run', 'TestCapturedNativeEngine', '-v', './internal/input')
 
     if ($SoakMinutes -gt 0) {
         $env:GENSHINTOOLS_INPUT_INTERVAL_MS = '50'
         $env:GENSHINTOOLS_INPUT_SOAK_SECONDS = [string]($SoakMinutes * 60)
-        Write-Host "[S03] Long soak: $SoakMinutes minute(s) each x keyboard/left/right"
-        Invoke-GoTest -GoArguments @('-run', 'TestNativeEngineLoopback', '-v', '-timeout', "$($SoakMinutes * 4 + 2)m", './internal/input')
+        Write-Host "[S03] Captured long soak: $SoakMinutes minute(s) each x keyboard/left/right (events swallowed)"
+        Invoke-GoTest -GoArguments @('-run', 'TestCapturedNativeEngine', '-v', '-timeout', "$($SoakMinutes * 4 + 2)m", './internal/input')
     }
 
     Write-Host '[S03] Whole-project regression'
-    Remove-Item Env:\GENSHINTOOLS_INPUT_INTEGRATION -ErrorAction SilentlyContinue
+    Remove-Item Env:\GENSHINTOOLS_INPUT_CAPTURE -ErrorAction SilentlyContinue
     Remove-Item Env:\GENSHINTOOLS_INPUT_INTERVAL_MS -ErrorAction SilentlyContinue
     Remove-Item Env:\GENSHINTOOLS_INPUT_SOAK_SECONDS -ErrorAction SilentlyContinue
     Invoke-GoTest -GoArguments @('./...')
     Write-Host '[S03] PASS'
 } finally {
-    Remove-Item Env:\GENSHINTOOLS_INPUT_INTEGRATION -ErrorAction SilentlyContinue
+    Remove-Item Env:\GENSHINTOOLS_INPUT_CAPTURE -ErrorAction SilentlyContinue
     Remove-Item Env:\GENSHINTOOLS_INPUT_INTERVAL_MS -ErrorAction SilentlyContinue
     Remove-Item Env:\GENSHINTOOLS_INPUT_SOAK_SECONDS -ErrorAction SilentlyContinue
     Pop-Location
