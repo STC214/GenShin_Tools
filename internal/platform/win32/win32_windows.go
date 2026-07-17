@@ -137,6 +137,11 @@ const (
 	CS_VREDRAW = 0x0001
 
 	WS_OVERLAPPEDWINDOW = 0x00CF0000
+	WS_CHILD            = 0x40000000
+	WS_VISIBLE          = 0x10000000
+	WS_TABSTOP          = 0x00010000
+	WS_BORDER           = 0x00800000
+	ES_AUTOHSCROLL      = 0x0080
 	CW_USEDEFAULT       = ^uint32(0x7fffffff)
 
 	SW_HIDE       = 0
@@ -152,8 +157,10 @@ const (
 	WM_QUERYENDSESSION  = 0x0011
 	WM_ENDSESSION       = 0x0016
 	WM_GETMINMAXINFO    = 0x0024
+	WM_SETFONT          = 0x0030
 	WM_ERASEBKGND       = 0x0014
 	WM_COMMAND          = 0x0111
+	WM_CTLCOLOREDIT     = 0x0133
 	WM_SYSCOMMAND       = 0x0112
 	WM_MOUSEMOVE        = 0x0200
 	WM_LBUTTONDOWN      = 0x0201
@@ -169,9 +176,12 @@ const (
 	SIZE_MINIMIZED = 1
 	SC_MINIMIZE    = 0xF020
 
-	VK_UP     = 0x26
-	VK_DOWN   = 0x28
-	VK_RETURN = 0x0D
+	VK_UP           = 0x26
+	VK_DOWN         = 0x28
+	VK_RETURN       = 0x0D
+	EM_SETLIMITTEXT = 0x00C5
+	EM_SETCUEBANNER = 0x1501
+	SM_CMONITORS    = 80
 
 	PBT_APMSUSPEND          = 0x0004
 	PBT_APMRESUMEAUTOMATIC  = 0x0012
@@ -221,10 +231,12 @@ var (
 	ole32    = windows.NewLazySystemDLL("ole32.dll")
 	wtsapi32 = windows.NewLazySystemDLL("wtsapi32.dll")
 	comdlg32 = windows.NewLazySystemDLL("comdlg32.dll")
+	uxtheme  = windows.NewLazySystemDLL("uxtheme.dll")
 
 	procRegisterClassExW              = user32.NewProc("RegisterClassExW")
 	procGetOpenFileNameW              = comdlg32.NewProc("GetOpenFileNameW")
 	procCommDlgExtendedError          = comdlg32.NewProc("CommDlgExtendedError")
+	procSetWindowTheme                = uxtheme.NewProc("SetWindowTheme")
 	procCreateWindowExW               = user32.NewProc("CreateWindowExW")
 	procDefWindowProcW                = user32.NewProc("DefWindowProcW")
 	procShowWindow                    = user32.NewProc("ShowWindow")
@@ -249,6 +261,10 @@ var (
 	procFillRect                      = user32.NewProc("FillRect")
 	procDrawTextW                     = user32.NewProc("DrawTextW")
 	procSetWindowTextW                = user32.NewProc("SetWindowTextW")
+	procGetWindowTextLengthW          = user32.NewProc("GetWindowTextLengthW")
+	procGetWindowTextW                = user32.NewProc("GetWindowTextW")
+	procSendMessageW                  = user32.NewProc("SendMessageW")
+	procGetSystemMetrics              = user32.NewProc("GetSystemMetrics")
 	procInvalidateRect                = user32.NewProc("InvalidateRect")
 	procMonitorFromRect               = user32.NewProc("MonitorFromRect")
 	procGetMonitorInfoW               = user32.NewProc("GetMonitorInfoW")
@@ -267,6 +283,7 @@ var (
 	procDeleteObject     = gdi32.NewProc("DeleteObject")
 	procSetBkMode        = gdi32.NewProc("SetBkMode")
 	procSetTextColor     = gdi32.NewProc("SetTextColor")
+	procSetBkColor       = gdi32.NewProc("SetBkColor")
 	procSelectObject     = gdi32.NewProc("SelectObject")
 	procCreateFontW      = gdi32.NewProc("CreateFontW")
 
@@ -359,6 +376,14 @@ func CreateWindow(className, title *uint16, x, y, width, height int32, instance 
 	return HWND(value), nil
 }
 
+func CreateControl(className, text string, style uint32, x, y, width, height int32, parent HWND, id uintptr, instance HINSTANCE) (HWND, error) {
+	value, _, err := procCreateWindowExW.Call(0, uintptr(unsafe.Pointer(UTF16(className))), uintptr(unsafe.Pointer(UTF16(text))), uintptr(style), uintptr(x), uintptr(y), uintptr(width), uintptr(height), uintptr(parent), id, uintptr(instance), 0)
+	if value == 0 {
+		return 0, fmt.Errorf("CreateWindowExW(%s): %w", className, errno(err))
+	}
+	return HWND(value), nil
+}
+
 func DefWindowProc(hwnd HWND, message uint32, wParam, lParam uintptr) uintptr {
 	value, _, _ := procDefWindowProcW.Call(uintptr(hwnd), uintptr(message), wParam, lParam)
 	return value
@@ -418,6 +443,37 @@ func SetWindowPos(hwnd HWND, rect Rect, flags uint32) {
 func SetWindowText(hwnd HWND, value string) {
 	procSetWindowTextW.Call(uintptr(hwnd), uintptr(unsafe.Pointer(UTF16(value))))
 }
+
+func GetWindowText(hwnd HWND) string {
+	length, _, _ := procGetWindowTextLengthW.Call(uintptr(hwnd))
+	buffer := make([]uint16, length+1)
+	if len(buffer) == 0 {
+		return ""
+	}
+	procGetWindowTextW.Call(uintptr(hwnd), uintptr(unsafe.Pointer(&buffer[0])), uintptr(len(buffer)))
+	return windows.UTF16ToString(buffer)
+}
+
+func SendMessage(hwnd HWND, message uint32, wParam, lParam uintptr) uintptr {
+	value, _, _ := procSendMessageW.Call(uintptr(hwnd), uintptr(message), wParam, lParam)
+	return value
+}
+
+func SetControlFont(hwnd HWND, font HFONT) { SendMessage(hwnd, WM_SETFONT, uintptr(font), 1) }
+func SetTextLimit(hwnd HWND, limit uint32) { SendMessage(hwnd, EM_SETLIMITTEXT, uintptr(limit), 0) }
+func SetCueBanner(hwnd HWND, value string) {
+	SendMessage(hwnd, EM_SETCUEBANNER, 1, uintptr(unsafe.Pointer(UTF16(value))))
+}
+func EnableDarkControl(hwnd HWND) {
+	procSetWindowTheme.Call(uintptr(hwnd), uintptr(unsafe.Pointer(UTF16("DarkMode_Explorer"))), 0)
+}
+func MonitorCount() int {
+	value, _, _ := procGetSystemMetrics.Call(SM_CMONITORS)
+	if int(value) < 1 {
+		return 1
+	}
+	return int(value)
+}
 func Invalidate(hwnd HWND) { procInvalidateRect.Call(uintptr(hwnd), 0, 0) }
 
 func BeginPaint(hwnd HWND, paint *PaintStruct) HDC {
@@ -441,6 +497,9 @@ func FillRect(dc HDC, rect *Rect, brush HBRUSH) {
 }
 func SetTransparentBackground(dc HDC)   { procSetBkMode.Call(uintptr(dc), TRANSPARENT) }
 func SetTextColor(dc HDC, color uint32) { procSetTextColor.Call(uintptr(dc), uintptr(color)) }
+func SetBackgroundColor(dc HDC, color uint32) {
+	procSetBkColor.Call(uintptr(dc), uintptr(color))
+}
 func SelectObject(dc HDC, object uintptr) uintptr {
 	value, _, _ := procSelectObject.Call(uintptr(dc), object)
 	return value

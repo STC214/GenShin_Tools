@@ -43,6 +43,12 @@ Run the S03 input state-machine, hook lifecycle and swallowed real `SendInput` c
 ./scripts/test-s03-input.ps1
 ```
 
+Run the S05 real-process pure-launch smoke test after building the release executable:
+
+```powershell
+./scripts/test-s05-launch.ps1
+```
+
 Optionally run a one-minute captured soak for each of keyboard/left/right (about three minutes total):
 
 ```powershell

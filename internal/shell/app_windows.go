@@ -18,6 +18,7 @@ import (
 	"genshintools/internal/diagnostics"
 	"genshintools/internal/game"
 	"genshintools/internal/input"
+	"genshintools/internal/launch"
 	"genshintools/internal/paths"
 	"genshintools/internal/platform/win32"
 	"genshintools/internal/taskrunner"
@@ -33,6 +34,7 @@ const (
 	messageInput    = win32.WM_APP + 4
 	messagePhysical = win32.WM_APP + 5
 	messageGame     = win32.WM_APP + 6
+	messageLaunch   = win32.WM_APP + 7
 
 	trayID   = 1
 	menuShow = 1001
@@ -74,6 +76,13 @@ type application struct {
 	gameUpdates          chan gameUpdate
 	gameState            gameViewState
 	gameTask             uint64
+	launchEngine         *launch.Engine
+	launchUpdates        chan launch.Snapshot
+	launchSnap           launch.Snapshot
+	launchUIError        string
+	shortcutStatus       string
+	customArgumentsEdit  win32.HWND
+	editBrush            win32.HBRUSH
 	sessionNotifications bool
 	shutdown             sync.Once
 	cleanExit            bool
@@ -98,7 +107,7 @@ type gameUpdate struct {
 
 var navigation = []struct{ title, subtitle string }{
 	{"首页", "启动状态与常用操作将在后续阶段接入。"},
-	{"游戏管理", "S04：只读发现、版本、区服、大小和运行状态。"},
+	{"游戏管理", "S05：只读状态、纯净启动和启动设置。"},
 	{"输入增强", "S03 将优先实现鼠标连点与键盘连按。"},
 	{"插件", "S09/S10 才会启用注入与插件，当前保持隔离。"},
 	{"设置", "S02 已启用便携配置、日志、DPI 和安全退出。"},
@@ -161,6 +170,7 @@ func Run(layout paths.Layout, build buildinfo.Info) (returnErr error) {
 		inputUpdates:   make(chan input.Snapshot, 1),
 		physicalEvents: make(chan input.PhysicalEvent, 16),
 		gameUpdates:    make(chan gameUpdate, 1),
+		launchUpdates:  make(chan launch.Snapshot, 1),
 	}
 	active = app
 	defer func() { active = nil }()
@@ -172,6 +182,10 @@ func Run(layout paths.Layout, build buildinfo.Info) (returnErr error) {
 
 	if err := app.createWindow(); err != nil {
 		return err
+	}
+	if err := app.startLauncher(); err != nil {
+		app.requestShutdown()
+		return fmt.Errorf("start pure launcher: %w", err)
 	}
 	if err := app.startInput(); err != nil {
 		app.requestShutdown()
@@ -243,6 +257,10 @@ func (app *application) createWindow() error {
 	app.hwnd = hwnd
 	app.dpi = win32.DPIForWindow(hwnd)
 	app.recreateFonts()
+	if err := app.createLaunchControls(); err != nil {
+		win32.DestroyWindow(hwnd)
+		return err
+	}
 	win32.EnableDarkTitleBar(hwnd)
 	app.taskbarMsg = win32.RegisterWindowMessage("TaskbarCreated")
 	app.addTrayIcon()
@@ -347,6 +365,19 @@ func (app *application) handleMessage(hwnd win32.HWND, message uint32, wParam, l
 				return 0
 			}
 		}
+	case messageLaunch:
+		previous := app.launchSnap.State
+		for {
+			select {
+			case app.launchSnap = <-app.launchUpdates:
+			default:
+				if previous != launch.StateRunning && app.launchSnap.State == launch.StateRunning {
+					app.applyPostLaunch(app.launchSnap.PostBehavior)
+				}
+				win32.Invalidate(hwnd)
+				return 0
+			}
+		}
 	case messageTray:
 		event := uint32(lParam & 0xffff)
 		switch event {
@@ -365,6 +396,7 @@ func (app *application) handleMessage(hwnd win32.HWND, message uint32, wParam, l
 		x, y := int(int16(lParam&0xffff)), int(int16((lParam>>16)&0xffff))
 		if selected := app.navigationAt(x, y); selected >= 0 && selected != app.selected {
 			app.selected = selected
+			app.updateLaunchControlVisibility()
 			win32.Invalidate(hwnd)
 		} else if app.selected == 1 && x >= int(win32.Scale(210, app.dpi)) {
 			app.gameClick(x, y)
@@ -377,15 +409,21 @@ func (app *application) handleMessage(hwnd win32.HWND, message uint32, wParam, l
 		case win32.VK_UP:
 			if app.selected > 0 {
 				app.selected--
+				app.updateLaunchControlVisibility()
 				win32.Invalidate(hwnd)
 			}
 		case win32.VK_DOWN:
 			if app.selected < len(navigation)-1 {
 				app.selected++
+				app.updateLaunchControlVisibility()
 				win32.Invalidate(hwnd)
 			}
 		}
 		return 0
+	case win32.WM_CTLCOLOREDIT:
+		win32.SetTextColor(win32.HDC(wParam), win32.Color(225, 229, 242))
+		win32.SetBackgroundColor(win32.HDC(wParam), win32.Color(25, 29, 39))
+		return uintptr(app.editBrush)
 	case win32.WM_PAINT:
 		app.paint(hwnd)
 		return 0
@@ -399,12 +437,14 @@ func (app *application) handleMessage(hwnd win32.HWND, message uint32, wParam, l
 			win32.ShowWindow(hwnd, win32.SW_HIDE)
 		} else {
 			app.captureBounds()
+			app.layoutLaunchControls()
 			win32.Invalidate(hwnd)
 		}
 		return 0
 	case win32.WM_DPICHANGED:
 		app.dpi = uint32(wParam & 0xffff)
 		app.recreateFonts()
+		app.layoutLaunchControls()
 		suggested := *(*win32.Rect)(unsafe.Pointer(lParam))
 		win32.SetWindowPos(hwnd, suggested, win32.SWP_NOZORDER|win32.SWP_NOACTIVATE)
 		return 0
@@ -461,6 +501,7 @@ func (app *application) restore() {
 
 func (app *application) requestShutdown() {
 	app.shutdown.Do(func() {
+		app.syncLaunchConfig()
 		app.captureBounds()
 		app.settings.Window = app.lastBounds
 		if err := config.Save(app.layout.Config, app.settings); err != nil {
@@ -474,6 +515,10 @@ func (app *application) requestShutdown() {
 			app.inputNative.Close()
 			app.inputNative = nil
 		}
+		if app.launchEngine != nil {
+			app.launchEngine.Close()
+			app.launchEngine = nil
+		}
 		if app.sessionNotifications {
 			win32.UnregisterSessionNotifications(app.hwnd)
 			app.sessionNotifications = false
@@ -482,6 +527,8 @@ func (app *application) requestShutdown() {
 			app.logger.Error("background task shutdown timed out", nil)
 		}
 		app.deleteFonts()
+		win32.DeleteObject(uintptr(app.editBrush))
+		app.editBrush = 0
 		app.cleanExit = true
 		win32.DestroyWindow(app.hwnd)
 	})
@@ -504,6 +551,9 @@ func (app *application) recreateFonts() {
 	app.fontTitle = win32.CreateFont(-win32.Scale(30, app.dpi), 600, "Segoe UI")
 	app.fontBody = win32.CreateFont(-win32.Scale(16, app.dpi), 400, "Segoe UI")
 	app.fontNav = win32.CreateFont(-win32.Scale(16, app.dpi), 500, "Microsoft YaHei UI")
+	if app.customArgumentsEdit != 0 {
+		win32.SetControlFont(app.customArgumentsEdit, app.fontBody)
+	}
 }
 
 func (app *application) deleteFonts() {
@@ -859,46 +909,184 @@ func virtualKeyName(key uint32) string {
 	return fmt.Sprintf("VK 0x%02X", key)
 }
 
-func (app *application) gameClick(_, y int) {
+func (app *application) createLaunchControls() error {
+	edit, err := win32.CreateControl("EDIT", app.settings.Launch.CustomArguments, win32.WS_CHILD|win32.WS_BORDER|win32.WS_TABSTOP|win32.ES_AUTOHSCROLL, 0, 0, 100, 32, app.hwnd, 2001, app.instance)
+	if err != nil {
+		return err
+	}
+	app.customArgumentsEdit = edit
+	app.editBrush = win32.CreateSolidBrush(win32.Color(25, 29, 39))
+	win32.SetTextLimit(edit, 8192)
+	win32.SetCueBanner(edit, "自定义启动参数（可留空，例如 -force-d3d11）")
+	win32.SetControlFont(edit, app.fontBody)
+	win32.EnableDarkControl(edit)
+	app.layoutLaunchControls()
+	app.updateLaunchControlVisibility()
+	return nil
+}
+
+func (app *application) layoutLaunchControls() {
+	if app.customArgumentsEdit == 0 || app.hwnd == 0 {
+		return
+	}
+	client := win32.GetClientRect(app.hwnd)
+	left := win32.Scale(252, app.dpi)
+	top := win32.Scale(352, app.dpi)
+	right := client.Right - win32.Scale(42, app.dpi)
+	height := win32.Scale(36, app.dpi)
+	win32.SetWindowPos(app.customArgumentsEdit, win32.Rect{Left: left, Top: top, Right: right, Bottom: top + height}, win32.SWP_NOZORDER)
+}
+
+func (app *application) updateLaunchControlVisibility() {
+	if app.customArgumentsEdit == 0 {
+		return
+	}
+	if app.selected == 1 {
+		win32.ShowWindow(app.customArgumentsEdit, win32.SW_SHOWNORMAL)
+	} else {
+		win32.ShowWindow(app.customArgumentsEdit, win32.SW_HIDE)
+	}
+}
+
+func (app *application) syncLaunchConfig() bool {
+	if app.customArgumentsEdit != 0 {
+		app.settings.Launch.CustomArguments = win32.GetWindowText(app.customArgumentsEdit)
+	}
+	normalized, err := app.settings.Launch.Normalized()
+	if err != nil {
+		app.launchUIError = err.Error()
+		return false
+	}
+	app.settings.Launch = normalized
+	if err := config.Save(app.layout.Config, app.settings); err != nil {
+		app.launchUIError = "保存启动设置：" + err.Error()
+		return false
+	}
+	app.launchUIError = ""
+	return true
+}
+
+func (app *application) startLauncher() error {
+	engine, err := launch.NewEngine(launch.NativeStarter{}, game.RunningProcesses, func(snapshot launch.Snapshot) {
+		select {
+		case app.launchUpdates <- snapshot:
+		default:
+			select {
+			case <-app.launchUpdates:
+			default:
+			}
+			select {
+			case app.launchUpdates <- snapshot:
+			default:
+			}
+		}
+		win32.PostMessage(app.hwnd, messageLaunch, 0, 0)
+	})
+	if err != nil {
+		return err
+	}
+	app.launchEngine = engine
+	app.launchSnap = engine.Snapshot()
+	return nil
+}
+
+func (app *application) applyPostLaunch(behavior launch.PostBehavior) {
+	switch behavior {
+	case launch.PostMinimize:
+		win32.ShowWindow(app.hwnd, win32.SW_HIDE)
+	case launch.PostExit:
+		app.requestShutdown()
+	}
+}
+
+func (app *application) gameClick(x, y int) {
 	sy := func(value int32) int { return int(win32.Scale(value, app.dpi)) }
 	switch {
 	case y >= sy(170) && y < sy(214):
-		app.startGameScan("")
-	case y >= sy(224) && y < sy(268):
-		selected, ok, err := win32.SelectExecutable(app.hwnd, app.settings.Game.Path)
-		if err != nil {
-			app.gameState.Error = err.Error()
-			win32.Invalidate(app.hwnd)
-			return
+		if app.gameState.Candidate == nil || app.launchEngine == nil || !app.syncLaunchConfig() {
+			app.launchUIError = "请先选择并完成游戏扫描"
+			break
 		}
-		if !ok {
-			return
+		app.launchUIError = ""
+		if err := app.launchEngine.Launch(*app.gameState.Candidate, app.settings.Launch); err != nil {
+			app.launchUIError = err.Error()
 		}
-		candidate, err := game.InspectRoot(selected, "")
-		if err != nil {
-			app.gameState.Error = err.Error()
-			win32.Invalidate(app.hwnd)
-			return
+	case y >= sy(220) && y < sy(258):
+		app.settings.Launch.WindowMode = (app.settings.Launch.WindowMode + 1) % 4
+		app.syncLaunchConfig()
+	case y >= sy(264) && y < sy(302):
+		presets := [][2]int{{1280, 720}, {1920, 1080}, {2560, 1440}, {3840, 2160}, {0, 0}}
+		index := 0
+		for i, preset := range presets {
+			if preset[0] == app.settings.Launch.Width && preset[1] == app.settings.Launch.Height {
+				index = (i + 1) % len(presets)
+				break
+			}
 		}
-		app.settings.Game.Path = candidate.Root
-		app.settings.Game.CustomExecutable = ""
-		if !strings.EqualFold(candidate.ExeName, "YuanShen.exe") && !strings.EqualFold(candidate.ExeName, "GenshinImpact.exe") {
-			app.settings.Game.CustomExecutable = candidate.ExeName
+		app.settings.Launch.Width, app.settings.Launch.Height = presets[index][0], presets[index][1]
+		app.syncLaunchConfig()
+	case y >= sy(308) && y < sy(346):
+		midpoint := int(win32.Scale(650, app.dpi))
+		if x < midpoint {
+			app.settings.Launch.Monitor = (app.settings.Launch.Monitor + 1) % (win32.MonitorCount() + 1)
+		} else {
+			app.settings.Launch.PostBehavior = (app.settings.Launch.PostBehavior + 1) % 3
 		}
-		if err := config.Save(app.layout.Config, app.settings); err != nil {
-			app.gameState.Error = "保存游戏路径：" + err.Error()
-			win32.Invalidate(app.hwnd)
-			return
+		app.syncLaunchConfig()
+	case y >= sy(396) && y < sy(434):
+		contentLeft := int(win32.Scale(252, app.dpi))
+		clientRight := int(win32.GetClientRect(app.hwnd).Right - win32.Scale(42, app.dpi))
+		column := (x - contentLeft) * 3 / max(1, clientRight-contentLeft)
+		switch column {
+		case 0:
+			if app.gameState.Scanning {
+				app.tasks.Cancel(app.gameTask)
+				app.gameState.Scanning = false
+				app.gameState.Status = "扫描已取消"
+			} else {
+				app.startGameScan("")
+			}
+		case 1:
+			selected, ok, err := win32.SelectExecutable(app.hwnd, app.settings.Game.Path)
+			if err != nil {
+				app.gameState.Error = err.Error()
+				win32.Invalidate(app.hwnd)
+				return
+			}
+			if !ok {
+				return
+			}
+			candidate, err := game.InspectRoot(selected, "")
+			if err != nil {
+				app.gameState.Error = err.Error()
+				win32.Invalidate(app.hwnd)
+				return
+			}
+			app.settings.Game.Path = candidate.Root
+			app.settings.Game.CustomExecutable = ""
+			if !strings.EqualFold(candidate.ExeName, "YuanShen.exe") && !strings.EqualFold(candidate.ExeName, "GenshinImpact.exe") {
+				app.settings.Game.CustomExecutable = candidate.ExeName
+			}
+			if err := config.Save(app.layout.Config, app.settings); err != nil {
+				app.gameState.Error = "保存游戏路径：" + err.Error()
+				win32.Invalidate(app.hwnd)
+				return
+			}
+			app.startGameScan(candidate.Root)
+		case 2:
+			if app.gameState.Candidate == nil || !app.syncLaunchConfig() {
+				app.shortcutStatus = "请先选择游戏"
+				break
+			}
+			path, err := launch.CreateDesktopShortcut("原神 - Genshin Tools", *app.gameState.Candidate, app.settings.Launch)
+			if err != nil {
+				app.shortcutStatus = "快捷方式失败：" + err.Error()
+			} else {
+				app.shortcutStatus = "已创建：" + path
+			}
 		}
-		app.startGameScan(candidate.Root)
-	case y >= sy(278) && y < sy(322):
-		if app.gameTask != 0 {
-			app.tasks.Cancel(app.gameTask)
-		}
-		app.gameState.Scanning = false
-		app.gameState.Status = "扫描已取消"
-		win32.Invalidate(app.hwnd)
 	}
+	win32.Invalidate(app.hwnd)
 }
 
 func (app *application) startGameScan(manualRoot string) {
@@ -1011,38 +1199,70 @@ func (app *application) paintGame(dc win32.HDC, client win32.Rect, left int32) {
 		rect.Right -= win32.Scale(12, app.dpi)
 		win32.DrawText(dc, text, &rect, win32.DT_LEFT|win32.DT_VCENTER|win32.DT_SINGLELINE|win32.DT_END_ELLIPSIS)
 	}
-	draw("自动重新扫描", row(170, 214, accentBrush), win32.Color(235, 238, 248))
-	draw("手动选择游戏 EXE（支持自定义文件名）", row(224, 268, buttonBrush), win32.Color(225, 229, 242))
-	cancelText := "取消当前扫描"
-	if !app.gameState.Scanning {
-		cancelText = "停止后台状态刷新"
+	launchText := "纯净启动游戏"
+	if app.launchSnap.State == launch.StateStarting {
+		launchText = "正在启动…"
+	} else if app.launchSnap.State == launch.StateRunning {
+		launchText = fmt.Sprintf("游戏运行中（本次 PID %d）", app.launchSnap.PID)
 	}
-	draw(cancelText, row(278, 322, buttonBrush), win32.Color(190, 197, 216))
+	draw(launchText, row(170, 214, accentBrush), win32.Color(235, 238, 248))
+	draw("窗口模式："+app.settings.Launch.WindowMode.String()+"    单击切换", row(220, 258, buttonBrush), win32.Color(225, 229, 242))
+	resolution := "游戏默认"
+	if app.settings.Launch.Width > 0 {
+		resolution = fmt.Sprintf("%d × %d", app.settings.Launch.Width, app.settings.Launch.Height)
+	}
+	draw("分辨率："+resolution+"    单击切换预设", row(264, 302, buttonBrush), win32.Color(225, 229, 242))
+	midpoint := left + (right-left)/2
+	monitorRect := win32.Rect{Left: left, Top: win32.Scale(308, app.dpi), Right: midpoint - win32.Scale(4, app.dpi), Bottom: win32.Scale(346, app.dpi)}
+	postRect := win32.Rect{Left: midpoint + win32.Scale(4, app.dpi), Top: monitorRect.Top, Right: right, Bottom: monitorRect.Bottom}
+	win32.FillRect(dc, &monitorRect, buttonBrush)
+	win32.FillRect(dc, &postRect, buttonBrush)
+	monitor := "默认"
+	if app.settings.Launch.Monitor > 0 {
+		monitor = fmt.Sprintf("显示器 %d", app.settings.Launch.Monitor)
+	}
+	postNames := []string{"保持启动器", "最小化到托盘", "启动后退出"}
+	draw("目标："+monitor, monitorRect, win32.Color(225, 229, 242))
+	draw("之后："+postNames[app.settings.Launch.PostBehavior], postRect, win32.Color(225, 229, 242))
+
+	actionWidth := (right - left) / 3
+	actions := []string{"重新扫描/取消", "选择游戏 EXE", "创建桌面快捷方式"}
+	for index, text := range actions {
+		rect := win32.Rect{Left: left + int32(index)*actionWidth, Top: win32.Scale(396, app.dpi), Right: left + int32(index+1)*actionWidth - win32.Scale(6, app.dpi), Bottom: win32.Scale(434, app.dpi)}
+		win32.FillRect(dc, &rect, buttonBrush)
+		draw(text, rect, win32.Color(190, 197, 216))
+	}
 
 	state := app.gameState
+	status := state.Status
 	statusColor := win32.Color(145, 154, 180)
-	if state.Error != "" {
-		statusColor = win32.Color(255, 126, 126)
+	if app.launchUIError != "" {
+		status, statusColor = "启动错误："+app.launchUIError, win32.Color(255, 126, 126)
+	} else if app.shortcutStatus != "" {
+		status = app.shortcutStatus
+	} else if app.launchSnap.State == launch.StateExited {
+		status = fmt.Sprintf("游戏已退出，代码 %d；启动器可再次启动", app.launchSnap.ExitCode)
+	} else if app.launchSnap.State == launch.StateFailed {
+		status, statusColor = "游戏进程错误："+app.launchSnap.LastError, win32.Color(255, 126, 126)
+	} else if state.Error != "" {
+		status, statusColor = state.Error, win32.Color(255, 126, 126)
 	}
-	draw(state.Status, row(340, 380, cardBrush), statusColor)
+	draw(status, row(440, 476, cardBrush), statusColor)
 	if state.Candidate == nil {
-		if state.Error != "" {
-			draw("详情："+state.Error, row(390, 434, cardBrush), win32.Color(255, 126, 126))
-		}
 		return
 	}
 	candidate := state.Candidate
-	draw("路径："+candidate.Root, row(390, 430, cardBrush), win32.Color(225, 229, 242))
-	draw(fmt.Sprintf("程序：%s    版本：%s    区服：%s", candidate.ExeName, valueOrUnknown(candidate.Version), candidate.Server.String()), row(440, 480, cardBrush), win32.Color(190, 197, 216))
+	draw("路径："+candidate.Root, row(482, 518, cardBrush), win32.Color(225, 229, 242))
+	draw(fmt.Sprintf("%s    版本 %s    %s", candidate.ExeName, valueOrUnknown(candidate.Version), candidate.Server.String()), row(524, 560, cardBrush), win32.Color(190, 197, 216))
 	running := "未运行"
 	if len(state.Running) > 0 {
 		if state.Running[0].VerifiedPath {
-			running = fmt.Sprintf("运行中（PID %d，路径和创建时间已核验）", state.Running[0].PID)
+			running = fmt.Sprintf("运行中 PID %d（路径已核验）", state.Running[0].PID)
 		} else {
-			running = fmt.Sprintf("可能运行中（PID %d，权限不足，仅名称匹配）", state.Running[0].PID)
+			running = fmt.Sprintf("可能运行 PID %d（仅名称匹配）", state.Running[0].PID)
 		}
 	}
-	draw(fmt.Sprintf("大小：%s（%d 个文件，跳过 %d）    状态：%s", formatBytes(state.Size.Bytes), state.Size.Files, state.Skipped, running), row(490, 534, cardBrush), win32.Color(166, 174, 197))
+	draw(fmt.Sprintf("%s · %d 文件 · 跳过 %d · %s", formatBytes(state.Size.Bytes), state.Size.Files, state.Skipped, running), row(566, 602, cardBrush), win32.Color(166, 174, 197))
 }
 
 func valueOrUnknown(value string) string {

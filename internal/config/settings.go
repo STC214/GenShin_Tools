@@ -2,6 +2,7 @@
 package config
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,17 +13,19 @@ import (
 	"time"
 
 	"genshintools/internal/input"
+	"genshintools/internal/launch"
 )
 
-const CurrentSchemaVersion = 3
+const CurrentSchemaVersion = 4
 
 // Settings contains only stable shell settings in S02. Feature settings are
 // added by their implementation stage instead of being guessed in advance.
 type Settings struct {
-	SchemaVersion int          `json:"schemaVersion"`
-	Window        WindowConfig `json:"window"`
-	Input         input.Config `json:"input"`
-	Game          GameConfig   `json:"game"`
+	SchemaVersion int           `json:"schemaVersion"`
+	Window        WindowConfig  `json:"window"`
+	Input         input.Config  `json:"input"`
+	Game          GameConfig    `json:"game"`
+	Launch        launch.Config `json:"launch"`
 }
 
 type WindowConfig struct {
@@ -49,7 +52,8 @@ func Default() Settings {
 			X: -1, Y: -1,
 			Width: 1100, Height: 720,
 		},
-		Input: input.DefaultConfig(),
+		Input:  input.DefaultConfig(),
+		Launch: launch.DefaultConfig(),
 	}
 }
 
@@ -62,6 +66,7 @@ func Load(path string) (LoadResult, error) {
 		return LoadResult{}, fmt.Errorf("read settings: %w", err)
 	}
 
+	data = bytes.TrimPrefix(data, []byte{0xEF, 0xBB, 0xBF})
 	settings := Default()
 	// Interval is a runtime-only duration. Clear the default before decoding so
 	// the persisted intervalMs value remains authoritative.
@@ -95,6 +100,9 @@ func migrateAndValidate(settings *Settings) error {
 	case 2:
 		settings.SchemaVersion = CurrentSchemaVersion
 	case 3:
+		settings.Launch = launch.DefaultConfig()
+		settings.SchemaVersion = CurrentSchemaVersion
+	case 4:
 	default:
 		return fmt.Errorf("unsupported schema version %d", settings.SchemaVersion)
 	}
@@ -117,6 +125,11 @@ func migrateAndValidate(settings *Settings) error {
 	if settings.Game.CustomExecutable != "" && (filepath.Base(settings.Game.CustomExecutable) != settings.Game.CustomExecutable || !strings.EqualFold(filepath.Ext(settings.Game.CustomExecutable), ".exe")) {
 		return errors.New("game custom executable must be a file name ending in .exe")
 	}
+	normalizedLaunch, err := settings.Launch.Normalized()
+	if err != nil {
+		return fmt.Errorf("launch settings: %w", err)
+	}
+	settings.Launch = normalizedLaunch
 	return nil
 }
 

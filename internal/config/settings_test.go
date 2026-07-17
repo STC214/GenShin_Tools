@@ -104,3 +104,34 @@ func TestSchemaTwoMigratesGameSettingsAndValidatesCustomExecutable(t *testing.T)
 		t.Fatal("path-like custom executable accepted")
 	}
 }
+
+func TestSchemaThreeMigratesLaunchDefaults(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	data := []byte(`{"schemaVersion":3,"window":{"x":1,"y":2,"width":1100,"height":720},"input":{"mode":0,"triggerKey":119,"outputKey":70,"stopKey":123,"intervalMs":50},"game":{}}`)
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Settings.SchemaVersion != CurrentSchemaVersion || loaded.Settings.Launch.Width != 1920 || loaded.Settings.Launch.Height != 1080 {
+		t.Fatalf("migrated settings = %+v", loaded.Settings)
+	}
+}
+
+func TestLoadAcceptsUTF8BOM(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	data := []byte(`{"schemaVersion":4,"window":{"x":1,"y":2,"width":1100,"height":720},"input":{"mode":0,"triggerKey":119,"outputKey":70,"stopKey":123,"intervalMs":50},"game":{},"launch":{"width":1920,"height":1080}}`)
+	data = append([]byte{0xEF, 0xBB, 0xBF}, data...)
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.RecoveredFrom != "" || loaded.Settings.Window.X != 1 || loaded.Settings.Launch.Width != 1920 || loaded.Settings.Input.IntervalMS != 50 {
+		t.Fatalf("BOM settings = %+v", loaded)
+	}
+}
