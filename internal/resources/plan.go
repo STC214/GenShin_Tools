@@ -14,12 +14,15 @@ const (
 	ActionKeep    PlanAction = "keep"
 	ActionInstall PlanAction = "install"
 	ActionRepair  PlanAction = "repair"
+	ActionDelete  PlanAction = "delete"
+	ActionMove    PlanAction = "move"
 )
 
 type PlanItem struct {
-	File   ManifestFile
-	Action PlanAction
-	Reason string
+	File       ManifestFile
+	Action     PlanAction
+	SourcePath string
+	Reason     string
 }
 
 type RepairPlan struct {
@@ -72,7 +75,7 @@ func findRootError(err error) error {
 func (p RepairPlan) Changes() []ManifestFile {
 	files := make([]ManifestFile, 0, len(p.Items))
 	for _, item := range p.Items {
-		if item.Action != ActionKeep {
+		if item.Action != ActionKeep && item.Action != ActionDelete && item.Action != ActionMove {
 			files = append(files, item.File)
 		}
 	}
@@ -82,7 +85,7 @@ func (p RepairPlan) Changes() []ManifestFile {
 func (p RepairPlan) RequiredCommitBytes() uint64 {
 	var total uint64
 	for _, item := range p.Items {
-		if item.Action != ActionKeep && item.File.Size > 0 {
+		if item.Action != ActionKeep && item.Action != ActionMove && item.File.Size > 0 {
 			total += uint64(item.File.Size)
 		}
 	}
@@ -91,7 +94,7 @@ func (p RepairPlan) RequiredCommitBytes() uint64 {
 
 func (p RepairPlan) ValidateStaging(stagingRoot string) error {
 	for _, item := range p.Items {
-		if item.Action == ActionKeep {
+		if item.Action == ActionKeep || item.Action == ActionDelete || item.Action == ActionMove {
 			continue
 		}
 		path := filepath.Join(stagingRoot, item.File.Path)

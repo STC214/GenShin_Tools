@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -311,6 +312,119 @@ func TestMultiFileFailureRollsBackEarlierReplacement(t *testing.T) {
 	}
 	assertFileContent(t, pathA, originalA)
 	assertFileContent(t, pathB, originalB)
+}
+
+func TestDeleteActionRollsBackWhenLaterFileIsLocked(t *testing.T) {
+	gameRoot := t.TempDir()
+	stagingRoot := t.TempDir()
+	deleteTarget := filepath.Join(gameRoot, "old-sdk.dll")
+	lockedTarget := filepath.Join(gameRoot, "locked.bin")
+	if err := os.WriteFile(deleteTarget, []byte("old sdk"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(lockedTarget, []byte("original"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	replacement := []byte("replacement")
+	replacementFile := testManifestFile("locked.bin", replacement)
+	plan := RepairPlan{Items: []PlanItem{
+		{File: ManifestFile{Path: "old-sdk.dll"}, Action: ActionDelete},
+		{File: replacementFile, Action: ActionRepair},
+	}}
+	tx, err := NewTransaction(stagingRoot, gameRoot, "delete-rollback")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Prepare(); err != nil {
+		t.Fatal(err)
+	}
+	stageFile(t, tx.StagingRoot, "locked.bin", replacement)
+	pointer, _ := windows.UTF16PtrFromString(lockedTarget)
+	handle, err := windows.CreateFile(pointer, windows.GENERIC_READ, windows.FILE_SHARE_READ, nil, windows.OPEN_EXISTING, windows.FILE_ATTRIBUTE_NORMAL, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer windows.CloseHandle(handle)
+	if err := tx.Commit(plan); err == nil {
+		t.Fatal("locked transaction unexpectedly succeeded")
+	}
+	assertFileContent(t, deleteTarget, []byte("old sdk"))
+	assertFileContent(t, lockedTarget, []byte("original"))
+}
+
+func TestMoveActionCommitsDirectoryAndFile(t *testing.T) {
+	gameRoot := t.TempDir()
+	stagingRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(gameRoot, "YuanShen_Data", "Managed"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(gameRoot, "YuanShen_Data", "Managed", "keep.bin"), []byte("keep"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(gameRoot, "YuanShen.exe"), []byte("exe"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := NewTransaction(stagingRoot, gameRoot, "move-success")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Prepare(); err != nil {
+		t.Fatal(err)
+	}
+	plan := RepairPlan{Items: []PlanItem{
+		{File: ManifestFile{Path: "GenshinImpact_Data"}, SourcePath: "YuanShen_Data", Action: ActionMove},
+		{File: ManifestFile{Path: "GenshinImpact.exe"}, SourcePath: "YuanShen.exe", Action: ActionMove},
+	}}
+	if err := tx.Commit(plan); err != nil {
+		t.Fatal(err)
+	}
+	assertFileContent(t, filepath.Join(gameRoot, "GenshinImpact_Data", "Managed", "keep.bin"), []byte("keep"))
+	assertFileContent(t, filepath.Join(gameRoot, "GenshinImpact.exe"), []byte("exe"))
+	if _, err := os.Stat(filepath.Join(gameRoot, "YuanShen_Data")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("old data directory still exists: %v", err)
+	}
+}
+
+func TestMoveActionRollsBackWhenLaterFileIsLocked(t *testing.T) {
+	gameRoot := t.TempDir()
+	stagingRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(gameRoot, "YuanShen_Data"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(gameRoot, "YuanShen_Data", "keep.bin"), []byte("keep"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	lockedTarget := filepath.Join(gameRoot, "locked.bin")
+	if err := os.WriteFile(lockedTarget, []byte("original"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	replacement := []byte("replacement")
+	tx, err := NewTransaction(stagingRoot, gameRoot, "move-rollback")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Prepare(); err != nil {
+		t.Fatal(err)
+	}
+	stageFile(t, tx.StagingRoot, "locked.bin", replacement)
+	plan := RepairPlan{Items: []PlanItem{
+		{File: ManifestFile{Path: "GenshinImpact_Data"}, SourcePath: "YuanShen_Data", Action: ActionMove},
+		{File: testManifestFile("locked.bin", replacement), Action: ActionRepair},
+	}}
+	pointer, _ := windows.UTF16PtrFromString(lockedTarget)
+	handle, err := windows.CreateFile(pointer, windows.GENERIC_READ, windows.FILE_SHARE_READ, nil, windows.OPEN_EXISTING, windows.FILE_ATTRIBUTE_NORMAL, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer windows.CloseHandle(handle)
+	if err := tx.Commit(plan); err == nil {
+		t.Fatal("locked transaction unexpectedly succeeded")
+	}
+	assertFileContent(t, filepath.Join(gameRoot, "YuanShen_Data", "keep.bin"), []byte("keep"))
+	assertFileContent(t, lockedTarget, []byte("original"))
+	if _, err := os.Stat(filepath.Join(gameRoot, "GenshinImpact_Data")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("target data directory survived rollback: %v", err)
+	}
 }
 
 func TestSophonProviderAndChunkResume(t *testing.T) {

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -19,6 +20,7 @@ import (
 	"genshintools/internal/game"
 	"genshintools/internal/input"
 	"genshintools/internal/launch"
+	"genshintools/internal/localenhance"
 	"genshintools/internal/paths"
 	"genshintools/internal/platform/win32"
 	"genshintools/internal/resources"
@@ -37,6 +39,7 @@ const (
 	messageGame     = win32.WM_APP + 6
 	messageLaunch   = win32.WM_APP + 7
 	messageResource = win32.WM_APP + 8
+	messageServer   = win32.WM_APP + 9
 
 	trayID   = 1
 	menuShow = 1001
@@ -86,6 +89,11 @@ type application struct {
 	resourceUpdates      chan resourceUpdate
 	resourceState        resourceViewState
 	resourceTask         uint64
+	localStatus          string
+	betterGITask         uint64
+	serverUpdates        chan serverUpdate
+	serverState          serverViewState
+	serverTask           uint64
 	customArgumentsEdit  win32.HWND
 	editBrush            win32.HBRUSH
 	sessionNotifications bool
@@ -130,10 +138,30 @@ type resourceUpdate struct {
 	refresh bool
 }
 
+type serverViewState struct {
+	Busy           bool
+	Confirm        bool
+	Advanced       bool
+	Target         localenhance.QuickServer
+	AdvancedTarget localenhance.AdvancedServer
+	Status         string
+	Error          string
+	Plan           resources.RepairPlan
+	Transaction    *resources.Transaction
+}
+
+type serverUpdate struct {
+	taskID  uint64
+	state   serverViewState
+	refresh bool
+}
+
 var navigation = []struct{ title, subtitle string }{
 	{"首页", "启动状态与常用操作将在后续阶段接入。"},
 	{"游戏管理", "S05：只读状态、纯净启动和启动设置。"},
 	{"资源管理", "S06：检查、下载、校验和事务修复。"},
+	{"区服工具", "S07：官服/B服快速切换与高级服务器转换。"},
+	{"本地增强", "S07：HDR、启动声音、BetterGI 与可回滚区服操作。"},
 	{"输入增强", "S03 将优先实现鼠标连点与键盘连按。"},
 	{"插件", "S09/S10 才会启用注入与插件，当前保持隔离。"},
 	{"设置", "S02 已启用便携配置、日志、DPI 和安全退出。"},
@@ -199,6 +227,8 @@ func Run(layout paths.Layout, build buildinfo.Info) (returnErr error) {
 		launchUpdates:   make(chan launch.Snapshot, 1),
 		resourceUpdates: make(chan resourceUpdate, 1),
 		resourceState:   resourceViewState{Language: "zh-cn", Status: "先检查在线资源并生成只读修复计划"},
+		serverUpdates:   make(chan serverUpdate, 1),
+		serverState:     serverViewState{Target: localenhance.QuickOfficial, AdvancedTarget: localenhance.AdvancedGlobal, Status: "先生成区服变更预览；不会直接修改游戏目录"},
 	}
 	active = app
 	defer func() { active = nil }()
@@ -216,6 +246,11 @@ func Run(layout paths.Layout, build buildinfo.Info) (returnErr error) {
 
 	if err := app.createWindow(); err != nil {
 		return err
+	}
+	if app.settings.LocalEnhance.StartupSoundEnabled && app.settings.LocalEnhance.StartupSoundPath != "" {
+		if err := localenhance.PlayStartupSound(app.settings.LocalEnhance.StartupSoundPath); err != nil {
+			logger.Error("play startup sound", map[string]any{"error": err.Error()})
+		}
 	}
 	if err := app.startLauncher(); err != nil {
 		app.requestShutdown()
@@ -407,6 +442,7 @@ func (app *application) handleMessage(hwnd win32.HWND, message uint32, wParam, l
 			default:
 				if previous != launch.StateRunning && app.launchSnap.State == launch.StateRunning {
 					app.applyPostLaunch(app.launchSnap.PostBehavior)
+					app.scheduleBetterGI()
 				}
 				win32.Invalidate(hwnd)
 				return 0
@@ -418,6 +454,21 @@ func (app *application) handleMessage(hwnd win32.HWND, message uint32, wParam, l
 			case update := <-app.resourceUpdates:
 				if update.taskID == app.resourceTask {
 					app.resourceState = update.state
+					if update.refresh && app.gameState.Candidate != nil {
+						app.startGameScan(app.gameState.Candidate.Root)
+					}
+				}
+			default:
+				win32.Invalidate(hwnd)
+				return 0
+			}
+		}
+	case messageServer:
+		for {
+			select {
+			case update := <-app.serverUpdates:
+				if update.taskID == app.serverTask {
+					app.serverState = update.state
 					if update.refresh && app.gameState.Candidate != nil {
 						app.startGameScan(app.gameState.Candidate.Root)
 					}
@@ -452,6 +503,10 @@ func (app *application) handleMessage(hwnd win32.HWND, message uint32, wParam, l
 		} else if app.selected == 2 && x >= int(win32.Scale(210, app.dpi)) {
 			app.resourceClick(x, y)
 		} else if app.selected == 3 && x >= int(win32.Scale(210, app.dpi)) {
+			app.serverClick(x, y)
+		} else if app.selected == 4 && x >= int(win32.Scale(210, app.dpi)) {
+			app.localEnhanceClick(x, y)
+		} else if app.selected == 5 && x >= int(win32.Scale(210, app.dpi)) {
 			app.inputClick(x, y)
 		}
 		return 0
@@ -552,6 +607,11 @@ func (app *application) restore() {
 
 func (app *application) requestShutdown() {
 	app.shutdown.Do(func() {
+		localenhance.StopStartupSound()
+		if !app.serverState.Busy && app.serverState.Transaction != nil {
+			_ = app.serverState.Transaction.Abort()
+			app.serverState.Transaction = nil
+		}
 		app.syncLaunchConfig()
 		app.captureBounds()
 		app.settings.Window = app.lastBounds
@@ -689,6 +749,10 @@ func (app *application) paint(hwnd win32.HWND) {
 	} else if app.selected == 2 {
 		app.paintResources(dc, client, contentLeft)
 	} else if app.selected == 3 {
+		app.paintServer(dc, client, contentLeft)
+	} else if app.selected == 4 {
+		app.paintLocalEnhance(dc, client, contentLeft)
+	} else if app.selected == 5 {
 		app.paintInput(dc, client, contentLeft)
 	} else {
 		cardBrush := win32.CreateSolidBrush(win32.Color(25, 29, 39))
@@ -1050,6 +1114,393 @@ func (app *application) applyPostLaunch(behavior launch.PostBehavior) {
 	case launch.PostExit:
 		app.requestShutdown()
 	}
+}
+
+func (app *application) scheduleBetterGI() {
+	if !app.settings.LocalEnhance.BetterGIEnabled {
+		return
+	}
+	delay := time.Duration(app.settings.LocalEnhance.BetterGIDelayMS) * time.Millisecond
+	app.betterGITask = app.tasks.Run(func(ctx context.Context, _ uint64) {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(delay):
+		}
+		if err := localenhance.StartBetterGI(); err != nil {
+			app.logger.Error("BetterGI protocol launch failed; game remains running", map[string]any{"error": err.Error()})
+		} else {
+			app.logger.Info("BetterGI protocol launch requested", nil)
+		}
+	})
+}
+
+func (app *application) publishServer(id uint64, state serverViewState, refresh bool) {
+	select {
+	case app.serverUpdates <- serverUpdate{taskID: id, state: state, refresh: refresh}:
+	default:
+		select {
+		case <-app.serverUpdates:
+		default:
+		}
+		app.serverUpdates <- serverUpdate{taskID: id, state: state, refresh: refresh}
+	}
+	win32.PostMessage(app.hwnd, messageServer, 0, 0)
+}
+
+func (app *application) serverClick(_, y int) {
+	sy := func(value int32) int { return int(win32.Scale(value, app.dpi)) }
+	state := app.serverState
+	if state.Busy {
+		if y >= sy(270) && y < sy(314) {
+			app.tasks.Cancel(app.serverTask)
+			state.Status = "正在取消区服任务…"
+			app.serverState = state
+			win32.Invalidate(app.hwnd)
+		}
+		return
+	}
+	switch {
+	case y >= sy(170) && y < sy(214):
+		state.Advanced = !state.Advanced
+		if app.gameState.Candidate != nil && app.gameState.Candidate.Server == game.ServerGlobal {
+			state.AdvancedTarget = localenhance.AdvancedMainland
+		} else {
+			state.AdvancedTarget = localenhance.AdvancedGlobal
+		}
+		if state.Transaction != nil {
+			_ = state.Transaction.Abort()
+		}
+		state.Transaction = nil
+		state.Plan = resources.RepairPlan{}
+		state.Confirm = false
+		state.Status = "切换方式已更改，请重新生成变更预览"
+		state.Error = ""
+		app.serverState = state
+	case y >= sy(220) && y < sy(264):
+		if state.Advanced {
+			if state.AdvancedTarget == localenhance.AdvancedGlobal {
+				state.AdvancedTarget = localenhance.AdvancedMainland
+			} else {
+				state.AdvancedTarget = localenhance.AdvancedGlobal
+			}
+		} else if state.Target == localenhance.QuickOfficial {
+			state.Target = localenhance.QuickBilibili
+		} else {
+			state.Target = localenhance.QuickOfficial
+		}
+		if state.Transaction != nil {
+			_ = state.Transaction.Abort()
+		}
+		state.Transaction = nil
+		state.Plan = resources.RepairPlan{}
+		state.Confirm = false
+		state.Status = "目标已切换，请重新生成变更预览"
+		state.Error = ""
+		app.serverState = state
+	case y >= sy(270) && y < sy(314):
+		app.startServerPlan()
+		return
+	case y >= sy(320) && y < sy(364):
+		if state.Transaction == nil {
+			state.Error = "请先生成区服变更预览"
+		} else if len(app.gameState.Running) > 0 {
+			state.Error = "游戏运行时不能切换区服"
+		} else if !state.Confirm {
+			state.Confirm = true
+			state.Status = "再次单击确认提交；所有替换和删除均有事务备份"
+			state.Error = ""
+		} else {
+			app.serverState = state
+			app.startServerCommit()
+			return
+		}
+		app.serverState = state
+	}
+	win32.Invalidate(app.hwnd)
+}
+
+func (app *application) startServerPlan() {
+	if app.gameState.Candidate == nil {
+		app.serverState.Error = "请先在游戏管理页选择有效游戏目录"
+		win32.Invalidate(app.hwnd)
+		return
+	}
+	if !app.serverState.Advanced && app.gameState.Candidate.Server == game.ServerGlobal {
+		app.serverState.Error = "官服/B服快速切换仅适用于已识别的国服 YuanShen.exe"
+		win32.Invalidate(app.hwnd)
+		return
+	}
+	root := app.gameState.Candidate.Root
+	state := app.serverState
+	if state.Transaction != nil {
+		_ = state.Transaction.Abort()
+	}
+	state.Busy, state.Confirm, state.Error = true, false, ""
+	state.Status = "正在读取官方渠道 SDK 清单并准备隔离文件…"
+	if state.Advanced {
+		state.Status = "正在读取目标区服 Sophon 清单并准备完整差异；可能需要较长下载…"
+	}
+	state.Transaction = nil
+	app.serverState = state
+	app.serverTask = app.tasks.Run(func(ctx context.Context, id uint64) {
+		transaction, err := resources.NewTransaction(app.layout.Staging, root, fmt.Sprintf("server-%d", time.Now().UTC().UnixNano()))
+		if err == nil {
+			err = transaction.Prepare()
+		}
+		if err == nil && state.Advanced {
+			var conversion localenhance.AdvancedConversion
+			conversion, err = localenhance.PrepareAdvancedServerConversion(ctx, nil, root, transaction.StagingRoot, state.AdvancedTarget)
+			state.Plan = conversion.Plan
+		} else if err == nil {
+			state.Plan, err = localenhance.PrepareQuickServerSwitch(ctx, nil, root, transaction.StagingRoot, state.Target)
+		}
+		state.Busy = false
+		if err != nil {
+			if transaction != nil {
+				_ = transaction.Abort()
+			}
+			if errors.Is(err, context.Canceled) {
+				state.Status, state.Error = "区服预览已取消；游戏文件未修改", ""
+			} else {
+				state.Status, state.Error = "区服预览失败；游戏文件未修改", err.Error()
+			}
+		} else {
+			state.Transaction = transaction
+			state.Status = fmt.Sprintf("预览完成：%d 项计划，确认前不会修改游戏目录", len(state.Plan.Items))
+		}
+		app.publishServer(id, state, false)
+	})
+}
+
+func (app *application) startServerCommit() {
+	state := app.serverState
+	state.Busy, state.Confirm, state.Error = true, false, ""
+	state.Status = "正在提交区服事务；失败将自动逆序回滚…"
+	app.serverState = state
+	app.serverTask = app.tasks.Run(func(_ context.Context, id uint64) {
+		err := state.Transaction.Commit(state.Plan)
+		state.Busy = false
+		if err != nil {
+			state.Status, state.Error = "区服切换失败；原配置和 SDK 已恢复", err.Error()
+		} else {
+			state.Status = "区服切换完成"
+			state.Transaction = nil
+			state.Plan = resources.RepairPlan{}
+		}
+		app.publishServer(id, state, err == nil)
+	})
+}
+
+func (app *application) paintServer(dc win32.HDC, client win32.Rect, left int32) {
+	cardBrush := win32.CreateSolidBrush(win32.Color(25, 29, 39))
+	defer win32.DeleteObject(uintptr(cardBrush))
+	buttonBrush := win32.CreateSolidBrush(win32.Color(35, 40, 54))
+	defer win32.DeleteObject(uintptr(buttonBrush))
+	accentBrush := win32.CreateSolidBrush(win32.Color(52, 66, 112))
+	defer win32.DeleteObject(uintptr(accentBrush))
+	right := client.Right - win32.Scale(42, app.dpi)
+	row := func(top, bottom int32, brush win32.HBRUSH) win32.Rect {
+		rect := win32.Rect{Left: left, Top: win32.Scale(top, app.dpi), Right: right, Bottom: win32.Scale(bottom, app.dpi)}
+		win32.FillRect(dc, &rect, brush)
+		return rect
+	}
+	draw := func(text string, rect win32.Rect, color uint32) {
+		win32.SetTextColor(dc, color)
+		rect.Left += win32.Scale(18, app.dpi)
+		rect.Right -= win32.Scale(12, app.dpi)
+		win32.DrawText(dc, text, &rect, win32.DT_LEFT|win32.DT_VCENTER|win32.DT_SINGLELINE|win32.DT_END_ELLIPSIS)
+	}
+	state := app.serverState
+	mode := "官服/B服快速切换"
+	if state.Advanced {
+		mode = "国服/国际服高级转换"
+	}
+	draw("方式："+mode+"    单击切换", row(170, 214, accentBrush), win32.Color(235, 238, 248))
+	target := state.Target.String()
+	if state.Advanced {
+		target = state.AdvancedTarget.String()
+	}
+	draw("目标："+target+"    单击切换", row(220, 264, accentBrush), win32.Color(235, 238, 248))
+	planText := "生成变更预览"
+	if state.Busy {
+		planText = "取消当前区服任务"
+	}
+	draw(planText, row(270, 314, buttonBrush), win32.Color(225, 229, 242))
+	commit := "提交切换（需要先生成预览）"
+	if state.Transaction != nil {
+		commit = fmt.Sprintf("提交 %d 项变更", len(state.Plan.Items))
+	}
+	if state.Confirm {
+		commit = "再次单击确认事务提交"
+	}
+	draw(commit, row(320, 364, buttonBrush), win32.Color(225, 229, 242))
+	status, color := state.Status, win32.Color(145, 154, 180)
+	if state.Error != "" {
+		status, color = state.Error, win32.Color(255, 126, 126)
+	}
+	draw(status, row(376, 420, cardBrush), color)
+	if state.Transaction != nil {
+		installs, deletes, moves := 0, 0, 0
+		for _, item := range state.Plan.Items {
+			if item.Action == resources.ActionDelete {
+				deletes++
+			} else if item.Action == resources.ActionMove {
+				moves++
+			} else if item.Action != resources.ActionKeep {
+				installs++
+			} else {
+				continue
+			}
+		}
+		draw(fmt.Sprintf("安装/替换 %d · 改名 %d · 可回滚删除 %d · 下载 %s", installs, moves, deletes, formatBytes(uint64(state.Plan.DownloadBytes))), row(426, 470, cardBrush), win32.Color(190, 197, 216))
+	}
+	draw("高级转换会先校验并下载目标差异，再统一提交目录/EXE 改名、替换和配置。", row(482, 526, cardBrush), win32.Color(166, 174, 197))
+	draw("不会清空整个 Plugins；任一步失败均按反向日志恢复原区服布局。", row(532, 576, cardBrush), win32.Color(126, 136, 160))
+}
+
+func (app *application) saveLocalEnhance() bool {
+	if err := config.Save(app.layout.Config, app.settings); err != nil {
+		app.localStatus = "保存设置失败：" + err.Error()
+		return false
+	}
+	return true
+}
+
+func (app *application) localEnhanceClick(_, y int) {
+	sy := func(value int32) int { return int(win32.Scale(value, app.dpi)) }
+	settings := &app.settings.LocalEnhance
+	switch {
+	case y >= sy(170) && y < sy(214):
+		settings.HDR.Enabled = !settings.HDR.Enabled
+		app.localStatus = "HDR 目标状态已更改；单击“应用 HDR”后写入"
+		app.saveLocalEnhance()
+	case y >= sy(220) && y < sy(258):
+		presets := []localenhance.HDRConfig{
+			{Enabled: settings.HDR.Enabled, MaxLuminance: 1000, SceneLuminance: 300, UILuminance: 350},
+			{Enabled: settings.HDR.Enabled, MaxLuminance: 1200, SceneLuminance: 320, UILuminance: 380},
+			{Enabled: settings.HDR.Enabled, MaxLuminance: 1600, SceneLuminance: 400, UILuminance: 450},
+		}
+		index := 0
+		for i, preset := range presets {
+			if preset.MaxLuminance == settings.HDR.MaxLuminance && preset.SceneLuminance == settings.HDR.SceneLuminance && preset.UILuminance == settings.HDR.UILuminance {
+				index = (i + 1) % len(presets)
+				break
+			}
+		}
+		settings.HDR = presets[index]
+		app.localStatus = "HDR 亮度预设已更改，尚未写入注册表"
+		app.saveLocalEnhance()
+	case y >= sy(264) && y < sy(302):
+		if app.gameState.Candidate == nil || app.gameState.Candidate.Server == game.ServerGlobal {
+			app.localStatus = "HDR 注册表适配仅用于已识别的国服目录"
+			break
+		}
+		backup := app.layout.Data + string(os.PathSeparator) + "hdr-registry-backup.json"
+		if err := localenhance.ApplyHDRWithBackup(localenhance.NativeRegistry{}, settings.HDR, backup); err != nil {
+			app.localStatus = "应用 HDR 失败，旧值已保留或恢复：" + err.Error()
+		} else {
+			app.localStatus = "HDR 已应用；原始注册表值已备份"
+		}
+	case y >= sy(308) && y < sy(346):
+		backup := app.layout.Data + string(os.PathSeparator) + "hdr-registry-backup.json"
+		if err := localenhance.RestoreHDRBackup(localenhance.NativeRegistry{}, backup); err != nil {
+			app.localStatus = "恢复 HDR 备份失败：" + err.Error()
+		} else {
+			if current, _, err := localenhance.ReadHDR(localenhance.NativeRegistry{}); err == nil {
+				settings.HDR = current
+				app.saveLocalEnhance()
+			}
+			app.localStatus = "HDR 原始注册表值已恢复"
+		}
+	case y >= sy(352) && y < sy(390):
+		initial := ""
+		if settings.StartupSoundPath != "" {
+			initial = filepath.Dir(settings.StartupSoundPath)
+		}
+		path, selected, err := win32.SelectWaveFile(app.hwnd, initial)
+		if err != nil {
+			app.localStatus = err.Error()
+		} else if selected {
+			if err := localenhance.PlayStartupSound(path); err != nil {
+				app.localStatus = "WAV 试听失败：" + err.Error()
+			} else {
+				settings.StartupSoundPath = path
+				settings.StartupSoundEnabled = true
+				app.saveLocalEnhance()
+				app.localStatus = "启动声音已选择并试听"
+			}
+		}
+	case y >= sy(396) && y < sy(434):
+		settings.StartupSoundEnabled = !settings.StartupSoundEnabled
+		app.saveLocalEnhance()
+		app.localStatus = "启动声音已" + map[bool]string{true: "启用", false: "停用"}[settings.StartupSoundEnabled]
+	case y >= sy(440) && y < sy(478):
+		settings.BetterGIEnabled = !settings.BetterGIEnabled
+		app.saveLocalEnhance()
+		app.localStatus = "BetterGI 联动已" + map[bool]string{true: "启用", false: "停用"}[settings.BetterGIEnabled]
+	case y >= sy(484) && y < sy(522):
+		delays := []int{0, 2000, 5000, 10000, 30000, 60000}
+		index := 0
+		for i, delay := range delays {
+			if delay == settings.BetterGIDelayMS {
+				index = (i + 1) % len(delays)
+				break
+			}
+		}
+		settings.BetterGIDelayMS = delays[index]
+		app.saveLocalEnhance()
+		app.localStatus = "BetterGI 延迟已更新"
+	case y >= sy(528) && y < sy(566):
+		info, err := localenhance.AuditBetterGI()
+		if err != nil {
+			app.localStatus = "BetterGI 审计失败：" + err.Error()
+		} else if !info.Registered {
+			app.localStatus = "未发现 BetterGI URL Scheme；不会影响纯净启动"
+		} else if err := localenhance.StartBetterGI(); err != nil {
+			app.localStatus = "BetterGI 测试启动失败：" + err.Error()
+		} else {
+			app.localStatus = "已向核验后的 BetterGI URL Scheme 发送启动请求"
+		}
+	}
+	win32.Invalidate(app.hwnd)
+}
+
+func (app *application) paintLocalEnhance(dc win32.HDC, client win32.Rect, left int32) {
+	cardBrush := win32.CreateSolidBrush(win32.Color(25, 29, 39))
+	defer win32.DeleteObject(uintptr(cardBrush))
+	buttonBrush := win32.CreateSolidBrush(win32.Color(35, 40, 54))
+	defer win32.DeleteObject(uintptr(buttonBrush))
+	accentBrush := win32.CreateSolidBrush(win32.Color(52, 66, 112))
+	defer win32.DeleteObject(uintptr(accentBrush))
+	right := client.Right - win32.Scale(42, app.dpi)
+	row := func(top, bottom int32, brush win32.HBRUSH) win32.Rect {
+		rect := win32.Rect{Left: left, Top: win32.Scale(top, app.dpi), Right: right, Bottom: win32.Scale(bottom, app.dpi)}
+		win32.FillRect(dc, &rect, brush)
+		return rect
+	}
+	draw := func(text string, rect win32.Rect, color uint32) {
+		win32.SetTextColor(dc, color)
+		rect.Left += win32.Scale(18, app.dpi)
+		rect.Right -= win32.Scale(12, app.dpi)
+		win32.DrawText(dc, text, &rect, win32.DT_LEFT|win32.DT_VCENTER|win32.DT_SINGLELINE|win32.DT_END_ELLIPSIS)
+	}
+	settings := app.settings.LocalEnhance
+	draw("HDR 强制状态："+map[bool]string{true: "开启", false: "关闭"}[settings.HDR.Enabled]+"    单击切换目标", row(170, 214, accentBrush), win32.Color(235, 238, 248))
+	draw(fmt.Sprintf("亮度：峰值 %d · 场景 %d · UI %d    单击切换安全预设", settings.HDR.MaxLuminance, settings.HDR.SceneLuminance, settings.HDR.UILuminance), row(220, 258, buttonBrush), win32.Color(225, 229, 242))
+	draw("应用 HDR（先备份，再写入）", row(264, 302, buttonBrush), win32.Color(225, 229, 242))
+	draw("恢复上一次 HDR 原始注册表值", row(308, 346, buttonBrush), win32.Color(225, 229, 242))
+	sound := valueOrUnknown(settings.StartupSoundPath)
+	draw("选择并试听 WAV："+sound, row(352, 390, buttonBrush), win32.Color(190, 197, 216))
+	draw("启动声音："+map[bool]string{true: "启用", false: "停用"}[settings.StartupSoundEnabled], row(396, 434, buttonBrush), win32.Color(190, 197, 216))
+	draw("BetterGI 协议联动："+map[bool]string{true: "启用", false: "停用"}[settings.BetterGIEnabled], row(440, 478, buttonBrush), win32.Color(190, 197, 216))
+	draw(fmt.Sprintf("BetterGI 启动延迟：%.1f 秒    单击切换", float64(settings.BetterGIDelayMS)/1000), row(484, 522, buttonBrush), win32.Color(190, 197, 216))
+	draw("审计并测试 BetterGI URL Scheme（不会按名称结束进程）", row(528, 566, buttonBrush), win32.Color(190, 197, 216))
+	status := app.localStatus
+	if status == "" {
+		status = "本页操作失败不会阻止纯净游戏启动"
+	}
+	draw(status, row(572, 610, cardBrush), win32.Color(145, 154, 180))
 }
 
 func (app *application) gameClick(x, y int) {

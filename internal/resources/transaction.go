@@ -23,6 +23,8 @@ type journal struct {
 
 type journalEntry struct {
 	RelativePath string `json:"relative_path"`
+	SourcePath   string `json:"source_path,omitempty"`
+	Source       string `json:"source,omitempty"`
 	Target       string `json:"target"`
 	Temporary    string `json:"temporary"`
 	Backup       string `json:"backup"`
@@ -74,8 +76,18 @@ func (t *Transaction) MarkPreloaded() error {
 	return t.saveJournal()
 }
 
+func (t *Transaction) Abort() error {
+	if err := rollbackJournal(&t.journal); err != nil {
+		return err
+	}
+	return os.RemoveAll(t.Root)
+}
+
 func (t *Transaction) Commit(plan RepairPlan) error {
 	if err := plan.ValidateStaging(t.StagingRoot); err != nil {
+		return err
+	}
+	if err := t.validateMoves(plan); err != nil {
 		return err
 	}
 	if err := RequireDiskSpace(t.GameRoot, plan.RequiredCommitBytes()); err != nil {
@@ -89,7 +101,7 @@ func (t *Transaction) Commit(plan RepairPlan) error {
 		if item.Action == ActionKeep {
 			continue
 		}
-		if err := t.install(item.File); err != nil {
+		if err := t.install(item); err != nil {
 			rollbackErr := rollbackJournal(&t.journal)
 			t.journal.State = "rolled_back"
 			_ = t.saveJournal()
@@ -115,7 +127,8 @@ func (t *Transaction) Commit(plan RepairPlan) error {
 	return nil
 }
 
-func (t *Transaction) install(file ManifestFile) error {
+func (t *Transaction) install(item PlanItem) error {
+	file, action := item.File, item.Action
 	target := filepath.Join(t.GameRoot, file.Path)
 	if err := ensureContained(t.GameRoot, target); err != nil {
 		return err
@@ -133,6 +146,10 @@ func (t *Transaction) install(file ManifestFile) error {
 		Backup:       target + ".genshintools-" + t.ID + ".bak",
 		State:        "prepared",
 	}
+	if action == ActionMove {
+		entry.SourcePath = item.SourcePath
+		entry.Source = filepath.Join(t.GameRoot, item.SourcePath)
+	}
 	_, err := os.Stat(target)
 	entry.HadOriginal = err == nil
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -142,6 +159,24 @@ func (t *Transaction) install(file ManifestFile) error {
 	index := len(t.journal.Entries) - 1
 	if err := t.saveJournal(); err != nil {
 		return err
+	}
+	if action == ActionMove {
+		if err := os.Rename(entry.Source, entry.Target); err != nil {
+			return fmt.Errorf("move %q to %q: %w", item.SourcePath, file.Path, err)
+		}
+		t.journal.Entries[index].State = "installed"
+		return t.saveJournal()
+	}
+	if action == ActionDelete {
+		if !entry.HadOriginal {
+			t.journal.Entries[index].State = "installed"
+			return t.saveJournal()
+		}
+		if err := os.Rename(entry.Target, entry.Backup); err != nil {
+			return fmt.Errorf("back up deleted target %q: %w", file.Path, err)
+		}
+		t.journal.Entries[index].State = "installed"
+		return t.saveJournal()
 	}
 	staged := filepath.Join(t.StagingRoot, file.Path)
 	if err := copyVerified(staged, entry.Temporary, file); err != nil {
@@ -166,6 +201,50 @@ func (t *Transaction) install(file ManifestFile) error {
 	t.journal.Entries[index].State = "installed"
 	if err := t.saveJournal(); err != nil {
 		return err
+	}
+	return nil
+}
+
+func (t *Transaction) validateMoves(plan RepairPlan) error {
+	seenTargets := make(map[string]struct{})
+	for _, item := range plan.Items {
+		if item.Action != ActionMove {
+			continue
+		}
+		sourceRelative, err := NormalizeRelativePath(item.SourcePath)
+		if err != nil {
+			return fmt.Errorf("invalid move source: %w", err)
+		}
+		targetRelative, err := NormalizeRelativePath(item.File.Path)
+		if err != nil {
+			return fmt.Errorf("invalid move target: %w", err)
+		}
+		if strings.EqualFold(sourceRelative, targetRelative) {
+			return errors.New("move source and target are identical")
+		}
+		key := strings.ToLower(targetRelative)
+		if _, duplicate := seenTargets[key]; duplicate {
+			return fmt.Errorf("duplicate move target %q", targetRelative)
+		}
+		seenTargets[key] = struct{}{}
+		source, target := filepath.Join(t.GameRoot, sourceRelative), filepath.Join(t.GameRoot, targetRelative)
+		if err := ensureContained(t.GameRoot, source); err != nil {
+			return err
+		}
+		if err := ensureContained(t.GameRoot, target); err != nil {
+			return err
+		}
+		if err := rejectReparseAncestors(t.GameRoot, source); err != nil {
+			return fmt.Errorf("unsafe move source %q: %w", sourceRelative, err)
+		}
+		if _, err := os.Stat(source); err != nil {
+			return fmt.Errorf("move source %q: %w", sourceRelative, err)
+		}
+		if _, err := os.Stat(target); err == nil {
+			return fmt.Errorf("move target %q already exists", targetRelative)
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
 	}
 	return nil
 }
@@ -244,6 +323,21 @@ func rollbackJournal(saved *journal) error {
 	var result error
 	for i := len(saved.Entries) - 1; i >= 0; i-- {
 		entry := saved.Entries[i]
+		if entry.Source != "" {
+			if _, err := os.Stat(entry.Target); err == nil {
+				if _, sourceErr := os.Stat(entry.Source); sourceErr == nil {
+					result = errors.Join(result, fmt.Errorf("cannot restore move %s: source already exists", entry.SourcePath))
+				} else if !errors.Is(sourceErr, os.ErrNotExist) {
+					result = errors.Join(result, sourceErr)
+				} else if err := os.Rename(entry.Target, entry.Source); err != nil {
+					result = errors.Join(result, err)
+				}
+			} else if !errors.Is(err, os.ErrNotExist) {
+				result = errors.Join(result, err)
+			}
+			result = errors.Join(result, removeIfExists(entry.Temporary))
+			continue
+		}
 		if entry.HadOriginal {
 			if _, err := os.Stat(entry.Backup); err == nil {
 				_ = os.Remove(entry.Target)
@@ -274,6 +368,18 @@ func validateJournal(saved *journal) error {
 		}
 		if filepath.Clean(entry.Target) != filepath.Clean(target) || filepath.Clean(entry.Temporary) != filepath.Clean(target+".genshintools-"+saved.ID+".new") || filepath.Clean(entry.Backup) != filepath.Clean(target+".genshintools-"+saved.ID+".bak") {
 			return errors.New("journal paths do not match transaction identity")
+		}
+		if entry.SourcePath != "" {
+			sourceRelative, err := NormalizeRelativePath(entry.SourcePath)
+			if err != nil {
+				return err
+			}
+			source := filepath.Join(saved.GameRoot, sourceRelative)
+			if err := ensureContained(saved.GameRoot, source); err != nil || filepath.Clean(entry.Source) != filepath.Clean(source) {
+				return errors.New("journal move source does not match transaction identity")
+			}
+		} else if entry.Source != "" {
+			return errors.New("journal move source is incomplete")
 		}
 	}
 	return nil

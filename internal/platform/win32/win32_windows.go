@@ -320,8 +320,16 @@ func CopyUTF16(destination []uint16, value string) {
 // SelectExecutable shows the native read-only file picker. Cancellation is not
 // an error; selected is false in that case.
 func SelectExecutable(owner HWND, initialDirectory string) (path string, selected bool, err error) {
+	return selectFile(owner, initialDirectory, "Windows executables (*.exe)", "*.exe", "选择原神游戏主程序", "exe")
+}
+
+func SelectWaveFile(owner HWND, initialDirectory string) (path string, selected bool, err error) {
+	return selectFile(owner, initialDirectory, "Wave audio (*.wav)", "*.wav", "选择启动声音", "wav")
+}
+
+func selectFile(owner HWND, initialDirectory, filterName, pattern, title, defaultExtension string) (path string, selected bool, err error) {
 	buffer := make([]uint16, 32768)
-	filter := append(syscall.StringToUTF16("Windows executables (*.exe)"), syscall.StringToUTF16("*.exe")...)
+	filter := append(syscall.StringToUTF16(filterName), syscall.StringToUTF16(pattern)...)
 	filter = append(filter, 0)
 	var initial *uint16
 	if initialDirectory != "" {
@@ -335,9 +343,9 @@ func SelectExecutable(owner HWND, initialDirectory string) (path string, selecte
 		File:        &buffer[0],
 		MaxFile:     uint32(len(buffer)),
 		InitialDir:  initial,
-		Title:       UTF16("选择原神游戏主程序"),
+		Title:       UTF16(title),
 		Flags:       0x00080000 | 0x00001000 | 0x00000800 | 0x00000008,
-		DefaultExt:  UTF16("exe"),
+		DefaultExt:  UTF16(defaultExtension),
 	}
 	value, _, _ := procGetOpenFileNameW.Call(uintptr(unsafe.Pointer(&request)))
 	if value != 0 {

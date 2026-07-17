@@ -14,18 +14,28 @@ import (
 
 	"genshintools/internal/input"
 	"genshintools/internal/launch"
+	"genshintools/internal/localenhance"
 )
 
-const CurrentSchemaVersion = 4
+const CurrentSchemaVersion = 5
 
 // Settings contains only stable shell settings in S02. Feature settings are
 // added by their implementation stage instead of being guessed in advance.
 type Settings struct {
-	SchemaVersion int           `json:"schemaVersion"`
-	Window        WindowConfig  `json:"window"`
-	Input         input.Config  `json:"input"`
-	Game          GameConfig    `json:"game"`
-	Launch        launch.Config `json:"launch"`
+	SchemaVersion int                `json:"schemaVersion"`
+	Window        WindowConfig       `json:"window"`
+	Input         input.Config       `json:"input"`
+	Game          GameConfig         `json:"game"`
+	Launch        launch.Config      `json:"launch"`
+	LocalEnhance  LocalEnhanceConfig `json:"localEnhance"`
+}
+
+type LocalEnhanceConfig struct {
+	HDR                 localenhance.HDRConfig `json:"hdr"`
+	StartupSoundEnabled bool                   `json:"startupSoundEnabled"`
+	StartupSoundPath    string                 `json:"startupSoundPath"`
+	BetterGIEnabled     bool                   `json:"betterGIEnabled"`
+	BetterGIDelayMS     int                    `json:"betterGIDelayMs"`
 }
 
 type WindowConfig struct {
@@ -52,8 +62,9 @@ func Default() Settings {
 			X: -1, Y: -1,
 			Width: 1100, Height: 720,
 		},
-		Input:  input.DefaultConfig(),
-		Launch: launch.DefaultConfig(),
+		Input:        input.DefaultConfig(),
+		Launch:       launch.DefaultConfig(),
+		LocalEnhance: LocalEnhanceConfig{HDR: localenhance.DefaultHDRConfig()},
 	}
 }
 
@@ -93,16 +104,23 @@ func migrateAndValidate(settings *Settings) error {
 	case 0:
 		// Schema 0 was the pre-release shape with the same window fields.
 		settings.Input = input.DefaultConfig()
+		settings.LocalEnhance = Default().LocalEnhance
 		settings.SchemaVersion = CurrentSchemaVersion
 	case 1:
 		settings.Input = input.DefaultConfig()
+		settings.LocalEnhance = Default().LocalEnhance
 		settings.SchemaVersion = CurrentSchemaVersion
 	case 2:
+		settings.LocalEnhance = Default().LocalEnhance
 		settings.SchemaVersion = CurrentSchemaVersion
 	case 3:
 		settings.Launch = launch.DefaultConfig()
+		settings.LocalEnhance = Default().LocalEnhance
 		settings.SchemaVersion = CurrentSchemaVersion
 	case 4:
+		settings.LocalEnhance = Default().LocalEnhance
+		settings.SchemaVersion = CurrentSchemaVersion
+	case 5:
 	default:
 		return fmt.Errorf("unsupported schema version %d", settings.SchemaVersion)
 	}
@@ -130,6 +148,18 @@ func migrateAndValidate(settings *Settings) error {
 		return fmt.Errorf("launch settings: %w", err)
 	}
 	settings.Launch = normalizedLaunch
+	normalizedHDR, err := settings.LocalEnhance.HDR.Normalized()
+	if err != nil {
+		return fmt.Errorf("HDR settings: %w", err)
+	}
+	settings.LocalEnhance.HDR = normalizedHDR
+	settings.LocalEnhance.StartupSoundPath = strings.Trim(strings.TrimSpace(settings.LocalEnhance.StartupSoundPath), `"`)
+	if settings.LocalEnhance.StartupSoundPath != "" && !strings.EqualFold(filepath.Ext(settings.LocalEnhance.StartupSoundPath), ".wav") {
+		return errors.New("startup sound must be a WAV file")
+	}
+	if settings.LocalEnhance.BetterGIDelayMS < 0 || settings.LocalEnhance.BetterGIDelayMS > 60000 {
+		return errors.New("BetterGI delay must be within 0..60000 ms")
+	}
 	return nil
 }
 

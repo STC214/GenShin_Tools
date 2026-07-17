@@ -20,22 +20,35 @@ import (
 )
 
 const (
-	DefaultSophonBuildURL    = "https://api-takumi.mihoyo.com/downloader/sophon_chunk/api/getBuild?branch=main&package_id=8xfMve0uwQ&password=CW8GbLNU8f&plat_app=ddxf5qt290cg"
-	DefaultSophonBranchesURL = "https://hyp-api.mihoyo.com/hyp/hyp-connect/api/getGameBranches?launcher_id=jGHBHlcOq1&language=zh-cn&game_ids[]=1Z8W5NHUQb"
-	sophonBuildEndpoint      = "https://api-takumi.mihoyo.com/downloader/sophon_chunk/api/getBuild"
-	sophonPlatformApp        = "ddxf5qt290cg"
-	maxBuildResponseBytes    = 4 << 20
-	maxCompressedManifest    = 64 << 20
-	maxSophonManifest        = 256 << 20
+	DefaultSophonBuildURL     = "https://api-takumi.mihoyo.com/downloader/sophon_chunk/api/getBuild?branch=main&package_id=8xfMve0uwQ&password=CW8GbLNU8f&plat_app=ddxf5qt290cg"
+	DefaultSophonBranchesURL  = "https://hyp-api.mihoyo.com/hyp/hyp-connect/api/getGameBranches?launcher_id=jGHBHlcOq1&language=zh-cn&game_ids[]=1Z8W5NHUQb"
+	GlobalSophonBranchesURL   = "https://sg-hyp-api.hoyoverse.com/hyp/hyp-connect/api/getGameBranches?launcher_id=VYTpXlbWo8&language=en-us&game_ids[]=gopR6Cufr3"
+	sophonBuildEndpoint       = "https://api-takumi.mihoyo.com/downloader/sophon_chunk/api/getBuild"
+	globalSophonBuildEndpoint = "https://sg-downloader-api.hoyoverse.com/downloader/sophon_chunk/api/getBuild"
+	sophonPlatformApp         = "ddxf5qt290cg"
+	maxBuildResponseBytes     = 4 << 20
+	maxCompressedManifest     = 64 << 20
+	maxSophonManifest         = 256 << 20
 )
 
 type SophonProvider struct {
-	Client      *http.Client
-	BuildURL    string
-	BranchesURL string
-	MaxAttempts int
-	RetryDelay  time.Duration
+	Client          *http.Client
+	BuildURL        string
+	BranchesURL     string
+	MaxAttempts     int
+	RetryDelay      time.Duration
+	ExpectedGameID  string
+	ExpectedGameBiz string
+	BuildEndpoint   string
+	PlatformApp     string
 }
+
+type SophonRegion uint8
+
+const (
+	SophonMainland SophonRegion = iota + 1
+	SophonGlobal
+)
 
 type SophonBranches struct {
 	Current     SophonBranch
@@ -154,12 +167,29 @@ type sophonDownload struct {
 
 func NewSophonProvider() *SophonProvider {
 	return &SophonProvider{
-		Client:      &http.Client{Timeout: 45 * time.Second},
-		BuildURL:    DefaultSophonBuildURL,
-		BranchesURL: DefaultSophonBranchesURL,
-		MaxAttempts: 3,
-		RetryDelay:  time.Second,
+		Client:          &http.Client{Timeout: 45 * time.Second},
+		BuildURL:        DefaultSophonBuildURL,
+		BranchesURL:     DefaultSophonBranchesURL,
+		MaxAttempts:     3,
+		RetryDelay:      time.Second,
+		ExpectedGameID:  "1Z8W5NHUQb",
+		ExpectedGameBiz: "hk4e_cn",
+		BuildEndpoint:   sophonBuildEndpoint,
+		PlatformApp:     sophonPlatformApp,
 	}
+}
+
+func NewSophonProviderForRegion(region SophonRegion) *SophonProvider {
+	provider := NewSophonProvider()
+	if region == SophonGlobal {
+		provider.BuildURL = ""
+		provider.BranchesURL = GlobalSophonBranchesURL
+		provider.ExpectedGameID = "gopR6Cufr3"
+		provider.ExpectedGameBiz = "hk4e_global"
+		provider.BuildEndpoint = globalSophonBuildEndpoint
+		provider.PlatformApp = ""
+	}
+	return provider
 }
 
 func (p *SophonProvider) FetchBranches(ctx context.Context) (SophonBranches, error) {
@@ -191,8 +221,12 @@ func (p *SophonProvider) FetchBranches(ctx context.Context) (SophonBranches, err
 	if response.Retcode != 0 || response.Message != "OK" {
 		return SophonBranches{}, fmt.Errorf("Sophon branches API rejected request: retcode=%d message=%q", response.Retcode, response.Message)
 	}
+	expectedID, expectedBiz := p.ExpectedGameID, p.ExpectedGameBiz
+	if expectedID == "" {
+		expectedID, expectedBiz = "1Z8W5NHUQb", "hk4e_cn"
+	}
 	for _, entry := range response.Data.Branches {
-		if entry.Game.ID != "1Z8W5NHUQb" || entry.Game.Biz != "hk4e_cn" {
+		if entry.Game.ID != expectedID || entry.Game.Biz != expectedBiz {
 			continue
 		}
 		current, err := convertSophonBranch(entry.Main)
@@ -209,7 +243,7 @@ func (p *SophonProvider) FetchBranches(ctx context.Context) (SophonBranches, err
 		}
 		return result, nil
 	}
-	return SophonBranches{}, errors.New("Sophon branches API contains no audited mainland Genshin entry")
+	return SophonBranches{}, fmt.Errorf("Sophon branches API contains no audited Genshin entry %s/%s", expectedID, expectedBiz)
 }
 
 func convertSophonBranch(data sophonBranchData) (SophonBranch, error) {
@@ -220,6 +254,18 @@ func convertSophonBranch(data sophonBranchData) (SophonBranch, error) {
 }
 
 func (b SophonBranch) BuildURL() (string, error) {
+	return buildSophonURL(b, sophonBuildEndpoint, sophonPlatformApp)
+}
+
+func (p *SophonProvider) BuildURLFor(branch SophonBranch) (string, error) {
+	endpoint, platformApp := p.BuildEndpoint, p.PlatformApp
+	if endpoint == "" {
+		endpoint = sophonBuildEndpoint
+	}
+	return buildSophonURL(branch, endpoint, platformApp)
+}
+
+func buildSophonURL(b SophonBranch, endpoint, platformApp string) (string, error) {
 	if b.PackageID == "" || b.Branch == "" || b.Password == "" || b.Tag == "" {
 		return "", errors.New("incomplete Sophon branch")
 	}
@@ -227,9 +273,11 @@ func (b SophonBranch) BuildURL() (string, error) {
 	values.Set("branch", b.Branch)
 	values.Set("package_id", b.PackageID)
 	values.Set("password", b.Password)
-	values.Set("plat_app", sophonPlatformApp)
+	if platformApp != "" {
+		values.Set("plat_app", platformApp)
+	}
 	values.Set("tag", b.Tag)
-	return sophonBuildEndpoint + "?" + values.Encode(), nil
+	return endpoint + "?" + values.Encode(), nil
 }
 
 func (p *SophonProvider) FetchCatalog(ctx context.Context) (SophonCatalog, error) {

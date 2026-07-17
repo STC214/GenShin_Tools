@@ -37,4 +37,14 @@ The Go toolchain and GNU `windres` are build-time tools and are not redistribute
 - License: BSD 3-Clause
 - License copy: `LICENSES/google-protobuf-BSD-3-Clause.txt`
 
+## BetterGI
+
+- Project: BetterGI / better-genshin-impact
+- Source: <https://github.com/babalae/better-genshin-impact>
+- Role: optional external `bettergi://start` protocol target
+- License: GPL-3.0
+- Redistribution: no BetterGI source code or binary is linked, copied or packaged by this project
+
+The integration audits the user-installed URL handler and asks Windows to open the protocol. It never terminates a process merely because its executable name is `BetterGI`.
+
 This notice is a living document. Injection modules and plugins cannot enter a release until their source, license, version, architecture and SHA-256 have been recorded here or in a generated dependency manifest.
