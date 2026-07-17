@@ -15,12 +15,15 @@ import (
 	"unsafe"
 
 	"genshintools/internal/buildinfo"
+	"genshintools/internal/capture"
 	"genshintools/internal/config"
 	"genshintools/internal/diagnostics"
 	"genshintools/internal/game"
+	"genshintools/internal/gamewindow"
 	"genshintools/internal/input"
 	"genshintools/internal/launch"
 	"genshintools/internal/localenhance"
+	"genshintools/internal/overlay"
 	"genshintools/internal/paths"
 	"genshintools/internal/platform/win32"
 	"genshintools/internal/resources"
@@ -31,19 +34,23 @@ const (
 	windowClass  = "GenshinTools.MainWindow.S02"
 	instanceName = "Local\\GenshinTools.Singleton.S02"
 
-	messageActivate = win32.WM_APP + 1
-	messageTray     = win32.WM_APP + 2
-	messageSnapshot = win32.WM_APP + 3
-	messageInput    = win32.WM_APP + 4
-	messagePhysical = win32.WM_APP + 5
-	messageGame     = win32.WM_APP + 6
-	messageLaunch   = win32.WM_APP + 7
-	messageResource = win32.WM_APP + 8
-	messageServer   = win32.WM_APP + 9
+	messageActivate     = win32.WM_APP + 1
+	messageTray         = win32.WM_APP + 2
+	messageSnapshot     = win32.WM_APP + 3
+	messageInput        = win32.WM_APP + 4
+	messagePhysical     = win32.WM_APP + 5
+	messageGame         = win32.WM_APP + 6
+	messageLaunch       = win32.WM_APP + 7
+	messageResource     = win32.WM_APP + 8
+	messageServer       = win32.WM_APP + 9
+	messageCapture      = win32.WM_APP + 10
+	messageOverlay      = win32.WM_APP + 11
+	messageOverlayStats = win32.WM_APP + 12
 
-	trayID   = 1
-	menuShow = 1001
-	menuExit = 1002
+	trayID          = 1
+	captureHotkeyID = 2001
+	menuShow        = 1001
+	menuExit        = 1002
 )
 
 var active *application
@@ -70,36 +77,47 @@ type application struct {
 	fontBody  win32.HFONT
 	fontNav   win32.HFONT
 
-	snapshots            chan win32.ResourceSnapshot
-	lastSnap             win32.ResourceSnapshot
-	inputNative          *input.Native
-	inputUpdates         chan input.Snapshot
-	physicalEvents       chan input.PhysicalEvent
-	inputSnap            input.Snapshot
-	recording            int
-	inputUIError         string
-	gameUpdates          chan gameUpdate
-	gameState            gameViewState
-	gameTask             uint64
-	launchEngine         *launch.Engine
-	launchUpdates        chan launch.Snapshot
-	launchSnap           launch.Snapshot
-	launchUIError        string
-	shortcutStatus       string
-	resourceUpdates      chan resourceUpdate
-	resourceState        resourceViewState
-	resourceTask         uint64
-	localStatus          string
-	betterGITask         uint64
-	serverUpdates        chan serverUpdate
-	serverState          serverViewState
-	serverTask           uint64
-	customArgumentsEdit  win32.HWND
-	editBrush            win32.HBRUSH
-	sessionNotifications bool
-	shutdown             sync.Once
-	cleanExit            bool
-	fatal                bool
+	snapshots               chan win32.ResourceSnapshot
+	lastSnap                win32.ResourceSnapshot
+	inputNative             *input.Native
+	inputUpdates            chan input.Snapshot
+	physicalEvents          chan input.PhysicalEvent
+	inputSnap               input.Snapshot
+	recording               int
+	inputUIError            string
+	gameUpdates             chan gameUpdate
+	gameState               gameViewState
+	gameTask                uint64
+	launchEngine            *launch.Engine
+	launchUpdates           chan launch.Snapshot
+	launchSnap              launch.Snapshot
+	launchUIError           string
+	shortcutStatus          string
+	resourceUpdates         chan resourceUpdate
+	resourceState           resourceViewState
+	resourceTask            uint64
+	localStatus             string
+	betterGITask            uint64
+	serverUpdates           chan serverUpdate
+	serverState             serverViewState
+	serverTask              uint64
+	captureManager          *capture.Manager
+	captureResults          chan capture.Result
+	captureStatus           string
+	captureHotkeyRegistered bool
+	overlaySession          *overlay.Session
+	overlayUpdates          chan overlayUpdate
+	overlayStatsUpdates     chan overlay.Stats
+	overlayStats            overlay.Stats
+	overlayStatus           string
+	mediaTarget             gamewindow.Target
+	mediaTask               uint64
+	customArgumentsEdit     win32.HWND
+	editBrush               win32.HBRUSH
+	sessionNotifications    bool
+	shutdown                sync.Once
+	cleanExit               bool
+	fatal                   bool
 }
 
 type gameViewState struct {
@@ -156,13 +174,21 @@ type serverUpdate struct {
 	refresh bool
 }
 
+type overlayUpdate struct {
+	taskID  uint64
+	target  gamewindow.Target
+	session *overlay.Session
+	err     error
+}
+
 var navigation = []struct{ title, subtitle string }{
 	{"首页", "启动状态与常用操作将在后续阶段接入。"},
 	{"游戏管理", "S05：只读状态、纯净启动和启动设置。"},
 	{"资源管理", "S06：检查、下载、校验和事务修复。"},
 	{"区服工具", "S07：官服/B服快速切换与高级服务器转换。"},
 	{"本地增强", "S07：HDR、启动声音、BetterGI 与可回滚区服操作。"},
-	{"输入增强", "S03 将优先实现鼠标连点与键盘连按。"},
+	{"截图与性能", "S08：游戏窗口截图与 FPS/CPU/GPU 覆盖层。"},
+	{"输入增强", "S03：鼠标连点与键盘连按。"},
 	{"插件", "S09/S10 才会启用注入与插件，当前保持隔离。"},
 	{"设置", "S02 已启用便携配置、日志、DPI 和安全退出。"},
 }
@@ -211,24 +237,29 @@ func Run(layout paths.Layout, build buildinfo.Info) (returnErr error) {
 		return err
 	}
 	app := &application{
-		instance:        win32.ModuleHandle(),
-		settings:        loaded.Settings,
-		lastBounds:      loaded.Settings.Window,
-		layout:          layout,
-		build:           build,
-		logger:          logger,
-		tasks:           taskrunner.New(),
-		previousBad:     previousBad,
-		recovered:       loaded.RecoveredFrom,
-		snapshots:       make(chan win32.ResourceSnapshot, 1),
-		inputUpdates:    make(chan input.Snapshot, 1),
-		physicalEvents:  make(chan input.PhysicalEvent, 16),
-		gameUpdates:     make(chan gameUpdate, 1),
-		launchUpdates:   make(chan launch.Snapshot, 1),
-		resourceUpdates: make(chan resourceUpdate, 1),
-		resourceState:   resourceViewState{Language: "zh-cn", Status: "先检查在线资源并生成只读修复计划"},
-		serverUpdates:   make(chan serverUpdate, 1),
-		serverState:     serverViewState{Target: localenhance.QuickOfficial, AdvancedTarget: localenhance.AdvancedGlobal, Status: "先生成区服变更预览；不会直接修改游戏目录"},
+		instance:            win32.ModuleHandle(),
+		settings:            loaded.Settings,
+		lastBounds:          loaded.Settings.Window,
+		layout:              layout,
+		build:               build,
+		logger:              logger,
+		tasks:               taskrunner.New(),
+		previousBad:         previousBad,
+		recovered:           loaded.RecoveredFrom,
+		snapshots:           make(chan win32.ResourceSnapshot, 1),
+		inputUpdates:        make(chan input.Snapshot, 1),
+		physicalEvents:      make(chan input.PhysicalEvent, 16),
+		gameUpdates:         make(chan gameUpdate, 1),
+		launchUpdates:       make(chan launch.Snapshot, 1),
+		resourceUpdates:     make(chan resourceUpdate, 1),
+		resourceState:       resourceViewState{Language: "zh-cn", Status: "先检查在线资源并生成只读修复计划"},
+		serverUpdates:       make(chan serverUpdate, 1),
+		serverState:         serverViewState{Target: localenhance.QuickOfficial, AdvancedTarget: localenhance.AdvancedGlobal, Status: "先生成区服变更预览；不会直接修改游戏目录"},
+		captureResults:      make(chan capture.Result, 2),
+		overlayUpdates:      make(chan overlayUpdate, 4),
+		overlayStatsUpdates: make(chan overlay.Stats, 1),
+		captureStatus:       "截图功能未启用",
+		overlayStatus:       "性能覆盖层未启用",
 	}
 	active = app
 	defer func() { active = nil }()
@@ -259,6 +290,10 @@ func Run(layout paths.Layout, build buildinfo.Info) (returnErr error) {
 	if err := app.startInput(); err != nil {
 		app.requestShutdown()
 		return fmt.Errorf("start input enhancement: %w", err)
+	}
+	if err := app.startCaptureOverlay(); err != nil {
+		app.requestShutdown()
+		return fmt.Errorf("start capture and overlay: %w", err)
 	}
 	app.startBackgroundDiagnostics()
 	app.startGameScan(os.Getenv("GENSHINTOOLS_S04_GAME_PATH"))
@@ -428,6 +463,7 @@ func (app *application) handleMessage(hwnd win32.HWND, message uint32, wParam, l
 			case update := <-app.gameUpdates:
 				if update.taskID == app.gameTask {
 					app.gameState = update.state
+					app.reconcileCaptureOverlay(false)
 				}
 			default:
 				win32.Invalidate(hwnd)
@@ -478,6 +514,52 @@ func (app *application) handleMessage(hwnd win32.HWND, message uint32, wParam, l
 				return 0
 			}
 		}
+	case messageCapture:
+		for {
+			select {
+			case result := <-app.captureResults:
+				if result.Error != "" {
+					app.captureStatus = "截图失败：" + result.Error
+					app.logger.Error("capture game window", map[string]any{"error": result.Error})
+				} else {
+					app.captureStatus = "截图已保存：" + result.Path
+					app.logger.Info("game screenshot saved", map[string]any{"path": result.Path})
+				}
+			default:
+				win32.Invalidate(hwnd)
+				return 0
+			}
+		}
+	case messageOverlay:
+		for {
+			select {
+			case update := <-app.overlayUpdates:
+				if update.taskID == app.mediaTask {
+					app.overlaySession = update.session
+					if update.err != nil {
+						app.overlayStatus = "覆盖层启动失败：" + update.err.Error()
+					} else if update.session != nil {
+						app.overlayStatus = fmt.Sprintf("覆盖层运行中：PID %d", update.target.PID)
+					} else {
+						app.overlayStatus = "性能覆盖层已停止"
+					}
+				} else if update.session != nil {
+					app.tasks.Run(func(ctx context.Context, _ uint64) { _ = update.session.Close(ctx) })
+				}
+			default:
+				win32.Invalidate(hwnd)
+				return 0
+			}
+		}
+	case messageOverlayStats:
+		for {
+			select {
+			case app.overlayStats = <-app.overlayStatsUpdates:
+			default:
+				win32.Invalidate(hwnd)
+				return 0
+			}
+		}
 	case messageTray:
 		event := uint32(lParam & 0xffff)
 		switch event {
@@ -507,7 +589,19 @@ func (app *application) handleMessage(hwnd win32.HWND, message uint32, wParam, l
 		} else if app.selected == 4 && x >= int(win32.Scale(210, app.dpi)) {
 			app.localEnhanceClick(x, y)
 		} else if app.selected == 5 && x >= int(win32.Scale(210, app.dpi)) {
+			app.mediaClick(x, y)
+		} else if app.selected == 6 && x >= int(win32.Scale(210, app.dpi)) {
 			app.inputClick(x, y)
+		}
+		return 0
+	case win32.WM_HOTKEY:
+		if int32(wParam) == captureHotkeyID && app.captureManager != nil {
+			if app.captureManager.Request() {
+				app.captureStatus = "截图请求已进入有界队列…"
+			} else {
+				app.captureStatus = "截图请求未接受：无已核验游戏窗口或队列已满"
+			}
+			win32.Invalidate(hwnd)
 		}
 		return 0
 	case win32.WM_KEYDOWN:
@@ -608,6 +702,27 @@ func (app *application) restore() {
 func (app *application) requestShutdown() {
 	app.shutdown.Do(func() {
 		localenhance.StopStartupSound()
+		if app.captureHotkeyRegistered {
+			win32.UnregisterHotKey(app.hwnd, captureHotkeyID)
+			app.captureHotkeyRegistered = false
+		}
+		if app.captureManager != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			if err := app.captureManager.Close(ctx); err != nil {
+				app.logger.Error("screenshot worker shutdown", map[string]any{"error": err.Error()})
+			}
+			cancel()
+			app.captureManager = nil
+		}
+		app.tasks.Cancel(app.mediaTask)
+		if app.overlaySession != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			if err := app.overlaySession.Close(ctx); err != nil {
+				app.logger.Error("overlay session shutdown", map[string]any{"error": err.Error()})
+			}
+			cancel()
+			app.overlaySession = nil
+		}
 		if !app.serverState.Busy && app.serverState.Transaction != nil {
 			_ = app.serverState.Transaction.Abort()
 			app.serverState.Transaction = nil
@@ -753,6 +868,8 @@ func (app *application) paint(hwnd win32.HWND) {
 	} else if app.selected == 4 {
 		app.paintLocalEnhance(dc, client, contentLeft)
 	} else if app.selected == 5 {
+		app.paintMedia(dc, client, contentLeft)
+	} else if app.selected == 6 {
 		app.paintInput(dc, client, contentLeft)
 	} else {
 		cardBrush := win32.CreateSolidBrush(win32.Color(25, 29, 39))
@@ -821,6 +938,303 @@ func (app *application) startInput() error {
 	}
 	app.logger.Info("input enhancement initialized", map[string]any{"state": app.inputSnap.State.String()})
 	return nil
+}
+
+func (app *application) startCaptureOverlay() error {
+	if app.settings.Capture.SaveDir == "" {
+		app.settings.Capture.SaveDir = filepath.Join("data", "screenshots")
+	}
+	app.captureManager = capture.NewManager(nil, func(result capture.Result) {
+		select {
+		case app.captureResults <- result:
+		default:
+			select {
+			case <-app.captureResults:
+			default:
+			}
+			app.captureResults <- result
+		}
+		win32.PostMessage(app.hwnd, messageCapture, 0, 0)
+	})
+	if err := app.captureManager.Configure(app.runtimeCaptureConfig()); err != nil {
+		return err
+	}
+	if err := app.applyCaptureHotkey(); err != nil {
+		app.captureStatus = "截图快捷键注册失败：" + err.Error()
+		app.logger.Error("register screenshot hotkey", map[string]any{"error": err.Error()})
+	} else if app.settings.Capture.Enabled {
+		app.captureStatus = "截图已启用，等待已核验游戏窗口"
+	}
+	return nil
+}
+
+func (app *application) applyCaptureHotkey() error {
+	if app.captureHotkeyRegistered {
+		win32.UnregisterHotKey(app.hwnd, captureHotkeyID)
+		app.captureHotkeyRegistered = false
+	}
+	if err := app.captureManager.Configure(app.runtimeCaptureConfig()); err != nil {
+		return err
+	}
+	if !app.settings.Capture.Enabled {
+		return nil
+	}
+	if app.settings.Capture.ConflictsWith(app.settings.Input.TriggerKey, app.settings.Input.OutputKey, app.settings.Input.StopKey) {
+		return errors.New("截图键与输入增强物理键冲突")
+	}
+	if err := win32.RegisterHotKey(app.hwnd, captureHotkeyID, app.settings.Capture.Modifiers, app.settings.Capture.VirtualKey); err != nil {
+		return err
+	}
+	app.captureHotkeyRegistered = true
+	return nil
+}
+
+func (app *application) reconcileCaptureOverlay(force bool) {
+	var target gamewindow.Target
+	for _, process := range app.gameState.Running {
+		if process.VerifiedPath && process.CreationTime != 0 {
+			target = gamewindow.Target{PID: process.PID, CreationTime: process.CreationTime}
+			break
+		}
+	}
+	if app.captureManager != nil {
+		if target.PID == 0 {
+			app.captureManager.SetTarget(nil)
+		} else {
+			app.captureManager.SetTarget(&target)
+		}
+	}
+	if app.overlaySession != nil {
+		select {
+		case <-app.overlaySession.Done():
+			app.overlaySession = nil
+		default:
+		}
+	}
+	if !force && target == app.mediaTarget && ((app.settings.Overlay.Enabled && app.overlaySession != nil) || (!app.settings.Overlay.Enabled && app.overlaySession == nil)) {
+		return
+	}
+	app.tasks.Cancel(app.mediaTask)
+	old := app.overlaySession
+	app.overlaySession = nil
+	app.mediaTarget = target
+	if app.settings.Overlay.Enabled && target.PID == 0 {
+		app.overlayStatus = "覆盖层已启用，等待已核验游戏窗口"
+	} else {
+		app.overlayStatus = "正在协调覆盖层生命周期…"
+	}
+	configCopy := app.settings.Overlay
+	app.mediaTask = app.tasks.Run(func(ctx context.Context, id uint64) {
+		if old != nil {
+			closeCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			_ = old.Close(closeCtx)
+			cancel()
+		}
+		if ctx.Err() != nil || !configCopy.Enabled || target.PID == 0 {
+			app.publishOverlay(overlayUpdate{taskID: id, target: target})
+			return
+		}
+		session, err := overlay.Start(target, configCopy, func(stats overlay.Stats) {
+			select {
+			case app.overlayStatsUpdates <- stats:
+			default:
+				select {
+				case <-app.overlayStatsUpdates:
+				default:
+				}
+				app.overlayStatsUpdates <- stats
+			}
+			win32.PostMessage(app.hwnd, messageOverlayStats, 0, 0)
+		})
+		if ctx.Err() != nil && session != nil {
+			closeCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			_ = session.Close(closeCtx)
+			cancel()
+			session = nil
+		}
+		app.publishOverlay(overlayUpdate{taskID: id, target: target, session: session, err: err})
+	})
+}
+
+func (app *application) publishOverlay(update overlayUpdate) {
+	select {
+	case app.overlayUpdates <- update:
+		win32.PostMessage(app.hwnd, messageOverlay, 0, 0)
+	default:
+		if update.session != nil {
+			closeCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			_ = update.session.Close(closeCtx)
+			cancel()
+		}
+	}
+}
+
+func (app *application) runtimeCaptureConfig() capture.Config {
+	configured := app.settings.Capture
+	if configured.SaveDir != "" && !filepath.IsAbs(configured.SaveDir) {
+		configured.SaveDir = filepath.Join(app.layout.Root, configured.SaveDir)
+	}
+	return configured
+}
+
+func (app *application) portableCapturePath(selected string) string {
+	relative, err := filepath.Rel(app.layout.Root, selected)
+	if err == nil && relative != "." && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return relative
+	}
+	return selected
+}
+
+func (app *application) saveMediaSettings() bool {
+	if err := config.Save(app.layout.Config, app.settings); err != nil {
+		app.captureStatus = "保存 S08 设置失败：" + err.Error()
+		return false
+	}
+	return true
+}
+
+func (app *application) mediaClick(_, y int) {
+	sy := func(value int32) int { return int(win32.Scale(value, app.dpi)) }
+	switch {
+	case y >= sy(170) && y < sy(214):
+		app.settings.Capture.Enabled = !app.settings.Capture.Enabled
+		if err := app.applyCaptureHotkey(); err != nil {
+			app.captureStatus = "截图快捷键注册失败：" + err.Error()
+		} else if app.settings.Capture.Enabled {
+			app.captureStatus = "截图已启用：" + app.settings.Capture.HotkeyString()
+		} else {
+			app.captureStatus = "截图功能已停用"
+		}
+		app.saveMediaSettings()
+	case y >= sy(220) && y < sy(264):
+		presets := []uint32{0x79, 0x78, 0x2C}
+		index := 0
+		for i, key := range presets {
+			if app.settings.Capture.VirtualKey == key {
+				index = (i + 1) % len(presets)
+				break
+			}
+		}
+		for range presets {
+			key := presets[index]
+			index = (index + 1) % len(presets)
+			if key != app.settings.Input.TriggerKey && key != app.settings.Input.OutputKey && key != app.settings.Input.StopKey {
+				app.settings.Capture.VirtualKey = key
+				break
+			}
+		}
+		if err := app.applyCaptureHotkey(); err != nil {
+			app.captureStatus = "切换截图键失败：" + err.Error()
+		} else {
+			app.captureStatus = "截图键已改为 " + app.settings.Capture.HotkeyString()
+		}
+		app.saveMediaSettings()
+	case y >= sy(270) && y < sy(314):
+		if app.captureManager != nil && app.captureManager.Request() {
+			app.captureStatus = "手动截图请求已进入有界队列…"
+		} else {
+			app.captureStatus = "无法截图：请启用截图并启动已核验的游戏窗口"
+		}
+	case y >= sy(320) && y < sy(364):
+		path, selected, err := win32.SelectFolder(app.hwnd, app.settings.Capture.SaveDir)
+		if err != nil {
+			app.captureStatus = "选择截图目录失败：" + err.Error()
+		} else if selected {
+			app.settings.Capture.SaveDir = app.portableCapturePath(path)
+			if err := app.captureManager.Configure(app.runtimeCaptureConfig()); err != nil {
+				app.captureStatus = "截图目录无效：" + err.Error()
+			} else {
+				app.captureStatus = "截图目录已设置：" + path
+				app.saveMediaSettings()
+			}
+		}
+	case y >= sy(370) && y < sy(414):
+		app.settings.Overlay.Enabled = !app.settings.Overlay.Enabled
+		app.saveMediaSettings()
+		app.reconcileCaptureOverlay(true)
+	case y >= sy(420) && y < sy(464):
+		settings := &app.settings.Overlay
+		switch {
+		case settings.ShowFPS && settings.ShowCPU && settings.ShowGPU:
+			settings.ShowCPU, settings.ShowGPU = false, false
+		case settings.ShowFPS && !settings.ShowCPU && !settings.ShowGPU:
+			settings.ShowFPS, settings.ShowCPU, settings.ShowGPU = false, true, true
+		default:
+			settings.ShowFPS, settings.ShowCPU, settings.ShowGPU = true, true, true
+		}
+		app.saveMediaSettings()
+		app.reconcileCaptureOverlay(true)
+	case y >= sy(470) && y < sy(514):
+		presets := [][2]int{{16, 16}, {16, 120}, {300, 16}}
+		index := 0
+		for i, preset := range presets {
+			if app.settings.Overlay.OffsetX == preset[0] && app.settings.Overlay.OffsetY == preset[1] {
+				index = (i + 1) % len(presets)
+				break
+			}
+		}
+		app.settings.Overlay.OffsetX, app.settings.Overlay.OffsetY = presets[index][0], presets[index][1]
+		app.saveMediaSettings()
+		app.reconcileCaptureOverlay(true)
+	}
+	win32.Invalidate(app.hwnd)
+}
+
+func (app *application) paintMedia(dc win32.HDC, client win32.Rect, left int32) {
+	cardBrush := win32.CreateSolidBrush(win32.Color(25, 29, 39))
+	defer win32.DeleteObject(uintptr(cardBrush))
+	buttonBrush := win32.CreateSolidBrush(win32.Color(35, 40, 54))
+	defer win32.DeleteObject(uintptr(buttonBrush))
+	activeBrush := win32.CreateSolidBrush(win32.Color(52, 66, 112))
+	defer win32.DeleteObject(uintptr(activeBrush))
+	right := client.Right - win32.Scale(42, app.dpi)
+	row := func(top, bottom int32, brush win32.HBRUSH) win32.Rect {
+		rect := win32.Rect{Left: left, Top: win32.Scale(top, app.dpi), Right: right, Bottom: win32.Scale(bottom, app.dpi)}
+		win32.FillRect(dc, &rect, brush)
+		return rect
+	}
+	draw := func(text string, rect win32.Rect, color uint32) {
+		win32.SetTextColor(dc, color)
+		rect.Left += win32.Scale(18, app.dpi)
+		rect.Right -= win32.Scale(12, app.dpi)
+		win32.DrawText(dc, text, &rect, win32.DT_LEFT|win32.DT_VCENTER|win32.DT_SINGLELINE|win32.DT_END_ELLIPSIS)
+	}
+	captureState := "停用"
+	if app.settings.Capture.Enabled {
+		captureState = "启用"
+	}
+	draw("游戏窗口截图："+captureState+"    单击切换", row(170, 214, activeBrush), win32.Color(235, 238, 248))
+	draw("全局截图键："+app.settings.Capture.HotkeyString()+"    单击切换安全预设", row(220, 264, buttonBrush), win32.Color(225, 229, 242))
+	draw("立即截取已核验游戏窗口", row(270, 314, buttonBrush), win32.Color(225, 229, 242))
+	draw("保存目录："+app.settings.Capture.SaveDir, row(320, 364, buttonBrush), win32.Color(190, 197, 216))
+	overlayState := "停用"
+	if app.settings.Overlay.Enabled {
+		overlayState = "启用"
+	}
+	draw("性能覆盖层："+overlayState+"    单击切换", row(370, 414, activeBrush), win32.Color(235, 238, 248))
+	metrics := []string{}
+	if app.settings.Overlay.ShowFPS {
+		metrics = append(metrics, "FPS")
+	}
+	if app.settings.Overlay.ShowCPU {
+		metrics = append(metrics, "CPU")
+	}
+	if app.settings.Overlay.ShowGPU {
+		metrics = append(metrics, "GPU")
+	}
+	draw("显示指标："+strings.Join(metrics, " / ")+"    单击切换组合", row(420, 464, buttonBrush), win32.Color(225, 229, 242))
+	draw(fmt.Sprintf("覆盖层偏移：X %d · Y %d    单击切换预设", app.settings.Overlay.OffsetX, app.settings.Overlay.OffsetY), row(470, 514, buttonBrush), win32.Color(225, 229, 242))
+	statsText := fmt.Sprintf("实时：FPS %s · CPU %s · GPU %s", metricValue(app.overlayStats.FPS, app.overlayStats.FPSValid), metricValue(app.overlayStats.CPU, app.overlayStats.CPUValid), metricValue(app.overlayStats.GPU, app.overlayStats.GPUValid))
+	draw(statsText, row(526, 566, cardBrush), win32.Color(166, 174, 197))
+	status := app.captureStatus + "  |  " + app.overlayStatus
+	draw(status, row(572, 612, cardBrush), win32.Color(126, 136, 160))
+}
+
+func metricValue(value float64, valid bool) string {
+	if !valid {
+		return "N/A"
+	}
+	return fmt.Sprintf("%.1f", value)
 }
 
 func (app *application) stopInputForSystemEvent(reason string) {
@@ -913,6 +1327,11 @@ func (app *application) recordPhysical(event input.PhysicalEvent) {
 	}
 	config.Enabled = false
 	app.recording = 0
+	if event.Code == app.settings.Capture.VirtualKey {
+		app.inputUIError = "该物理键已被截图快捷键使用；即使修饰键不同也可能触发输入停止逻辑"
+		win32.Invalidate(app.hwnd)
+		return
+	}
 	if err := app.inputNative.Configure(config); err != nil {
 		app.inputUIError = err.Error()
 		app.logger.Error("record input hotkey", map[string]any{"error": err.Error()})

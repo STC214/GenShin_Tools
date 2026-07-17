@@ -47,4 +47,13 @@ The Go toolchain and GNU `windres` are build-time tools and are not redistribute
 
 The integration audits the user-installed URL handler and asks Windows to open the protocol. It never terminates a process merely because its executable name is `BetterGI`.
 
+## PresentMon
+
+- Project: GameTechDev/PresentMon
+- Source: <https://github.com/GameTechDev/PresentMon>
+- Audited commit: `de4b9c40bc97d237a77e539d1bd2835b743b33f0`
+- Role: technical reference for documented DXGI ETW provider/event identifiers and trace-consumer behavior
+- License: MIT License
+- Redistribution: no PresentMon source code or binary is linked, copied or packaged by this project
+
 This notice is a living document. Injection modules and plugins cannot enter a release until their source, license, version, architecture and SHA-256 have been recorded here or in a generated dependency manifest.

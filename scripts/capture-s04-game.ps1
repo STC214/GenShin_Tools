@@ -1,12 +1,17 @@
 [CmdletBinding()]
 param(
     [string]$OutputPath,
-    [int]$NavigationY = 156
+    [int]$NavigationY = 156,
+    [string]$ExecutablePath
 )
 
 $ErrorActionPreference = 'Stop'
 $ProjectRoot = Split-Path -Parent $PSScriptRoot
-$Executable = (Resolve-Path (Join-Path $ProjectRoot 'dist\GenshinTools.exe')).Path
+$Executable = if ($ExecutablePath) {
+    (Resolve-Path -LiteralPath $ExecutablePath).Path
+} else {
+    (Resolve-Path (Join-Path $ProjectRoot 'dist\GenshinTools.exe')).Path
+}
 $Fixture = (Resolve-Path (Join-Path $ProjectRoot 'build\s04-fixture')).Path
 $ReadyFile = Join-Path $ProjectRoot 'dist\data\capture-s04-ready.tmp'
 if (-not $OutputPath) { $OutputPath = Join-Path $ProjectRoot 'build\s04-game.png' }

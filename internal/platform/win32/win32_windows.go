@@ -132,6 +132,17 @@ type openFileName struct {
 	FlagsEx         uint32
 }
 
+type browseInfo struct {
+	Owner       HWND
+	Root        uintptr
+	DisplayName *uint16
+	Title       *uint16
+	Flags       uint32
+	Callback    uintptr
+	Parameter   uintptr
+	Image       int32
+}
+
 const (
 	CS_HREDRAW = 0x0002
 	CS_VREDRAW = 0x0001
@@ -168,6 +179,7 @@ const (
 	WM_RBUTTONUP        = 0x0205
 	WM_KEYDOWN          = 0x0100
 	WM_KEYUP            = 0x0101
+	WM_HOTKEY           = 0x0312
 	WM_POWERBROADCAST   = 0x0218
 	WM_WTSSESSIONCHANGE = 0x02B1
 	WM_DPICHANGED       = 0x02E0
@@ -235,6 +247,9 @@ var (
 
 	procRegisterClassExW              = user32.NewProc("RegisterClassExW")
 	procGetOpenFileNameW              = comdlg32.NewProc("GetOpenFileNameW")
+	procSHBrowseForFolderW            = shell32.NewProc("SHBrowseForFolderW")
+	procSHGetPathFromIDListEx         = shell32.NewProc("SHGetPathFromIDListEx")
+	procCoTaskMemFree                 = ole32.NewProc("CoTaskMemFree")
 	procCommDlgExtendedError          = comdlg32.NewProc("CommDlgExtendedError")
 	procSetWindowTheme                = uxtheme.NewProc("SetWindowTheme")
 	procCreateWindowExW               = user32.NewProc("CreateWindowExW")
@@ -271,6 +286,8 @@ var (
 	procGetDpiForWindow               = user32.NewProc("GetDpiForWindow")
 	procSetProcessDpiAwarenessContext = user32.NewProc("SetProcessDpiAwarenessContext")
 	procRegisterWindowMessageW        = user32.NewProc("RegisterWindowMessageW")
+	procRegisterHotKey                = user32.NewProc("RegisterHotKey")
+	procUnregisterHotKey              = user32.NewProc("UnregisterHotKey")
 	procCreatePopupMenu               = user32.NewProc("CreatePopupMenu")
 	procAppendMenuW                   = user32.NewProc("AppendMenuW")
 	procTrackPopupMenu                = user32.NewProc("TrackPopupMenu")
@@ -325,6 +342,41 @@ func SelectExecutable(owner HWND, initialDirectory string) (path string, selecte
 
 func SelectWaveFile(owner HWND, initialDirectory string) (path string, selected bool, err error) {
 	return selectFile(owner, initialDirectory, "Wave audio (*.wav)", "*.wav", "选择启动声音", "wav")
+}
+
+var browseCallback = windows.NewCallback(func(hwnd uintptr, message uint32, _ uintptr, parameter uintptr) uintptr {
+	const (
+		bffmInitialized   = 1
+		bffmSetSelectionW = 0x0467
+	)
+	if message == bffmInitialized && parameter != 0 {
+		procSendMessageW.Call(hwnd, bffmSetSelectionW, 1, parameter)
+	}
+	return 0
+})
+
+func SelectFolder(owner HWND, initialDirectory string) (path string, selected bool, err error) {
+	display := make([]uint16, 32768)
+	title := UTF16("选择截图保存目录")
+	var initial *uint16
+	if initialDirectory != "" {
+		initial = UTF16(initialDirectory)
+	}
+	info := browseInfo{Owner: owner, DisplayName: &display[0], Title: title, Flags: 0x0001 | 0x0040, Callback: browseCallback, Parameter: uintptr(unsafe.Pointer(initial))}
+	item, _, _ := procSHBrowseForFolderW.Call(uintptr(unsafe.Pointer(&info)))
+	if item == 0 {
+		return "", false, nil
+	}
+	defer procCoTaskMemFree.Call(item)
+	buffer := make([]uint16, 32768)
+	ok, _, pathErr := procSHGetPathFromIDListEx.Call(item, uintptr(unsafe.Pointer(&buffer[0])), uintptr(len(buffer)), 0)
+	if ok == 0 {
+		if pathErr != nil && pathErr != syscall.Errno(0) {
+			return "", false, fmt.Errorf("SHGetPathFromIDListEx: %w", pathErr)
+		}
+		return "", false, errors.New("SHGetPathFromIDListEx failed")
+	}
+	return windows.UTF16ToString(buffer), true, nil
 }
 
 func selectFile(owner HWND, initialDirectory, filterName, pattern, title, defaultExtension string) (path string, selected bool, err error) {
@@ -403,6 +455,19 @@ func PostQuitMessage(code int32)          { procPostQuitMessage.Call(uintptr(cod
 func PostMessage(hwnd HWND, message uint32, wParam, lParam uintptr) bool {
 	value, _, _ := procPostMessageW.Call(uintptr(hwnd), uintptr(message), wParam, lParam)
 	return value != 0
+}
+
+func RegisterHotKey(hwnd HWND, id int32, modifiers, virtualKey uint32) error {
+	result, _, err := procRegisterHotKey.Call(uintptr(hwnd), uintptr(id), uintptr(modifiers), uintptr(virtualKey))
+	if result == 0 {
+		return fmt.Errorf("RegisterHotKey: %w", err)
+	}
+	return nil
+}
+
+func UnregisterHotKey(hwnd HWND, id int32) bool {
+	result, _, _ := procUnregisterHotKey.Call(uintptr(hwnd), uintptr(id))
+	return result != 0
 }
 
 func GetMessage(message *Msg) (int32, error) {

@@ -12,12 +12,14 @@ import (
 	"strings"
 	"time"
 
+	"genshintools/internal/capture"
 	"genshintools/internal/input"
 	"genshintools/internal/launch"
 	"genshintools/internal/localenhance"
+	"genshintools/internal/overlay"
 )
 
-const CurrentSchemaVersion = 5
+const CurrentSchemaVersion = 6
 
 // Settings contains only stable shell settings in S02. Feature settings are
 // added by their implementation stage instead of being guessed in advance.
@@ -28,6 +30,8 @@ type Settings struct {
 	Game          GameConfig         `json:"game"`
 	Launch        launch.Config      `json:"launch"`
 	LocalEnhance  LocalEnhanceConfig `json:"localEnhance"`
+	Capture       capture.Config     `json:"capture"`
+	Overlay       overlay.Config     `json:"overlay"`
 }
 
 type LocalEnhanceConfig struct {
@@ -65,6 +69,8 @@ func Default() Settings {
 		Input:        input.DefaultConfig(),
 		Launch:       launch.DefaultConfig(),
 		LocalEnhance: LocalEnhanceConfig{HDR: localenhance.DefaultHDRConfig()},
+		Capture:      capture.DefaultConfig(),
+		Overlay:      overlay.DefaultConfig(),
 	}
 }
 
@@ -105,22 +111,30 @@ func migrateAndValidate(settings *Settings) error {
 		// Schema 0 was the pre-release shape with the same window fields.
 		settings.Input = input.DefaultConfig()
 		settings.LocalEnhance = Default().LocalEnhance
+		settings.Capture, settings.Overlay = Default().Capture, Default().Overlay
 		settings.SchemaVersion = CurrentSchemaVersion
 	case 1:
 		settings.Input = input.DefaultConfig()
 		settings.LocalEnhance = Default().LocalEnhance
+		settings.Capture, settings.Overlay = Default().Capture, Default().Overlay
 		settings.SchemaVersion = CurrentSchemaVersion
 	case 2:
 		settings.LocalEnhance = Default().LocalEnhance
+		settings.Capture, settings.Overlay = Default().Capture, Default().Overlay
 		settings.SchemaVersion = CurrentSchemaVersion
 	case 3:
 		settings.Launch = launch.DefaultConfig()
 		settings.LocalEnhance = Default().LocalEnhance
+		settings.Capture, settings.Overlay = Default().Capture, Default().Overlay
 		settings.SchemaVersion = CurrentSchemaVersion
 	case 4:
 		settings.LocalEnhance = Default().LocalEnhance
+		settings.Capture, settings.Overlay = Default().Capture, Default().Overlay
 		settings.SchemaVersion = CurrentSchemaVersion
 	case 5:
+		settings.Capture, settings.Overlay = Default().Capture, Default().Overlay
+		settings.SchemaVersion = CurrentSchemaVersion
+	case 6:
 	default:
 		return fmt.Errorf("unsupported schema version %d", settings.SchemaVersion)
 	}
@@ -160,6 +174,19 @@ func migrateAndValidate(settings *Settings) error {
 	if settings.LocalEnhance.BetterGIDelayMS < 0 || settings.LocalEnhance.BetterGIDelayMS > 60000 {
 		return errors.New("BetterGI delay must be within 0..60000 ms")
 	}
+	normalizedCapture, err := settings.Capture.Normalized()
+	if err != nil {
+		return fmt.Errorf("capture settings: %w", err)
+	}
+	if normalizedCapture.ConflictsWith(settings.Input.TriggerKey, settings.Input.OutputKey, settings.Input.StopKey) {
+		return errors.New("screenshot hotkey conflicts with an input enhancement physical key")
+	}
+	settings.Capture = normalizedCapture
+	normalizedOverlay, err := settings.Overlay.Normalized()
+	if err != nil {
+		return fmt.Errorf("overlay settings: %w", err)
+	}
+	settings.Overlay = normalizedOverlay
 	return nil
 }
 
