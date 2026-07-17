@@ -25,7 +25,7 @@ func TestLaunchSuspendedAndInjectOnOwnedFixture(t *testing.T) {
 	}
 	t.Setenv("GENSHINTOOLS_S09_CHILD", "1")
 	dll := filepath.Join(os.Getenv("SystemRoot"), "System32", "version.dll")
-	pid, err := launchSuspendedAndInject(executable, filepath.Dir(executable), []string{"-test.run=^TestInjectionFixtureChild$"}, dll, 5*time.Second)
+	pid, err := launchSuspendedAndInject(executable, filepath.Dir(executable), []string{"-test.run=^TestInjectionFixtureChild$"}, []string{dll}, 5*time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}

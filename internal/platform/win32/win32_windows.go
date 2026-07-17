@@ -340,6 +340,10 @@ func SelectExecutable(owner HWND, initialDirectory string) (path string, selecte
 	return selectFile(owner, initialDirectory, "Windows executables (*.exe)", "*.exe", "选择原神游戏主程序", "exe")
 }
 
+func SelectPluginPackage(owner HWND, initialDirectory string) (path string, selected bool, err error) {
+	return selectFile(owner, initialDirectory, "Genshin Tools plugin packages (*.zip)", "*.zip", "选择本地插件包", "zip")
+}
+
 func SelectWaveFile(owner HWND, initialDirectory string) (path string, selected bool, err error) {
 	return selectFile(owner, initialDirectory, "Wave audio (*.wav)", "*.wav", "选择启动声音", "wav")
 }

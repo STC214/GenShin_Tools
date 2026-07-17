@@ -18,9 +18,10 @@ import (
 	"genshintools/internal/launch"
 	"genshintools/internal/localenhance"
 	"genshintools/internal/overlay"
+	"genshintools/internal/plugins"
 )
 
-const CurrentSchemaVersion = 7
+const CurrentSchemaVersion = 8
 
 // Settings contains only stable shell settings in S02. Feature settings are
 // added by their implementation stage instead of being guessed in advance.
@@ -34,6 +35,7 @@ type Settings struct {
 	Capture       capture.Config     `json:"capture"`
 	Overlay       overlay.Config     `json:"overlay"`
 	Injection     injection.Config   `json:"injection"`
+	Plugins       plugins.Config     `json:"plugins"`
 }
 
 type LocalEnhanceConfig struct {
@@ -74,6 +76,7 @@ func Default() Settings {
 		Capture:      capture.DefaultConfig(),
 		Overlay:      overlay.DefaultConfig(),
 		Injection:    injection.DefaultConfig(),
+		Plugins:      plugins.DefaultConfig(),
 	}
 }
 
@@ -109,6 +112,7 @@ func Load(path string) (LoadResult, error) {
 }
 
 func migrateAndValidate(settings *Settings) error {
+	loadedSchema := settings.SchemaVersion
 	switch settings.SchemaVersion {
 	case 0:
 		// Schema 0 was the pre-release shape with the same window fields.
@@ -141,8 +145,13 @@ func migrateAndValidate(settings *Settings) error {
 		settings.Injection = Default().Injection
 		settings.SchemaVersion = CurrentSchemaVersion
 	case 7:
+		settings.SchemaVersion = CurrentSchemaVersion
+	case 8:
 	default:
 		return fmt.Errorf("unsupported schema version %d", settings.SchemaVersion)
+	}
+	if loadedSchema < 8 {
+		settings.Plugins = plugins.DefaultConfig()
 	}
 	if settings.Window.Width < 640 || settings.Window.Width > 10000 {
 		settings.Window.Width = Default().Window.Width
@@ -198,6 +207,11 @@ func migrateAndValidate(settings *Settings) error {
 		return fmt.Errorf("injection settings: %w", err)
 	}
 	settings.Injection = normalizedInjection
+	normalizedPlugins, err := settings.Plugins.Normalized()
+	if err != nil {
+		return fmt.Errorf("plugin settings: %w", err)
+	}
+	settings.Plugins = normalizedPlugins
 	return nil
 }
 

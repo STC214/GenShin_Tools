@@ -150,3 +150,18 @@ func TestSchemaSixMigratesSafeInjectionDefaults(t *testing.T) {
 		t.Fatalf("migrated injection settings = %+v", loaded.Settings.Injection)
 	}
 }
+
+func TestSchemaSevenMigratesSafePluginDefaults(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	data := []byte(`{"schemaVersion":7,"window":{"width":1100,"height":720},"input":{"mode":0,"triggerKey":119,"outputKey":70,"stopKey":123,"intervalMs":50},"launch":{"width":1920,"height":1080},"injection":{"elevatedHelper":true,"helperTimeoutMs":15000,"remoteTimeoutMs":5000}}`)
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Settings.SchemaVersion != CurrentSchemaVersion || !loaded.Settings.Plugins.SafeMode || loaded.Settings.Plugins.CatalogURL != "" {
+		t.Fatalf("migrated plugin settings = %+v", loaded.Settings.Plugins)
+	}
+}

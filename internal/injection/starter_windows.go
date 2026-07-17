@@ -27,6 +27,7 @@ type Starter struct {
 	ModulesRoot string
 	StagingRoot string
 	Config      Config
+	ModuleIDs   []string
 }
 
 var procCompareStringOrdinal = windows.NewLazySystemDLL("kernel32.dll").NewProc("CompareStringOrdinal")
@@ -36,14 +37,20 @@ func (starter Starter) Start(request launch.Request) (launch.Process, error) {
 	if err != nil {
 		return nil, err
 	}
-	if !config.Enabled || !config.RiskAcknowledged || config.ModuleID == "" {
+	moduleIDs, err := starter.normalizedModuleIDs(config.ModuleID)
+	if err != nil {
+		return nil, err
+	}
+	if !config.Enabled || !config.RiskAcknowledged || len(moduleIDs) == 0 {
 		return nil, errors.New("injection requires enabled state, risk acknowledgement and a selected module")
 	}
 	if err := starter.validateLayout(); err != nil {
 		return nil, err
 	}
-	if _, err := AuditModule(starter.ModulesRoot, config.ModuleID, request.Candidate); err != nil {
-		return nil, fmt.Errorf("main-process injection preflight: %w", err)
+	for _, moduleID := range moduleIDs {
+		if _, err := AuditModule(starter.ModulesRoot, moduleID, request.Candidate); err != nil {
+			return nil, fmt.Errorf("main-process injection preflight %s: %w", moduleID, err)
+		}
 	}
 	helperInfo, err := inspectPE(starter.HelperPath)
 	if err != nil {
@@ -61,7 +68,7 @@ func (starter Starter) Start(request launch.Request) (launch.Process, error) {
 		return nil, err
 	}
 	requestPath := filepath.Join(directory, "request.json")
-	helperRequest := HelperRequest{ProtocolVersion: ProtocolVersion, RequestID: requestID, ModulesRoot: starter.ModulesRoot, ModuleID: config.ModuleID, Candidate: request.Candidate, Arguments: append([]string(nil), request.Arguments...), RemoteTimeoutMS: config.RemoteTimeoutMS}
+	helperRequest := HelperRequest{ProtocolVersion: ProtocolVersion, RequestID: requestID, ModulesRoot: starter.ModulesRoot, ModuleIDs: moduleIDs, Candidate: request.Candidate, Arguments: append([]string(nil), request.Arguments...), RemoteTimeoutMS: config.RemoteTimeoutMS}
 	if err := writeRequest(requestPath, helperRequest); err != nil {
 		return nil, err
 	}
@@ -151,6 +158,27 @@ func (starter Starter) validateLayout() error {
 		return fmt.Errorf("portable staging path: %w", err)
 	}
 	return nil
+}
+
+func (starter Starter) normalizedModuleIDs(fallback string) ([]string, error) {
+	values := starter.ModuleIDs
+	if len(values) == 0 && fallback != "" {
+		values = []string{fallback}
+	}
+	if len(values) > 32 {
+		return nil, errors.New("at most 32 injection modules may be loaded")
+	}
+	result := make([]string, 0, len(values))
+	seen := map[string]bool{}
+	for _, id := range values {
+		id = strings.TrimSpace(id)
+		if !moduleIDPattern.MatchString(id) || seen[id] {
+			return nil, errors.New("injection module ids must be valid and unique")
+		}
+		seen[id] = true
+		result = append(result, id)
+	}
+	return result, nil
 }
 
 func writeRequest(path string, request HelperRequest) error {

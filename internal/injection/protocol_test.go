@@ -46,7 +46,7 @@ func TestExecuteHelperRepeatsAuditAndInjectsOwnedFixture(t *testing.T) {
 	}
 	fixture := newModuleFixture(t)
 	t.Setenv("GENSHINTOOLS_S09_CHILD", "1")
-	request := HelperRequest{ProtocolVersion: ProtocolVersion, RequestID: "abcdef0123456789", ModulesRoot: fixture.root, ModuleID: "fixture", Candidate: fixture.candidate, Arguments: []string{"-test.run=^TestInjectionFixtureChild$"}, RemoteTimeoutMS: 5000}
+	request := HelperRequest{ProtocolVersion: ProtocolVersion, RequestID: "abcdef0123456789", ModulesRoot: fixture.root, ModuleIDs: []string{"fixture"}, Candidate: fixture.candidate, Arguments: []string{"-test.run=^TestInjectionFixtureChild$"}, RemoteTimeoutMS: 5000}
 	result := ExecuteHelper(request)
 	if !result.Success || result.PID <= 0 {
 		t.Fatalf("helper result = %+v", result)

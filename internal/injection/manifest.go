@@ -52,6 +52,34 @@ type Audit struct {
 	Exports     []string
 }
 
+type ModuleFileMetadata struct {
+	Architecture string
+	IsDLL        bool
+	SHA256       string
+	FileVersion  string
+	Exports      []string
+	Imports      []string
+}
+
+// InspectModuleFile exposes the same bounded PE/hash/version reader used by
+// AuditModule so S10 can construct and verify declarative package fixtures
+// without loading the DLL.
+func InspectModuleFile(path string) (ModuleFileMetadata, error) {
+	hash, err := fileSHA256(path)
+	if err != nil {
+		return ModuleFileMetadata{}, err
+	}
+	metadata, err := inspectPE(path)
+	if err != nil {
+		return ModuleFileMetadata{}, err
+	}
+	version, err := fileVersion(path)
+	if err != nil {
+		return ModuleFileMetadata{}, err
+	}
+	return ModuleFileMetadata{Architecture: metadata.Architecture, IsDLL: metadata.IsDLL, SHA256: hash, FileVersion: version, Exports: append([]string(nil), metadata.Exports...), Imports: append([]string(nil), metadata.Imports...)}, nil
+}
+
 func AuditModule(modulesRoot, id string, candidate game.Candidate) (Audit, error) {
 	if !moduleIDPattern.MatchString(id) {
 		return Audit{}, errors.New("module id must contain only lowercase ASCII letters, digits, dot, dash or underscore")

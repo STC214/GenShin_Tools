@@ -27,6 +27,7 @@ import (
 	"genshintools/internal/overlay"
 	"genshintools/internal/paths"
 	"genshintools/internal/platform/win32"
+	"genshintools/internal/plugins"
 	"genshintools/internal/resources"
 	"genshintools/internal/taskrunner"
 )
@@ -48,6 +49,7 @@ const (
 	messageOverlay      = win32.WM_APP + 11
 	messageOverlayStats = win32.WM_APP + 12
 	messageInjection    = win32.WM_APP + 13
+	messagePlugins      = win32.WM_APP + 14
 
 	trayID          = 1
 	captureHotkeyID = 2001
@@ -121,6 +123,15 @@ type application struct {
 	injectionAuditTask      uint64
 	injectionLaunchTask     uint64
 	injectionLaunching      bool
+	pluginLayout            plugins.Layout
+	pluginState             plugins.State
+	pluginItems             []plugins.Item
+	pluginWarnings          []string
+	pluginStatus            string
+	pluginSelected          string
+	pluginUpdates           chan pluginUpdate
+	pluginTask              uint64
+	pluginBusy              bool
 	customArgumentsEdit     win32.HWND
 	editBrush               win32.HBRUSH
 	sessionNotifications    bool
@@ -199,6 +210,13 @@ type injectionUpdate struct {
 	err      string
 }
 
+type pluginUpdate struct {
+	taskID uint64
+	state  plugins.State
+	status string
+	err    string
+}
+
 var navigation = []struct{ title, subtitle string }{
 	{"首页", "启动状态与常用操作将在后续阶段接入。"},
 	{"游戏管理", "S05：只读状态、纯净启动和启动设置。"},
@@ -255,6 +273,28 @@ func Run(layout paths.Layout, build buildinfo.Info) (returnErr error) {
 	if err != nil {
 		return err
 	}
+	pluginLayout, err := plugins.NewLayout(layout.Data, layout.Modules)
+	if err != nil {
+		return fmt.Errorf("create plugin layout: %w", err)
+	}
+	if err := pluginLayout.Ensure(); err != nil {
+		return fmt.Errorf("ensure plugin layout: %w", err)
+	}
+	pluginLoad, err := plugins.LoadState(pluginLayout.State)
+	if err != nil {
+		return fmt.Errorf("load plugin state: %w", err)
+	}
+	if err := plugins.RecoverTransaction(pluginLayout, &pluginLoad.State); err != nil {
+		return fmt.Errorf("recover plugin transaction: %w", err)
+	}
+	pluginItems, pluginWarnings, err := plugins.Discover(layout.Modules, pluginLoad.State)
+	if err != nil {
+		return fmt.Errorf("discover plugins: %w", err)
+	}
+	pluginSelected := ""
+	if len(pluginItems) > 0 {
+		pluginSelected = pluginItems[0].Manifest.ID
+	}
 	app := &application{
 		instance:            win32.ModuleHandle(),
 		settings:            loaded.Settings,
@@ -278,6 +318,13 @@ func Run(layout paths.Layout, build buildinfo.Info) (returnErr error) {
 		overlayUpdates:      make(chan overlayUpdate, 4),
 		overlayStatsUpdates: make(chan overlay.Stats, 1),
 		injectionUpdates:    make(chan injectionUpdate, 2),
+		pluginLayout:        pluginLayout,
+		pluginState:         pluginLoad.State,
+		pluginItems:         pluginItems,
+		pluginWarnings:      pluginWarnings,
+		pluginSelected:      pluginSelected,
+		pluginStatus:        fmt.Sprintf("已发现 %d 个本地插件；目录源默认关闭", len(pluginItems)),
+		pluginUpdates:       make(chan pluginUpdate, 1),
 		captureStatus:       "截图功能未启用",
 		overlayStatus:       "性能覆盖层未启用",
 		injectionStatus:     "注入默认关闭；纯净启动始终可用",
@@ -288,6 +335,10 @@ func Run(layout paths.Layout, build buildinfo.Info) (returnErr error) {
 	logger.Info("application starting", map[string]any{"version": build.Version, "commit": build.Commit, "previousUncleanExit": previousBad})
 	if loaded.RecoveredFrom != "" {
 		logger.Error("corrupt settings quarantined", map[string]any{"path": loaded.RecoveredFrom})
+	}
+	if pluginLoad.RecoveredFrom != "" {
+		logger.Error("corrupt plugin state quarantined", map[string]any{"path": pluginLoad.RecoveredFrom})
+		app.pluginStatus = "损坏的插件状态已隔离，已恢复安全默认值"
 	}
 	if err := resources.RecoverTransactions(layout.Staging); err != nil {
 		logger.Error("resource transaction recovery", map[string]any{"error": err.Error()})
@@ -618,6 +669,25 @@ func (app *application) handleMessage(hwnd win32.HWND, message uint32, wParam, l
 				return 0
 			}
 		}
+	case messagePlugins:
+		for {
+			select {
+			case update := <-app.pluginUpdates:
+				if update.taskID == app.pluginTask {
+					app.pluginBusy = false
+					if update.err != "" {
+						app.pluginStatus = update.err
+					} else {
+						app.pluginState = update.state
+						app.refreshPlugins()
+						app.pluginStatus = update.status
+					}
+				}
+			default:
+				win32.Invalidate(hwnd)
+				return 0
+			}
+		}
 	case messageTray:
 		event := uint32(lParam & 0xffff)
 		switch event {
@@ -652,6 +722,8 @@ func (app *application) handleMessage(hwnd win32.HWND, message uint32, wParam, l
 			app.inputClick(x, y)
 		} else if app.selected == 7 && x >= int(win32.Scale(210, app.dpi)) {
 			app.injectionClick(y)
+		} else if app.selected == 8 && x >= int(win32.Scale(210, app.dpi)) {
+			app.pluginClick(y)
 		}
 		return 0
 	case win32.WM_HOTKEY:
@@ -777,6 +849,7 @@ func (app *application) requestShutdown() {
 		app.tasks.Cancel(app.mediaTask)
 		app.tasks.Cancel(app.injectionAuditTask)
 		app.tasks.Cancel(app.injectionLaunchTask)
+		app.tasks.Cancel(app.pluginTask)
 		if app.overlaySession != nil {
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 			if err := app.overlaySession.Close(ctx); err != nil {
@@ -935,6 +1008,8 @@ func (app *application) paint(hwnd win32.HWND) {
 		app.paintInput(dc, client, contentLeft)
 	} else if app.selected == 7 {
 		app.paintInjection(dc, client, contentLeft)
+	} else if app.selected == 8 {
+		app.paintPlugins(dc, client, contentLeft)
 	} else {
 		cardBrush := win32.CreateSolidBrush(win32.Color(25, 29, 39))
 		defer win32.DeleteObject(uintptr(cardBrush))
@@ -1365,7 +1440,16 @@ func (app *application) startInjectionLaunch() {
 	}
 	settings := app.settings.Injection
 	launchSettings := app.settings.Launch
-	if !settings.Enabled || !settings.RiskAcknowledged || settings.ModuleID == "" {
+	available := make(map[string]bool, len(app.pluginItems))
+	for _, item := range app.pluginItems {
+		available[item.Manifest.ID] = true
+	}
+	moduleIDs := plugins.EnabledInOrder(app.pluginState, available)
+	if len(moduleIDs) > 0 && app.settings.Plugins.SafeMode {
+		app.injectionStatus = "注入启动被插件安全模式阻止；请在插件页明确关闭安全模式"
+		return
+	}
+	if !settings.Enabled || !settings.RiskAcknowledged || (settings.ModuleID == "" && len(moduleIDs) == 0) {
 		app.injectionStatus = "注入启动被拒绝：请启用注入、确认风险并选择兼容模块"
 		return
 	}
@@ -1374,7 +1458,7 @@ func (app *application) startInjectionLaunch() {
 	app.injectionStatus = "正在独立 helper 中重复预检并启动…"
 	app.injectionLaunching = true
 	app.injectionLaunchTask = app.tasks.Run(func(ctx context.Context, id uint64) {
-		starter := injection.Starter{Context: ctx, HelperPath: filepath.Join(app.layout.Root, "GenshinTools-injector.exe"), ModulesRoot: app.layout.Modules, StagingRoot: app.layout.Staging, Config: settings}
+		starter := injection.Starter{Context: ctx, HelperPath: filepath.Join(app.layout.Root, "GenshinTools-injector.exe"), ModulesRoot: app.layout.Modules, StagingRoot: app.layout.Staging, Config: settings, ModuleIDs: moduleIDs}
 		err := app.launchEngine.LaunchWithStarter(candidate, launchSettings, starter)
 		update := injectionUpdate{taskID: id, kind: 1, status: "helper 已完成，正在接管游戏进程观察"}
 		if err != nil {
@@ -1480,6 +1564,210 @@ func (app *application) paintInjection(dc win32.HDC, client win32.Rect, left int
 	}
 	draw(warning, row(526, 566, cardBrush), win32.Color(166, 174, 197))
 	draw(app.injectionStatus, row(572, 612, cardBrush), win32.Color(145, 154, 180))
+}
+
+func (app *application) savePluginSettings() bool {
+	normalized, err := app.settings.Plugins.Normalized()
+	if err != nil {
+		app.pluginStatus = "插件设置无效：" + err.Error()
+		return false
+	}
+	app.settings.Plugins = normalized
+	if err := config.Save(app.layout.Config, app.settings); err != nil {
+		app.pluginStatus = "保存插件设置失败：" + err.Error()
+		return false
+	}
+	return true
+}
+
+func (app *application) refreshPlugins() bool {
+	items, warnings, err := plugins.Discover(app.layout.Modules, app.pluginState)
+	if err != nil {
+		app.pluginStatus = "发现插件失败：" + err.Error()
+		return false
+	}
+	app.pluginItems, app.pluginWarnings = items, warnings
+	found := false
+	for _, item := range items {
+		found = found || item.Manifest.ID == app.pluginSelected
+	}
+	if !found {
+		app.pluginSelected = ""
+		if len(items) > 0 {
+			app.pluginSelected = items[0].Manifest.ID
+		}
+	}
+	app.pluginStatus = fmt.Sprintf("已发现 %d 个插件，%d 条警告", len(items), len(warnings))
+	return true
+}
+
+func (app *application) selectedPlugin() (plugins.Item, bool) {
+	for _, item := range app.pluginItems {
+		if item.Manifest.ID == app.pluginSelected {
+			return item, true
+		}
+	}
+	return plugins.Item{}, false
+}
+
+func (app *application) pluginClick(y int) {
+	sy := func(value int32) int { return int(win32.Scale(value, app.dpi)) }
+	switch {
+	case y >= sy(170) && y < sy(214):
+		app.settings.Plugins.SafeMode = !app.settings.Plugins.SafeMode
+		if app.savePluginSettings() {
+			app.pluginStatus = map[bool]string{true: "安全模式已开启：插件不会注入", false: "安全模式已关闭：仅启用插件会按顺序注入"}[app.settings.Plugins.SafeMode]
+		}
+	case y >= sy(220) && y < sy(264):
+		app.refreshPlugins()
+	case y >= sy(270) && y < sy(314):
+		if len(app.pluginItems) == 0 {
+			app.pluginStatus = "没有已安装插件"
+			break
+		}
+		index := 0
+		for i, item := range app.pluginItems {
+			if item.Manifest.ID == app.pluginSelected {
+				index = (i + 1) % len(app.pluginItems)
+				break
+			}
+		}
+		app.pluginSelected = app.pluginItems[index].Manifest.ID
+		app.pluginStatus = "已选择：" + app.pluginItems[index].DisplayName()
+	case y >= sy(320) && y < sy(364):
+		item, ok := app.selectedPlugin()
+		if !ok {
+			app.pluginStatus = "请先选择插件"
+			break
+		}
+		if err := plugins.SetEnabled(&app.pluginState, item.Manifest.ID, !item.Enabled); err != nil {
+			app.pluginStatus = "切换插件失败：" + err.Error()
+		} else if err := plugins.SaveState(app.pluginLayout.State, app.pluginState); err != nil {
+			app.pluginStatus = "保存插件状态失败：" + err.Error()
+		} else {
+			app.refreshPlugins()
+		}
+	case y >= sy(370) && y < sy(414):
+		app.movePlugin(-1)
+	case y >= sy(420) && y < sy(464):
+		app.movePlugin(1)
+	case y >= sy(470) && y < sy(514):
+		app.startLocalPluginInstall()
+	}
+	win32.Invalidate(app.hwnd)
+}
+
+func (app *application) publishPlugin(update pluginUpdate) {
+	select {
+	case app.pluginUpdates <- update:
+		win32.PostMessage(app.hwnd, messagePlugins, 0, 0)
+	default:
+	}
+}
+
+func (app *application) startLocalPluginInstall() {
+	if app.pluginBusy {
+		app.pluginStatus = "已有插件任务正在执行"
+		return
+	}
+	if app.gameState.Candidate == nil {
+		app.pluginStatus = "请先在游戏管理页完成游戏路径和版本扫描"
+		return
+	}
+	packagePath, selected, err := win32.SelectPluginPackage(app.hwnd, app.layout.Root)
+	if err != nil {
+		app.pluginStatus = "选择插件包失败：" + err.Error()
+		return
+	}
+	if !selected {
+		return
+	}
+	state := plugins.CloneState(app.pluginState)
+	candidate := *app.gameState.Candidate
+	layout := app.pluginLayout
+	app.pluginBusy = true
+	app.pluginStatus = "正在隔离区审计本地插件包；完成前不会修改活动插件"
+	app.pluginTask = app.tasks.Run(func(ctx context.Context, id uint64) {
+		item, inspectErr := plugins.InspectLocalPackage(packagePath)
+		if inspectErr != nil {
+			app.publishPlugin(pluginUpdate{taskID: id, err: "读取插件包失败：" + inspectErr.Error()})
+			return
+		}
+		result, installErr := plugins.InstallLocalPackage(ctx, packagePath, item, layout, candidate, &state)
+		if installErr != nil {
+			app.publishPlugin(pluginUpdate{taskID: id, err: "安装插件失败：" + installErr.Error()})
+			return
+		}
+		status := "插件已安装：" + result.Manifest.Name + " " + result.Manifest.Version
+		if result.RollbackReady {
+			status += "；上一版本已保留用于回滚"
+		}
+		app.publishPlugin(pluginUpdate{taskID: id, state: state, status: status})
+	})
+}
+
+func (app *application) movePlugin(delta int) {
+	item, ok := app.selectedPlugin()
+	if !ok {
+		app.pluginStatus = "请先选择插件"
+		return
+	}
+	if err := plugins.Move(&app.pluginState, item.Manifest.ID, delta); err != nil {
+		app.pluginStatus = "无法调整顺序：" + err.Error()
+		return
+	}
+	if err := plugins.SaveState(app.pluginLayout.State, app.pluginState); err != nil {
+		app.pluginStatus = "保存插件顺序失败：" + err.Error()
+		return
+	}
+	app.refreshPlugins()
+}
+
+func (app *application) paintPlugins(dc win32.HDC, client win32.Rect, left int32) {
+	cardBrush := win32.CreateSolidBrush(win32.Color(25, 29, 39))
+	defer win32.DeleteObject(uintptr(cardBrush))
+	buttonBrush := win32.CreateSolidBrush(win32.Color(35, 40, 54))
+	defer win32.DeleteObject(uintptr(buttonBrush))
+	accentBrush := win32.CreateSolidBrush(win32.Color(52, 66, 112))
+	defer win32.DeleteObject(uintptr(accentBrush))
+	warningBrush := win32.CreateSolidBrush(win32.Color(74, 48, 35))
+	defer win32.DeleteObject(uintptr(warningBrush))
+	right := client.Right - win32.Scale(42, app.dpi)
+	row := func(top, bottom int32, brush win32.HBRUSH) win32.Rect {
+		rect := win32.Rect{Left: left, Top: win32.Scale(top, app.dpi), Right: right, Bottom: win32.Scale(bottom, app.dpi)}
+		win32.FillRect(dc, &rect, brush)
+		return rect
+	}
+	draw := func(value string, rect win32.Rect, color uint32) {
+		win32.SetTextColor(dc, color)
+		rect.Left += win32.Scale(18, app.dpi)
+		rect.Right -= win32.Scale(12, app.dpi)
+		win32.DrawText(dc, value, &rect, win32.DT_LEFT|win32.DT_VCENTER|win32.DT_SINGLELINE|win32.DT_END_ELLIPSIS)
+	}
+	safe := map[bool]string{true: "开启（禁止插件注入）", false: "关闭（允许启用项注入）"}[app.settings.Plugins.SafeMode]
+	draw("插件安全模式："+safe+"    单击切换", row(170, 214, warningBrush), win32.Color(255, 205, 150))
+	draw("重新扫描本地插件（不联网）", row(220, 264, buttonBrush), win32.Color(225, 229, 242))
+	selected := "无已安装插件"
+	enabled := false
+	if item, ok := app.selectedPlugin(); ok {
+		selected = fmt.Sprintf("%s · %s · %s", item.DisplayName(), item.Manifest.Version, item.Manifest.Developer)
+		enabled = item.Enabled
+	}
+	draw("当前插件："+selected+"    单击切换", row(270, 314, buttonBrush), win32.Color(225, 229, 242))
+	draw("启用状态："+map[bool]string{true: "启用", false: "停用"}[enabled]+"    单击切换", row(320, 364, accentBrush), win32.Color(235, 238, 248))
+	draw("向前移动注入顺序", row(370, 414, buttonBrush), win32.Color(190, 197, 216))
+	draw("向后移动注入顺序", row(420, 464, buttonBrush), win32.Color(190, 197, 216))
+	installText := "从本地 ZIP 安装或更新插件"
+	if app.pluginBusy {
+		installText = "插件审计/安装进行中…"
+	}
+	draw(installText, row(470, 514, buttonBrush), win32.Color(190, 197, 216))
+	warning := "没有插件审计警告"
+	if len(app.pluginWarnings) > 0 {
+		warning = app.pluginWarnings[0]
+	}
+	draw(warning, row(526, 566, cardBrush), win32.Color(166, 174, 197))
+	draw(app.pluginStatus, row(572, 612, cardBrush), win32.Color(145, 154, 180))
 }
 
 func (app *application) stopInputForSystemEvent(reason string) {

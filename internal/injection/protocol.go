@@ -16,13 +16,13 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-const ProtocolVersion = 1
+const ProtocolVersion = 2
 
 type HelperRequest struct {
 	ProtocolVersion int            `json:"protocolVersion"`
 	RequestID       string         `json:"requestId"`
 	ModulesRoot     string         `json:"modulesRoot"`
-	ModuleID        string         `json:"moduleId"`
+	ModuleIDs       []string       `json:"moduleIds"`
 	Candidate       game.Candidate `json:"candidate"`
 	Arguments       []string       `json:"arguments"`
 	RemoteTimeoutMS int            `json:"remoteTimeoutMs"`
@@ -55,8 +55,15 @@ func LoadHelperRequest(path string) (HelperRequest, error) {
 	if err := decoder.Decode(&struct{}{}); err != io.EOF {
 		return HelperRequest{}, errors.New("helper request contains trailing data")
 	}
-	if request.ProtocolVersion != ProtocolVersion || !moduleIDPattern.MatchString(request.RequestID) || !moduleIDPattern.MatchString(request.ModuleID) {
-		return HelperRequest{}, errors.New("unsupported helper protocol or invalid request/module id")
+	if request.ProtocolVersion != ProtocolVersion || !moduleIDPattern.MatchString(request.RequestID) || len(request.ModuleIDs) == 0 || len(request.ModuleIDs) > 32 {
+		return HelperRequest{}, errors.New("unsupported helper protocol or invalid request/module count")
+	}
+	seenModules := map[string]bool{}
+	for _, id := range request.ModuleIDs {
+		if !moduleIDPattern.MatchString(id) || seenModules[id] {
+			return HelperRequest{}, errors.New("helper module ids must be valid and unique")
+		}
+		seenModules[id] = true
 	}
 	if request.RemoteTimeoutMS < 1000 || request.RemoteTimeoutMS > 30_000 {
 		return HelperRequest{}, errors.New("remote timeout must be within 1000..30000 ms")
@@ -83,23 +90,33 @@ func ExecuteHelper(request HelperRequest) HelperResult {
 		result.Error = "helper game inspection does not match the requested candidate"
 		return result
 	}
-	audit, err := AuditModule(request.ModulesRoot, request.ModuleID, verified)
-	if err != nil {
-		result.Error = err.Error()
-		return result
+	dllPaths := make([]string, 0, len(request.ModuleIDs))
+	locks := make([]windows.Handle, 0, len(request.ModuleIDs))
+	defer func() {
+		for _, handle := range locks {
+			windows.CloseHandle(handle)
+		}
+	}()
+	for _, moduleID := range request.ModuleIDs {
+		audit, err := AuditModule(request.ModulesRoot, moduleID, verified)
+		if err != nil {
+			result.Error = moduleID + ": " + err.Error()
+			return result
+		}
+		moduleLock, err := lockFileReadOnly(audit.DLLPath)
+		if err != nil {
+			result.Error = moduleID + ": lock audited module: " + err.Error()
+			return result
+		}
+		locks = append(locks, moduleLock)
+		lockedHash, err := fileSHA256(audit.DLLPath)
+		if err != nil || !strings.EqualFold(lockedHash, audit.SHA256) {
+			result.Error = moduleID + ": module changed after audit"
+			return result
+		}
+		dllPaths = append(dllPaths, audit.DLLPath)
 	}
-	moduleLock, err := lockFileReadOnly(audit.DLLPath)
-	if err != nil {
-		result.Error = "lock audited module: " + err.Error()
-		return result
-	}
-	defer windows.CloseHandle(moduleLock)
-	lockedHash, err := fileSHA256(audit.DLLPath)
-	if err != nil || !strings.EqualFold(lockedHash, audit.SHA256) {
-		result.Error = "module changed after audit"
-		return result
-	}
-	pid, err := launchSuspendedAndInject(request.Candidate.Executable, request.Candidate.Root, request.Arguments, audit.DLLPath, time.Duration(request.RemoteTimeoutMS)*time.Millisecond)
+	pid, err := launchSuspendedAndInject(request.Candidate.Executable, request.Candidate.Root, request.Arguments, dllPaths, time.Duration(request.RemoteTimeoutMS)*time.Millisecond)
 	if err != nil {
 		result.Code, result.Error = "injection_failed", err.Error()
 		return result

@@ -32,7 +32,10 @@ var (
 	procLoadLibraryW       = injectKernel32.NewProc("LoadLibraryW")
 )
 
-func launchSuspendedAndInject(executable, workingDirectory string, arguments []string, dllPath string, timeout time.Duration) (int, error) {
+func launchSuspendedAndInject(executable, workingDirectory string, arguments []string, dllPaths []string, timeout time.Duration) (int, error) {
+	if len(dllPaths) == 0 || len(dllPaths) > 32 {
+		return 0, errors.New("injection requires 1..32 module paths")
+	}
 	executableLock, err := lockFileReadOnly(executable)
 	if err != nil {
 		return 0, fmt.Errorf("lock inspected game executable: %w", err)
@@ -82,53 +85,11 @@ func launchSuspendedAndInject(executable, workingDirectory string, arguments []s
 		windows.CloseHandle(process.Thread)
 		windows.CloseHandle(process.Process)
 	}()
-	remoteLoadLibrary := procLoadLibraryW.Addr()
-	dllUTF16, err := windows.UTF16FromString(dllPath)
-	if err != nil {
-		return 0, err
-	}
-	byteSize := uintptr(len(dllUTF16) * 2)
-	remoteMemory, _, callErr := procVirtualAllocEx.Call(uintptr(process.Process), 0, byteSize, memCommitReserve, pageReadWrite)
-	if remoteMemory == 0 {
-		return 0, fmt.Errorf("VirtualAllocEx: %w", callErr)
-	}
-	defer procVirtualFreeEx.Call(uintptr(process.Process), remoteMemory, 0, memRelease)
-	bytes := unsafe.Slice((*byte)(unsafe.Pointer(&dllUTF16[0])), int(byteSize))
-	var written uintptr
-	if err := windows.WriteProcessMemory(process.Process, remoteMemory, &bytes[0], byteSize, &written); err != nil || written != byteSize {
-		return 0, fmt.Errorf("WriteProcessMemory wrote %d/%d: %w", written, byteSize, err)
-	}
-	remoteThread, _, callErr := procCreateRemoteThread.Call(uintptr(process.Process), 0, 0, remoteLoadLibrary, remoteMemory, 0, 0)
-	if remoteThread == 0 {
-		return 0, fmt.Errorf("CreateRemoteThread: %w", callErr)
-	}
-	thread := windows.Handle(remoteThread)
-	defer windows.CloseHandle(thread)
 	deadline := time.Now().Add(timeout)
-	for {
-		wait := uint32(100)
-		if remaining := time.Until(deadline); remaining <= 0 {
-			return 0, errors.New("remote LoadLibraryW timed out")
-		} else if remaining < 100*time.Millisecond {
-			wait = uint32(max(1, remaining.Milliseconds()))
+	for _, dllPath := range dllPaths {
+		if err := injectRemoteDLL(process.Process, process.ProcessId, dllPath, deadline); err != nil {
+			return 0, fmt.Errorf("inject %s: %w", filepath.Base(dllPath), err)
 		}
-		status, err := windows.WaitForSingleObject(thread, wait)
-		if err != nil {
-			return 0, err
-		}
-		if status == waitObject0 {
-			break
-		}
-		if status != waitTimeout {
-			return 0, fmt.Errorf("unexpected remote thread wait status 0x%08X", status)
-		}
-	}
-	loaded, err := remoteModuleLoaded(process.ProcessId, dllPath)
-	if err != nil {
-		return 0, err
-	}
-	if !loaded {
-		return 0, errors.New("remote LoadLibraryW completed but the module is absent")
 	}
 	if _, err := windows.ResumeThread(process.Thread); err != nil {
 		return 0, fmt.Errorf("ResumeThread: %w", err)
@@ -139,6 +100,57 @@ func launchSuspendedAndInject(executable, workingDirectory string, arguments []s
 	}
 	owned = false
 	return int(process.ProcessId), nil
+}
+
+func injectRemoteDLL(process windows.Handle, processID uint32, dllPath string, deadline time.Time) error {
+	remoteLoadLibrary := procLoadLibraryW.Addr()
+	dllUTF16, err := windows.UTF16FromString(dllPath)
+	if err != nil {
+		return err
+	}
+	byteSize := uintptr(len(dllUTF16) * 2)
+	remoteMemory, _, callErr := procVirtualAllocEx.Call(uintptr(process), 0, byteSize, memCommitReserve, pageReadWrite)
+	if remoteMemory == 0 {
+		return fmt.Errorf("VirtualAllocEx: %w", callErr)
+	}
+	defer procVirtualFreeEx.Call(uintptr(process), remoteMemory, 0, memRelease)
+	bytes := unsafe.Slice((*byte)(unsafe.Pointer(&dllUTF16[0])), int(byteSize))
+	var written uintptr
+	if err := windows.WriteProcessMemory(process, remoteMemory, &bytes[0], byteSize, &written); err != nil || written != byteSize {
+		return fmt.Errorf("WriteProcessMemory wrote %d/%d: %w", written, byteSize, err)
+	}
+	remoteThread, _, callErr := procCreateRemoteThread.Call(uintptr(process), 0, 0, remoteLoadLibrary, remoteMemory, 0, 0)
+	if remoteThread == 0 {
+		return fmt.Errorf("CreateRemoteThread: %w", callErr)
+	}
+	thread := windows.Handle(remoteThread)
+	defer windows.CloseHandle(thread)
+	for {
+		wait := uint32(100)
+		if remaining := time.Until(deadline); remaining <= 0 {
+			return errors.New("remote LoadLibraryW timed out")
+		} else if remaining < 100*time.Millisecond {
+			wait = uint32(max(1, remaining.Milliseconds()))
+		}
+		status, err := windows.WaitForSingleObject(thread, wait)
+		if err != nil {
+			return err
+		}
+		if status == waitObject0 {
+			break
+		}
+		if status != waitTimeout {
+			return fmt.Errorf("unexpected remote thread wait status 0x%08X", status)
+		}
+	}
+	loaded, err := remoteModuleLoaded(processID, dllPath)
+	if err != nil {
+		return err
+	}
+	if !loaded {
+		return errors.New("remote LoadLibraryW completed but the module is absent")
+	}
+	return nil
 }
 
 func remoteModuleLoaded(pid uint32, dllPath string) (bool, error) {

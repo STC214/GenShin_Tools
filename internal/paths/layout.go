@@ -11,15 +11,18 @@ import (
 // Layout contains all writable runtime locations. Everything is rooted under
 // data next to the executable so a portable installation stays self-contained.
 type Layout struct {
-	Executable string
-	Root       string
-	Data       string
-	Logs       string
-	Cache      string
-	Staging    string
-	Injection  string
-	Modules    string
-	Config     string
+	Executable     string
+	Root           string
+	Data           string
+	Logs           string
+	Cache          string
+	Staging        string
+	Injection      string
+	Modules        string
+	Plugins        string
+	PluginVersions string
+	PluginStaging  string
+	Config         string
 }
 
 // ForExecutable derives a portable layout from an executable path.
@@ -37,21 +40,24 @@ func ForExecutable(executable string) (Layout, error) {
 	data := filepath.Join(root, "data")
 
 	return Layout{
-		Executable: absolute,
-		Root:       root,
-		Data:       data,
-		Logs:       filepath.Join(data, "logs"),
-		Cache:      filepath.Join(data, "cache"),
-		Staging:    filepath.Join(data, "staging"),
-		Injection:  filepath.Join(data, "injection"),
-		Modules:    filepath.Join(data, "injection", "modules"),
-		Config:     filepath.Join(data, "config.json"),
+		Executable:     absolute,
+		Root:           root,
+		Data:           data,
+		Logs:           filepath.Join(data, "logs"),
+		Cache:          filepath.Join(data, "cache"),
+		Staging:        filepath.Join(data, "staging"),
+		Injection:      filepath.Join(data, "injection"),
+		Modules:        filepath.Join(data, "injection", "modules"),
+		Plugins:        filepath.Join(data, "plugins"),
+		PluginVersions: filepath.Join(data, "plugins", "versions"),
+		PluginStaging:  filepath.Join(data, "plugins", "staging"),
+		Config:         filepath.Join(data, "config.json"),
 	}, nil
 }
 
 // Directories returns writable directories from parent to child.
 func (l Layout) Directories() []string {
-	return []string{l.Data, l.Logs, l.Cache, l.Staging, l.Injection, l.Modules}
+	return []string{l.Data, l.Logs, l.Cache, l.Staging, l.Injection, l.Modules, l.Plugins, l.PluginVersions, l.PluginStaging}
 }
 
 // Ensure creates the writable runtime directories without creating a config file.
