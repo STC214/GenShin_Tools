@@ -69,6 +69,11 @@ func (t *Transaction) Prepare() error {
 	return t.saveJournal()
 }
 
+func (t *Transaction) MarkPreloaded() error {
+	t.journal.State = "preloaded"
+	return t.saveJournal()
+}
+
 func (t *Transaction) Commit(plan RepairPlan) error {
 	if err := plan.ValidateStaging(t.StagingRoot); err != nil {
 		return err
@@ -217,6 +222,9 @@ func RecoverTransactions(dataStagingRoot string) error {
 		decoderErr := decoder.Decode(&saved)
 		if decoderErr != nil || saved.SchemaVersion != journalSchemaVersion || validateJournal(&saved) != nil {
 			result = errors.Join(result, fmt.Errorf("cannot recover %s: invalid journal", path))
+			continue
+		}
+		if saved.State == "preloaded" {
 			continue
 		}
 		if saved.State == "complete" {

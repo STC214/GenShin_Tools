@@ -1,13 +1,17 @@
 package resources
 
 import (
+	"bytes"
 	"context"
+	"crypto/md5"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,7 +19,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/klauspost/compress/zstd"
 	"golang.org/x/sys/windows"
+	"google.golang.org/protobuf/encoding/protowire"
 )
 
 func TestParseManifestStrictAndSafe(t *testing.T) {
@@ -152,6 +158,22 @@ func TestDownloaderHashMismatchNeverPublishesDestination(t *testing.T) {
 	}
 }
 
+func TestDownloaderOfflineNeverPublishesDestination(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	rawURL := server.URL + "/offline"
+	server.Close()
+	manifest := testManifest([]byte("offline resource"), rawURL)
+	root := t.TempDir()
+	downloader := NewDownloader()
+	downloader.MaxAttempts = 1
+	if err := downloader.Download(context.Background(), manifest, root); err == nil {
+		t.Fatal("offline download succeeded")
+	}
+	if _, err := os.Stat(filepath.Join(root, manifest.Files[0].Path)); !os.IsNotExist(err) {
+		t.Fatalf("offline destination was published: %v", err)
+	}
+}
+
 func TestRepairPlanCommitAndRecovery(t *testing.T) {
 	old := []byte("old valid resource")
 	updated := []byte("new verified resource")
@@ -248,9 +270,269 @@ func TestCommitFileLockRollsBackWithoutChangingOriginal(t *testing.T) {
 	}
 }
 
+func TestMultiFileFailureRollsBackEarlierReplacement(t *testing.T) {
+	gameRoot := t.TempDir()
+	stagingRoot := t.TempDir()
+	originalA, originalB := []byte("original-a"), []byte("original-b")
+	updatedA, updatedB := []byte("updated-a"), []byte("updated-b")
+	pathA, pathB := filepath.Join(gameRoot, "data", "a.bin"), filepath.Join(gameRoot, "data", "b.bin")
+	if err := os.MkdirAll(filepath.Dir(pathA), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for path, data := range map[string][]byte{pathA: originalA, pathB: originalB} {
+		if err := os.WriteFile(path, data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	manifest := Manifest{SchemaVersion: 1, Version: "test", Kind: "game", Files: []ManifestFile{
+		testManifestFile(`data\a.bin`, updatedA), testManifestFile(`data\b.bin`, updatedB),
+	}}
+	plan, err := BuildRepairPlan(gameRoot, manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tx, err := NewTransaction(stagingRoot, gameRoot, "multi-lock")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Prepare(); err != nil {
+		t.Fatal(err)
+	}
+	stageFile(t, tx.StagingRoot, manifest.Files[0].Path, updatedA)
+	stageFile(t, tx.StagingRoot, manifest.Files[1].Path, updatedB)
+	pointer, _ := windows.UTF16PtrFromString(pathB)
+	handle, err := windows.CreateFile(pointer, windows.GENERIC_READ, windows.FILE_SHARE_READ, nil, windows.OPEN_EXISTING, windows.FILE_ATTRIBUTE_NORMAL, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer windows.CloseHandle(handle)
+	if err := tx.Commit(plan); err == nil {
+		t.Fatal("multi-file commit unexpectedly succeeded")
+	}
+	assertFileContent(t, pathA, originalA)
+	assertFileContent(t, pathB, originalB)
+}
+
+func TestSophonProviderAndChunkResume(t *testing.T) {
+	first := []byte("first verified chunk-")
+	second := []byte("second verified chunk")
+	whole := append(append([]byte(nil), first...), second...)
+	compressedFirst := zstdEncode(t, first)
+	compressedSecond := zstdEncode(t, second)
+	proto := sophonProtoFile(`data\sophon.bin`, whole, []protoChunk{{"chunk-a", first, 0, compressedFirst}, {"chunk-b", second, int64(len(first)), compressedSecond}})
+	compressedManifest := zstdEncode(t, proto)
+	manifestDigest := md5.Sum(proto)
+	var firstRequests atomic.Int32
+
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/build":
+			response := map[string]any{"retcode": 0, "message": "OK", "data": map[string]any{"build_id": "fixture", "tag": "6.7.0", "manifests": []any{map[string]any{
+				"category_id": "1", "category_name": "game", "matching_field": "game", "stats": map[string]any{}, "deduplicated_stats": map[string]any{},
+				"manifest":          map[string]any{"id": "manifest-id", "checksum": hex.EncodeToString(manifestDigest[:]), "compressed_size": fmt.Sprint(len(compressedManifest)), "uncompressed_size": fmt.Sprint(len(proto))},
+				"manifest_download": map[string]any{"encryption": 0, "password": "", "compression": 1, "url_prefix": server.URL + "/manifest", "url_suffix": ""},
+				"chunk_download":    map[string]any{"encryption": 0, "password": "", "compression": 1, "url_prefix": server.URL + "/chunks", "url_suffix": ""},
+			}}}}
+			_ = json.NewEncoder(writer).Encode(response)
+		case "/manifest/manifest-id":
+			_, _ = writer.Write(compressedManifest)
+		case "/chunks/chunk-a":
+			firstRequests.Add(1)
+			_, _ = writer.Write(compressedFirst)
+		case "/chunks/chunk-b":
+			_, _ = writer.Write(compressedSecond)
+		default:
+			http.NotFound(writer, request)
+		}
+	}))
+	defer server.Close()
+
+	provider := NewSophonProvider()
+	provider.BuildURL = server.URL + "/build"
+	provider.RetryDelay = time.Millisecond
+	catalog, err := provider.FetchCatalog(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if catalog.Version != "6.7.0" || len(catalog.Assets()) != 1 {
+		t.Fatalf("catalog = %+v", catalog)
+	}
+	manifest, err := provider.LoadManifest(context.Background(), catalog, "game")
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	part := filepath.Join(root, manifest.Files[0].Path) + ".part"
+	if err := os.MkdirAll(filepath.Dir(part), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(part, first, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	downloader := NewDownloader()
+	downloader.RetryDelay = time.Millisecond
+	if err := downloader.Download(context.Background(), manifest, root); err != nil {
+		t.Fatal(err)
+	}
+	assertFileContent(t, filepath.Join(root, manifest.Files[0].Path), whole)
+	if firstRequests.Load() != 0 {
+		t.Fatalf("already verified first chunk was downloaded %d times", firstRequests.Load())
+	}
+}
+
+func TestSophonBuildUnknownFieldFailsClosed(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		_, _ = io.WriteString(writer, `{"retcode":0,"message":"OK","unexpected":true,"data":{"build_id":"x","tag":"1","manifests":[]}}`)
+	}))
+	defer server.Close()
+	provider := NewSophonProvider()
+	provider.BuildURL = server.URL
+	provider.MaxAttempts = 1
+	if _, err := provider.FetchCatalog(context.Background()); err == nil {
+		t.Fatal("unknown API field was accepted")
+	}
+}
+
+func TestSophonBranchDiscoveryAndPreloadURL(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		_, _ = io.WriteString(writer, `{"retcode":0,"message":"OK","data":{"game_branches":[{"game":{"id":"1Z8W5NHUQb","biz":"hk4e_cn"},"main":{"package_id":"main-pkg","branch":"main","password":"main-pass","tag":"6.7.0","diff_tags":[],"categories":[{"category_id":"1","matching_field":"game","type":"CATEGORY_TYPE_RESOURCE","scenarios":["CATEGORY_SCENARIO_FULL"]}],"required_client_version":""},"pre_download":{"package_id":"pre-pkg","branch":"pre_download","password":"pre-pass","tag":"6.8.0","diff_tags":["6.7.0"],"categories":[{"category_id":"1","matching_field":"game","type":"CATEGORY_TYPE_RESOURCE","scenarios":["CATEGORY_SCENARIO_FULL"]}],"required_client_version":""},"enable_base_pkg_predownload":true}]}}`)
+	}))
+	defer server.Close()
+	provider := NewSophonProvider()
+	provider.BranchesURL = server.URL
+	branches, err := provider.FetchBranches(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if branches.PreDownload == nil || branches.PreDownload.Tag != "6.8.0" {
+		t.Fatalf("branches = %+v", branches)
+	}
+	rawURL, err := branches.PreDownload.BuildURL()
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, _ := url.Parse(rawURL)
+	if parsed.Query().Get("branch") != "pre_download" || parsed.Query().Get("tag") != "6.8.0" || parsed.Query().Get("package_id") != "pre-pkg" {
+		t.Fatalf("pre-download URL = %s", rawURL)
+	}
+}
+
+func TestVersionMetadataCommitsAndPreloadSurvivesRecovery(t *testing.T) {
+	gameRoot := t.TempDir()
+	stagingRoot := t.TempDir()
+	configPath := filepath.Join(gameRoot, "config.ini")
+	if err := os.WriteFile(configPath, []byte("[General]\r\ngame_version=1.0.0\r\nchannel=1\r\n[Other]\r\nkeep=yes\r\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := NewTransaction(stagingRoot, gameRoot, "preload-2.0.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Prepare(); err != nil {
+		t.Fatal(err)
+	}
+	items, err := StageVersionMetadata(gameRoot, tx.StagingRoot, "2.0.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("metadata changes = %d, want 2", len(items))
+	}
+	if err := tx.Commit(RepairPlan{Items: items}); err != nil {
+		t.Fatal(err)
+	}
+	assertFileContent(t, filepath.Join(gameRoot, "gid_ver"), []byte("2.0.0"))
+	updated, _ := os.ReadFile(configPath)
+	if !strings.Contains(string(updated), "game_version=2.0.0") || !strings.Contains(string(updated), "keep=yes") {
+		t.Fatalf("updated config = %q", updated)
+	}
+
+	preload, err := NewTransaction(stagingRoot, gameRoot, "preload-3.0.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := preload.Prepare(); err != nil {
+		t.Fatal(err)
+	}
+	stageFile(t, preload.StagingRoot, "cached.bin", []byte("verified preload cache"))
+	if err := preload.MarkPreloaded(); err != nil {
+		t.Fatal(err)
+	}
+	if err := RecoverTransactions(stagingRoot); err != nil {
+		t.Fatal(err)
+	}
+	assertFileContent(t, filepath.Join(preload.StagingRoot, "cached.bin"), []byte("verified preload cache"))
+}
+
+type protoChunk struct {
+	id         string
+	data       []byte
+	offset     int64
+	compressed []byte
+}
+
+func sophonProtoFile(path string, whole []byte, chunks []protoChunk) []byte {
+	var file []byte
+	file = appendProtoString(file, 1, path)
+	for _, value := range chunks {
+		var chunk []byte
+		chunk = appendProtoString(chunk, 1, value.id)
+		digest := md5.Sum(value.data)
+		chunk = appendProtoString(chunk, 2, hex.EncodeToString(digest[:]))
+		chunk = protowire.AppendTag(chunk, 3, protowire.VarintType)
+		chunk = protowire.AppendVarint(chunk, uint64(value.offset))
+		chunk = protowire.AppendTag(chunk, 4, protowire.VarintType)
+		chunk = protowire.AppendVarint(chunk, uint64(len(value.compressed)))
+		chunk = protowire.AppendTag(chunk, 5, protowire.VarintType)
+		chunk = protowire.AppendVarint(chunk, uint64(len(value.data)))
+		chunk = protowire.AppendTag(chunk, 6, protowire.VarintType)
+		chunk = protowire.AppendVarint(chunk, 123456789)
+		chunk = protowire.AppendTag(chunk, 7, protowire.BytesType)
+		chunk = protowire.AppendBytes(chunk, []byte("audited-extension"))
+		file = protowire.AppendTag(file, 2, protowire.BytesType)
+		file = protowire.AppendBytes(file, chunk)
+	}
+	file = protowire.AppendTag(file, 3, protowire.VarintType)
+	file = protowire.AppendVarint(file, 0)
+	file = protowire.AppendTag(file, 4, protowire.VarintType)
+	file = protowire.AppendVarint(file, uint64(len(whole)))
+	digest := md5.Sum(whole)
+	file = appendProtoString(file, 5, hex.EncodeToString(digest[:]))
+	var manifest []byte
+	manifest = protowire.AppendTag(manifest, 1, protowire.BytesType)
+	return protowire.AppendBytes(manifest, file)
+}
+
+func appendProtoString(destination []byte, number protowire.Number, value string) []byte {
+	destination = protowire.AppendTag(destination, number, protowire.BytesType)
+	return protowire.AppendString(destination, value)
+}
+
+func zstdEncode(t *testing.T, data []byte) []byte {
+	t.Helper()
+	var output bytes.Buffer
+	encoder, err := zstd.NewWriter(&output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := encoder.Write(data); err != nil {
+		t.Fatal(err)
+	}
+	if err := encoder.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return output.Bytes()
+}
+
 func testManifest(content []byte, rawURL string) Manifest {
 	digest := sha256.Sum256(content)
 	return Manifest{SchemaVersion: 1, Version: "test", Kind: "game", Files: []ManifestFile{{Path: `data\resource.bin`, Size: int64(len(content)), Hash: Hash{Algorithm: "sha256", Digest: hex.EncodeToString(digest[:])}, URL: rawURL}}}
+}
+
+func testManifestFile(path string, content []byte) ManifestFile {
+	digest := sha256.Sum256(content)
+	return ManifestFile{Path: path, Size: int64(len(content)), Hash: Hash{Algorithm: "sha256", Digest: hex.EncodeToString(digest[:])}, URL: "https://example.invalid/resource"}
 }
 
 func stageFile(t *testing.T, root, relative string, content []byte) {

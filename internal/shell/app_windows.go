@@ -21,6 +21,7 @@ import (
 	"genshintools/internal/launch"
 	"genshintools/internal/paths"
 	"genshintools/internal/platform/win32"
+	"genshintools/internal/resources"
 	"genshintools/internal/taskrunner"
 )
 
@@ -35,6 +36,7 @@ const (
 	messagePhysical = win32.WM_APP + 5
 	messageGame     = win32.WM_APP + 6
 	messageLaunch   = win32.WM_APP + 7
+	messageResource = win32.WM_APP + 8
 
 	trayID   = 1
 	menuShow = 1001
@@ -81,6 +83,9 @@ type application struct {
 	launchSnap           launch.Snapshot
 	launchUIError        string
 	shortcutStatus       string
+	resourceUpdates      chan resourceUpdate
+	resourceState        resourceViewState
+	resourceTask         uint64
 	customArgumentsEdit  win32.HWND
 	editBrush            win32.HBRUSH
 	sessionNotifications bool
@@ -105,9 +110,30 @@ type gameUpdate struct {
 	state  gameViewState
 }
 
+type resourceViewState struct {
+	Busy        bool
+	Confirm     bool
+	Language    string
+	Status      string
+	Error       string
+	Version     string
+	Manifest    resources.Manifest
+	Plan        resources.RepairPlan
+	Progress    resources.Progress
+	HasPlan     bool
+	PreDownload bool
+}
+
+type resourceUpdate struct {
+	taskID  uint64
+	state   resourceViewState
+	refresh bool
+}
+
 var navigation = []struct{ title, subtitle string }{
 	{"首页", "启动状态与常用操作将在后续阶段接入。"},
 	{"游戏管理", "S05：只读状态、纯净启动和启动设置。"},
+	{"资源管理", "S06：检查、下载、校验和事务修复。"},
 	{"输入增强", "S03 将优先实现鼠标连点与键盘连按。"},
 	{"插件", "S09/S10 才会启用注入与插件，当前保持隔离。"},
 	{"设置", "S02 已启用便携配置、日志、DPI 和安全退出。"},
@@ -157,20 +183,22 @@ func Run(layout paths.Layout, build buildinfo.Info) (returnErr error) {
 		return err
 	}
 	app := &application{
-		instance:       win32.ModuleHandle(),
-		settings:       loaded.Settings,
-		lastBounds:     loaded.Settings.Window,
-		layout:         layout,
-		build:          build,
-		logger:         logger,
-		tasks:          taskrunner.New(),
-		previousBad:    previousBad,
-		recovered:      loaded.RecoveredFrom,
-		snapshots:      make(chan win32.ResourceSnapshot, 1),
-		inputUpdates:   make(chan input.Snapshot, 1),
-		physicalEvents: make(chan input.PhysicalEvent, 16),
-		gameUpdates:    make(chan gameUpdate, 1),
-		launchUpdates:  make(chan launch.Snapshot, 1),
+		instance:        win32.ModuleHandle(),
+		settings:        loaded.Settings,
+		lastBounds:      loaded.Settings.Window,
+		layout:          layout,
+		build:           build,
+		logger:          logger,
+		tasks:           taskrunner.New(),
+		previousBad:     previousBad,
+		recovered:       loaded.RecoveredFrom,
+		snapshots:       make(chan win32.ResourceSnapshot, 1),
+		inputUpdates:    make(chan input.Snapshot, 1),
+		physicalEvents:  make(chan input.PhysicalEvent, 16),
+		gameUpdates:     make(chan gameUpdate, 1),
+		launchUpdates:   make(chan launch.Snapshot, 1),
+		resourceUpdates: make(chan resourceUpdate, 1),
+		resourceState:   resourceViewState{Language: "zh-cn", Status: "先检查在线资源并生成只读修复计划"},
 	}
 	active = app
 	defer func() { active = nil }()
@@ -178,6 +206,12 @@ func Run(layout paths.Layout, build buildinfo.Info) (returnErr error) {
 	logger.Info("application starting", map[string]any{"version": build.Version, "commit": build.Commit, "previousUncleanExit": previousBad})
 	if loaded.RecoveredFrom != "" {
 		logger.Error("corrupt settings quarantined", map[string]any{"path": loaded.RecoveredFrom})
+	}
+	if err := resources.RecoverTransactions(layout.Staging); err != nil {
+		logger.Error("resource transaction recovery", map[string]any{"error": err.Error()})
+		app.resourceState.Error = "检测到未能自动恢复的资源事务，请查看日志"
+	} else {
+		logger.Info("resource transaction recovery complete", nil)
 	}
 
 	if err := app.createWindow(); err != nil {
@@ -378,6 +412,21 @@ func (app *application) handleMessage(hwnd win32.HWND, message uint32, wParam, l
 				return 0
 			}
 		}
+	case messageResource:
+		for {
+			select {
+			case update := <-app.resourceUpdates:
+				if update.taskID == app.resourceTask {
+					app.resourceState = update.state
+					if update.refresh && app.gameState.Candidate != nil {
+						app.startGameScan(app.gameState.Candidate.Root)
+					}
+				}
+			default:
+				win32.Invalidate(hwnd)
+				return 0
+			}
+		}
 	case messageTray:
 		event := uint32(lParam & 0xffff)
 		switch event {
@@ -401,6 +450,8 @@ func (app *application) handleMessage(hwnd win32.HWND, message uint32, wParam, l
 		} else if app.selected == 1 && x >= int(win32.Scale(210, app.dpi)) {
 			app.gameClick(x, y)
 		} else if app.selected == 2 && x >= int(win32.Scale(210, app.dpi)) {
+			app.resourceClick(x, y)
+		} else if app.selected == 3 && x >= int(win32.Scale(210, app.dpi)) {
 			app.inputClick(x, y)
 		}
 		return 0
@@ -636,6 +687,8 @@ func (app *application) paint(hwnd win32.HWND) {
 	if app.selected == 1 {
 		app.paintGame(dc, client, contentLeft)
 	} else if app.selected == 2 {
+		app.paintResources(dc, client, contentLeft)
+	} else if app.selected == 3 {
 		app.paintInput(dc, client, contentLeft)
 	} else {
 		cardBrush := win32.CreateSolidBrush(win32.Color(25, 29, 39))
@@ -1263,6 +1316,276 @@ func (app *application) paintGame(dc win32.HDC, client win32.Rect, left int32) {
 		}
 	}
 	draw(fmt.Sprintf("%s · %d 文件 · 跳过 %d · %s", formatBytes(state.Size.Bytes), state.Size.Files, state.Skipped, running), row(566, 602, cardBrush), win32.Color(166, 174, 197))
+}
+
+func (app *application) resourceClick(_, y int) {
+	sy := func(value int32) int { return int(win32.Scale(value, app.dpi)) }
+	state := app.resourceState
+	if state.Busy {
+		if y >= sy(170) && y < sy(214) {
+			app.tasks.Cancel(app.resourceTask)
+			app.resourceState.Status = "正在取消资源任务…"
+			win32.Invalidate(app.hwnd)
+		}
+		return
+	}
+	switch {
+	case y >= sy(170) && y < sy(214):
+		app.startResourcePlan()
+	case y >= sy(220) && y < sy(258):
+		languages := []string{"zh-cn", "en-us", "ja-jp", "ko-kr"}
+		index := 0
+		for i, language := range languages {
+			if language == state.Language {
+				index = (i + 1) % len(languages)
+				break
+			}
+		}
+		state.Language = languages[index]
+		state.HasPlan = false
+		state.Confirm = false
+		state.Status = "语音包已切换，请重新检查资源"
+		state.Error = ""
+		app.resourceState = state
+	case y >= sy(264) && y < sy(302):
+		state.PreDownload = !state.PreDownload
+		state.HasPlan = false
+		state.Confirm = false
+		state.Status = "资源分支已切换，请重新检查"
+		state.Error = ""
+		app.resourceState = state
+	case y >= sy(308) && y < sy(352):
+		if !state.HasPlan {
+			state.Error = "请先生成修复计划"
+		} else if len(state.Plan.Changes()) == 0 && state.PreDownload {
+			state.Status = "当前文件均已通过校验，无需修复"
+			state.Error = ""
+		} else if len(app.gameState.Running) > 0 {
+			state.Error = "游戏运行时不能替换资源，请先退出游戏"
+		} else if !state.Confirm {
+			state.Confirm = true
+			state.Status = "再次单击以确认下载并事务替换列出的文件"
+			state.Error = ""
+		} else {
+			app.resourceState = state
+			app.startResourceApply()
+			return
+		}
+		app.resourceState = state
+	}
+	win32.Invalidate(app.hwnd)
+}
+
+func (app *application) startResourcePlan() {
+	if app.gameState.Candidate == nil {
+		app.resourceState.Error = "请先在游戏管理页选择游戏目录"
+		win32.Invalidate(app.hwnd)
+		return
+	}
+	root := app.gameState.Candidate.Root
+	state := app.resourceState
+	state.Busy, state.Confirm, state.HasPlan = true, false, false
+	state.Error = ""
+	state.Status = "正在读取官方资源目录…"
+	app.resourceState = state
+	publish := func(id uint64, next resourceViewState, refresh bool) {
+		select {
+		case app.resourceUpdates <- resourceUpdate{taskID: id, state: next, refresh: refresh}:
+		default:
+			select {
+			case <-app.resourceUpdates:
+			default:
+			}
+			app.resourceUpdates <- resourceUpdate{taskID: id, state: next, refresh: refresh}
+		}
+		win32.PostMessage(app.hwnd, messageResource, 0, 0)
+	}
+	app.resourceTask = app.tasks.Run(func(ctx context.Context, id uint64) {
+		provider := resources.NewSophonProvider()
+		branches, err := provider.FetchBranches(ctx)
+		if err == nil {
+			branch := branches.Current
+			if state.PreDownload {
+				if branches.PreDownload == nil {
+					err = errors.New("官方当前没有开放预下载分支")
+				} else {
+					branch = *branches.PreDownload
+				}
+			}
+			if err == nil {
+				provider.BuildURL, err = branch.BuildURL()
+				state.Version = branch.Tag
+			}
+		}
+		var catalog resources.SophonCatalog
+		if err == nil {
+			catalog, err = provider.FetchCatalog(ctx)
+		}
+		if err == nil {
+			state.Status = "正在校验在线 manifest…"
+			publish(id, state, false)
+			state.Manifest, err = provider.LoadManifest(ctx, catalog, "game", state.Language)
+			state.Version = catalog.Version
+		}
+		if err == nil {
+			state.Status = "正在逐文件生成只读修复计划…"
+			publish(id, state, false)
+			state.Plan, err = resources.BuildRepairPlanContext(ctx, root, state.Manifest)
+		}
+		state.Busy = false
+		if err != nil {
+			if errors.Is(err, context.Canceled) {
+				state.Status, state.Error = "资源检查已取消", ""
+			} else {
+				state.Error = err.Error()
+				state.Status = "资源检查失败，未修改游戏文件"
+			}
+		} else {
+			state.HasPlan = true
+			state.Status = fmt.Sprintf("计划完成：%d 个文件需下载或修复", len(state.Plan.Changes()))
+		}
+		publish(id, state, false)
+	})
+}
+
+func (app *application) startResourceApply() {
+	state := app.resourceState
+	root := app.gameState.Candidate.Root
+	state.Busy = true
+	state.Confirm = false
+	state.Error = ""
+	state.Status = "正在准备隔离事务…"
+	app.resourceState = state
+	publish := func(id uint64, next resourceViewState, refresh bool) {
+		select {
+		case app.resourceUpdates <- resourceUpdate{taskID: id, state: next, refresh: refresh}:
+		default:
+			select {
+			case <-app.resourceUpdates:
+			default:
+			}
+			app.resourceUpdates <- resourceUpdate{taskID: id, state: next, refresh: refresh}
+		}
+		win32.PostMessage(app.hwnd, messageResource, 0, 0)
+	}
+	app.resourceTask = app.tasks.Run(func(ctx context.Context, id uint64) {
+		transactionID := "preload-" + state.Version
+		transaction, err := resources.NewTransaction(app.layout.Staging, root, transactionID)
+		if err == nil {
+			err = transaction.Prepare()
+		}
+		changes := state.Manifest
+		changes.Files = state.Plan.Changes()
+		if err == nil && len(changes.Files) > 0 {
+			state.Status = "正在下载到 data/staging；正式文件保持不变"
+			publish(id, state, false)
+			downloader := resources.NewDownloader()
+			downloader.OnProgress = func(progress resources.Progress) {
+				state.Progress = progress
+				publish(id, state, false)
+			}
+			err = downloader.Download(ctx, changes, transaction.StagingRoot)
+		}
+		if err == nil && state.PreDownload {
+			err = transaction.MarkPreloaded()
+			state.Busy = false
+			if err != nil {
+				state.Status, state.Error = "预下载保存失败；正式文件未修改", err.Error()
+			} else {
+				state.HasPlan = false
+				state.Status = "预下载已完整校验并保存在 data/staging；正式文件未修改"
+			}
+			publish(id, state, false)
+			return
+		}
+		if err == nil {
+			metadata, metadataErr := resources.StageVersionMetadata(root, transaction.StagingRoot, state.Version)
+			if metadataErr != nil {
+				err = metadataErr
+			} else {
+				state.Plan.Items = append(state.Plan.Items, metadata...)
+			}
+		}
+		if err == nil {
+			state.Status = "下载已完整校验，正在提交事务…"
+			publish(id, state, false)
+			err = transaction.Commit(state.Plan)
+		}
+		state.Busy = false
+		if err != nil {
+			if errors.Is(err, context.Canceled) {
+				state.Status, state.Error = "资源任务已取消；正式文件未修改", ""
+			} else {
+				state.Status = "资源事务失败；已保留或恢复原文件"
+				state.Error = err.Error()
+			}
+			publish(id, state, false)
+			return
+		}
+		state.HasPlan = false
+		state.Status = "资源事务完成，全部目标文件已再次校验"
+		publish(id, state, true)
+	})
+}
+
+func (app *application) paintResources(dc win32.HDC, client win32.Rect, left int32) {
+	cardBrush := win32.CreateSolidBrush(win32.Color(25, 29, 39))
+	defer win32.DeleteObject(uintptr(cardBrush))
+	buttonBrush := win32.CreateSolidBrush(win32.Color(35, 40, 54))
+	defer win32.DeleteObject(uintptr(buttonBrush))
+	accentBrush := win32.CreateSolidBrush(win32.Color(52, 66, 112))
+	defer win32.DeleteObject(uintptr(accentBrush))
+	right := client.Right - win32.Scale(42, app.dpi)
+	row := func(top, bottom int32, brush win32.HBRUSH) win32.Rect {
+		rect := win32.Rect{Left: left, Top: win32.Scale(top, app.dpi), Right: right, Bottom: win32.Scale(bottom, app.dpi)}
+		win32.FillRect(dc, &rect, brush)
+		return rect
+	}
+	draw := func(text string, rect win32.Rect, color uint32) {
+		win32.SetTextColor(dc, color)
+		rect.Left += win32.Scale(18, app.dpi)
+		rect.Right -= win32.Scale(12, app.dpi)
+		win32.DrawText(dc, text, &rect, win32.DT_LEFT|win32.DT_VCENTER|win32.DT_SINGLELINE|win32.DT_END_ELLIPSIS)
+	}
+	state := app.resourceState
+	checkText := "检查在线资源并生成修复计划"
+	if state.Busy {
+		checkText = "取消当前资源任务"
+	}
+	draw(checkText, row(170, 214, accentBrush), win32.Color(235, 238, 248))
+	draw("语音包："+state.Language+"    单击切换", row(220, 258, buttonBrush), win32.Color(225, 229, 242))
+	branch := "当前正式版本"
+	if state.PreDownload {
+		branch = "预下载版本（仅官方开放时可用）"
+	}
+	draw("资源分支："+branch+"    单击切换", row(264, 302, buttonBrush), win32.Color(225, 229, 242))
+	applyText := "下载并修复（需要先生成计划）"
+	if state.HasPlan {
+		applyText = fmt.Sprintf("下载并修复 %d 个文件", len(state.Plan.Changes()))
+	}
+	if state.Confirm {
+		applyText = "再次单击确认执行；原文件将在事务中备份"
+	}
+	draw(applyText, row(308, 352, buttonBrush), win32.Color(225, 229, 242))
+	statusColor := win32.Color(166, 174, 197)
+	status := state.Status
+	if state.Error != "" {
+		status, statusColor = state.Error, win32.Color(255, 126, 126)
+	}
+	draw(status, row(364, 408, cardBrush), statusColor)
+	version := valueOrUnknown(state.Version)
+	draw("在线版本："+version, row(414, 450, cardBrush), win32.Color(190, 197, 216))
+	if state.HasPlan {
+		draw(fmt.Sprintf("清单 %d 个文件 · 需处理 %d 个 · 下载量 %s", len(state.Manifest.Files), len(state.Plan.Changes()), formatBytes(uint64(state.Plan.DownloadBytes))), row(456, 492, cardBrush), win32.Color(190, 197, 216))
+	}
+	if state.Progress.FilesTotal > 0 {
+		eta := "计算中"
+		if state.Progress.ETA > 0 {
+			eta = state.Progress.ETA.Round(time.Second).String()
+		}
+		draw(fmt.Sprintf("%d/%d 文件 · %s/%s · %s/s · 剩余 %s", state.Progress.FilesDone, state.Progress.FilesTotal, formatBytes(uint64(state.Progress.BytesDone)), formatBytes(uint64(state.Progress.BytesTotal)), formatBytes(uint64(state.Progress.Speed)), eta), row(498, 534, cardBrush), win32.Color(145, 154, 180))
+	}
+	draw("安全边界：下载仅写入 data/staging；完整校验后才进入短暂提交阶段。", row(540, 576, cardBrush), win32.Color(126, 136, 160))
 }
 
 func valueOrUnknown(value string) string {

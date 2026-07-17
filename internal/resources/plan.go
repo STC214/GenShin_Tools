@@ -1,6 +1,7 @@
 package resources
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -27,16 +28,23 @@ type RepairPlan struct {
 }
 
 func BuildRepairPlan(gameRoot string, manifest Manifest) (RepairPlan, error) {
+	return BuildRepairPlanContext(context.Background(), gameRoot, manifest)
+}
+
+func BuildRepairPlanContext(ctx context.Context, gameRoot string, manifest Manifest) (RepairPlan, error) {
 	if err := manifest.Validate(); err != nil {
 		return RepairPlan{}, err
 	}
 	var plan RepairPlan
 	for _, file := range manifest.Files {
+		if err := ctx.Err(); err != nil {
+			return RepairPlan{}, err
+		}
 		target := filepath.Join(gameRoot, file.Path)
 		if err := ensureContained(gameRoot, target); err != nil {
 			return RepairPlan{}, err
 		}
-		err := VerifyFile(target, file.Size, file.Hash)
+		err := VerifyFileContext(ctx, target, file.Size, file.Hash)
 		item := PlanItem{File: file, Action: ActionKeep, Reason: "verified"}
 		if err != nil {
 			item.Action = ActionRepair

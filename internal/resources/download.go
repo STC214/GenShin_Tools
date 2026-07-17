@@ -154,9 +154,12 @@ func (d *Downloader) downloadFile(ctx context.Context, client *http.Client, item
 	if err := os.MkdirAll(filepath.Dir(destination), 0o755); err != nil {
 		return err
 	}
-	if err := VerifyFile(destination, item.Size, item.Hash); err == nil {
+	if err := VerifyFileContext(ctx, destination, item.Size, item.Hash); err == nil {
 		progress.Add(item.Size)
 		return nil
+	}
+	if len(item.Chunks) > 0 {
+		return d.downloadChunkedFile(ctx, client, item, destination, attempts, progress, report)
 	}
 	part := destination + ".part"
 	var last error
@@ -187,7 +190,7 @@ func (d *Downloader) downloadFile(ctx context.Context, client *http.Client, item
 			progress.Add(-before)
 		}
 		if err == nil {
-			if err = VerifyFile(part, item.Size, item.Hash); err == nil {
+			if err = VerifyFileContext(ctx, part, item.Size, item.Hash); err == nil {
 				if err = replaceFile(part, destination); err == nil {
 					return nil
 				}

@@ -23,4 +23,18 @@ No FufuLauncher executable, DLL, image, sound, font or other binary asset is red
 
 The Go toolchain and GNU `windres` are build-time tools and are not redistributed in the portable output.
 
+## github.com/klauspost/compress
+
+- Version: `v1.19.0`
+- Role: bounded streaming zstd decoding for Sophon manifests and resource chunks
+- License: BSD 3-Clause for the used zstd package
+- License copy: `LICENSES/klauspost-compress-BSD-3-Clause.txt`
+
+## google.golang.org/protobuf
+
+- Version: `v1.36.11`
+- Role: protobuf wire primitives for the minimal audited Sophon schema adapter
+- License: BSD 3-Clause
+- License copy: `LICENSES/google-protobuf-BSD-3-Clause.txt`
+
 This notice is a living document. Injection modules and plugins cannot enter a release until their source, license, version, architecture and SHA-256 have been recorded here or in a generated dependency manifest.

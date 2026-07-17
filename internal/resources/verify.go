@@ -1,6 +1,7 @@
 package resources
 
 import (
+	"context"
 	"crypto/md5"
 	"crypto/sha256"
 	"encoding/hex"
@@ -12,6 +13,10 @@ import (
 )
 
 func VerifyFile(path string, expectedSize int64, expected Hash) error {
+	return VerifyFileContext(context.Background(), path, expectedSize, expected)
+}
+
+func VerifyFileContext(ctx context.Context, path string, expectedSize int64, expected Hash) error {
 	file, err := os.Open(path)
 	if err != nil {
 		return fmt.Errorf("open %s: %w", path, err)
@@ -33,7 +38,7 @@ func VerifyFile(path string, expectedSize int64, expected Hash) error {
 	default:
 		return fmt.Errorf("unsupported hash algorithm %q", expected.Algorithm)
 	}
-	if _, err := io.Copy(digest, file); err != nil {
+	if _, err := io.Copy(digest, &contextReader{ctx: ctx, reader: file}); err != nil {
 		return fmt.Errorf("hash %s: %w", path, err)
 	}
 	actual := hex.EncodeToString(digest.Sum(nil))
@@ -41,4 +46,16 @@ func VerifyFile(path string, expectedSize int64, expected Hash) error {
 		return fmt.Errorf("hash mismatch: got %s, want %s", actual, expected.Digest)
 	}
 	return nil
+}
+
+type contextReader struct {
+	ctx    context.Context
+	reader io.Reader
+}
+
+func (r *contextReader) Read(buffer []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return r.reader.Read(buffer)
 }

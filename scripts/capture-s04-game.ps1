@@ -1,5 +1,8 @@
 [CmdletBinding()]
-param([string]$OutputPath)
+param(
+    [string]$OutputPath,
+    [int]$NavigationY = 156
+)
 
 $ErrorActionPreference = 'Stop'
 $ProjectRoot = Split-Path -Parent $PSScriptRoot
@@ -45,7 +48,7 @@ try {
     }
     if ($Window -eq [IntPtr]::Zero) { throw 'Could not find the main window' }
     [void][S04WindowCapture]::SetForegroundWindow($Window)
-    $X = 100; $Y = 156; $LParam = [IntPtr](($Y -shl 16) -bor $X)
+    $X = 100; $Y = $NavigationY; $LParam = [IntPtr](($Y -shl 16) -bor $X)
     [void][S04WindowCapture]::SendMessage($Window, 0x0201, [UIntPtr]::Zero, $LParam)
     Start-Sleep -Milliseconds 700
     [void][S04WindowCapture]::UpdateWindow($Window)

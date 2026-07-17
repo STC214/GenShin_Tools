@@ -29,10 +29,20 @@ type Manifest struct {
 }
 
 type ManifestFile struct {
-	Path string `json:"path"`
-	Size int64  `json:"size"`
-	Hash Hash   `json:"hash"`
-	URL  string `json:"url"`
+	Path   string          `json:"path"`
+	Size   int64           `json:"size"`
+	Hash   Hash            `json:"hash"`
+	URL    string          `json:"url,omitempty"`
+	Chunks []ManifestChunk `json:"chunks,omitempty"`
+}
+
+type ManifestChunk struct {
+	ID             string `json:"id"`
+	URL            string `json:"url"`
+	Offset         int64  `json:"offset"`
+	CompressedSize int64  `json:"compressed_size"`
+	Size           int64  `json:"size"`
+	Hash           Hash   `json:"hash"`
 }
 
 type Hash struct {
@@ -104,12 +114,48 @@ func (m *Manifest) Validate() error {
 		if err := file.Hash.Validate(); err != nil {
 			return fmt.Errorf("file %q hash: %w", file.Path, err)
 		}
-		parsed, err := url.Parse(file.URL)
-		if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" || parsed.User != nil {
-			return fmt.Errorf("file %q has invalid HTTP(S) URL", file.Path)
+		if len(file.Chunks) == 0 {
+			if err := validateHTTPURL(file.URL); err != nil {
+				return fmt.Errorf("file %q URL: %w", file.Path, err)
+			}
+		} else {
+			if file.URL != "" {
+				return fmt.Errorf("file %q mixes whole-file URL and chunks", file.Path)
+			}
+			var end int64
+			for chunkIndex := range file.Chunks {
+				chunk := &file.Chunks[chunkIndex]
+				if chunk.ID == "" || strings.ContainsAny(chunk.ID, `\/:`) {
+					return fmt.Errorf("file %q chunk %d has invalid ID", file.Path, chunkIndex)
+				}
+				if chunk.Offset != end || chunk.Size <= 0 || chunk.CompressedSize <= 0 {
+					return fmt.Errorf("file %q chunk %q is not a contiguous positive range", file.Path, chunk.ID)
+				}
+				if chunk.Size > file.Size-end {
+					return fmt.Errorf("file %q chunk %q exceeds file size", file.Path, chunk.ID)
+				}
+				if err := chunk.Hash.Validate(); err != nil {
+					return fmt.Errorf("file %q chunk %q hash: %w", file.Path, chunk.ID, err)
+				}
+				if err := validateHTTPURL(chunk.URL); err != nil {
+					return fmt.Errorf("file %q chunk %q URL: %w", file.Path, chunk.ID, err)
+				}
+				end += chunk.Size
+			}
+			if end != file.Size {
+				return fmt.Errorf("file %q chunks cover %d bytes, want %d", file.Path, end, file.Size)
+			}
 		}
 	}
 	sort.Slice(m.Files, func(i, j int) bool { return strings.ToLower(m.Files[i].Path) < strings.ToLower(m.Files[j].Path) })
+	return nil
+}
+
+func validateHTTPURL(value string) error {
+	parsed, err := url.Parse(value)
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" || parsed.User != nil {
+		return errors.New("invalid HTTP(S) URL")
+	}
 	return nil
 }
 
