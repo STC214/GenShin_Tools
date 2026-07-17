@@ -1,0 +1,58 @@
+# Official and local build outputs
+/build/
+/dist/
+/artifacts/
+/assets/app.ico
+/cmd/genshin-tools/app.syso
+*.exe
+*.dll
+*.syso
+*.pdb
+*.msi
+*.zip
+*.7z
+
+# Project-local Go caches and temporary files
+/.cache/
+/.tmp/
+*.test
+*.out
+*.coverprofile
+*.pprof
+/coverage/
+
+# Portable runtime state (when an executable is placed in the repository root)
+/data/
+*.log
+*.dmp
+*.mdmp
+*.crash
+*.tmp
+*.partial
+*.part
+*.download
+
+# Local environment and credentials
+.env
+.env.*
+!.env.example
+*.local.json
+*.local.yaml
+*.local.yml
+
+# Editors and operating system files
+/.idea/
+/.vscode/
+*.code-workspace
+*.user
+*.suo
+*.swp
+*.swo
+*~
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# PowerShell and local tooling traces
+*.clixml
+PowerShell_transcript.*.txt

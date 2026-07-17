@@ -1,0 +1,167 @@
+[CmdletBinding()]
+param(
+    [ValidateSet('Debug', 'Release', 'Both')]
+    [string]$Configuration = 'Both',
+    [string]$Version,
+    [string]$BuildTimeUtc
+)
+
+$ErrorActionPreference = 'Stop'
+Set-StrictMode -Version Latest
+
+$ProjectRoot = Split-Path -Parent $PSScriptRoot
+$VersionFile = Join-Path $ProjectRoot 'VERSION'
+$DistDir = Join-Path $ProjectRoot 'dist'
+$BuildDir = Join-Path $ProjectRoot 'build'
+$GoCache = Join-Path $ProjectRoot '.cache\go-build'
+$GoTemp = Join-Path $ProjectRoot '.tmp\go'
+$IconPath = Join-Path $ProjectRoot 'assets\app.ico'
+$ManifestPath = Join-Path $ProjectRoot 'assets\app.manifest'
+$ResourcePath = Join-Path $ProjectRoot 'cmd\genshin-tools\app.syso'
+$GeneratedRC = Join-Path $BuildDir 'app.generated.rc'
+
+function Invoke-Checked {
+    param(
+        [Parameter(Mandatory)] [string]$Command,
+        [Parameter(ValueFromRemainingArguments)] [string[]]$Arguments
+    )
+    & $Command @Arguments
+    if ($LASTEXITCODE -ne 0) {
+        throw "$Command exited with code $LASTEXITCODE"
+    }
+}
+
+if (-not $Version) {
+    $Version = (Get-Content -LiteralPath $VersionFile -Raw -Encoding UTF8).Trim()
+}
+if ($Version -notmatch '^(\d+)\.(\d+)\.(\d+)(?:[-+][0-9A-Za-z.-]+)?$') {
+    throw "VERSION must be SemVer compatible (major.minor.patch with optional suffix): $Version"
+}
+$VersionMajor = [int]$Matches[1]
+$VersionMinor = [int]$Matches[2]
+$VersionPatch = [int]$Matches[3]
+$NumericVersion = "$VersionMajor,$VersionMinor,$VersionPatch,0"
+$FileVersion = "$VersionMajor.$VersionMinor.$VersionPatch.0"
+
+if (-not $BuildTimeUtc) {
+    if ($env:SOURCE_DATE_EPOCH) {
+        $BuildTimeUtc = [DateTimeOffset]::FromUnixTimeSeconds([long]$env:SOURCE_DATE_EPOCH).UtcDateTime.ToString('yyyy-MM-ddTHH:mm:ssZ')
+    } else {
+        $BuildTimeUtc = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+    }
+}
+
+$Commit = if ($env:BUILD_COMMIT) {
+    $env:BUILD_COMMIT
+} elseif (Test-Path (Join-Path $ProjectRoot '.git')) {
+    $status = @(& git -C $ProjectRoot status --porcelain=v1 --branch)
+    if ($LASTEXITCODE -eq 0 -and $status.Count -gt 0 -and $status[0] -notmatch 'No commits yet') {
+        $value = (& git -C $ProjectRoot rev-parse --short=12 HEAD)
+        if ($LASTEXITCODE -eq 0) { $value.Trim() } else { 'uncommitted' }
+    } else {
+        'uncommitted'
+    }
+} else {
+    'unknown'
+}
+
+foreach ($directory in @($DistDir, $BuildDir, $GoCache, $GoTemp)) {
+    New-Item -ItemType Directory -Force -Path $directory | Out-Null
+}
+$env:GOCACHE = $GoCache
+$env:GOTMPDIR = $GoTemp
+$env:GOOS = 'windows'
+$env:GOARCH = 'amd64'
+$env:CGO_ENABLED = '0'
+
+Push-Location $ProjectRoot
+try {
+    Invoke-Checked -Command 'go' -Arguments @('run', './tools/icon', '-output', $IconPath)
+
+    $IconRCPath = (Resolve-Path -LiteralPath $IconPath).Path.Replace('\', '/')
+    $ManifestRCPath = (Resolve-Path -LiteralPath $ManifestPath).Path.Replace('\', '/')
+    $ResourceText = @"
+#include <windows.h>
+
+1 ICON "$IconRCPath"
+1 RT_MANIFEST "$ManifestRCPath"
+
+1 VERSIONINFO
+FILEVERSION $NumericVersion
+PRODUCTVERSION $NumericVersion
+FILEFLAGSMASK 0x3fL
+FILEFLAGS 0x0L
+FILEOS 0x40004L
+FILETYPE 0x1L
+FILESUBTYPE 0x0L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "CompanyName", "Genshin Tools Project\0"
+            VALUE "FileDescription", "Genshin Tools\0"
+            VALUE "FileVersion", "$FileVersion\0"
+            VALUE "InternalName", "GenshinTools\0"
+            VALUE "LegalCopyright", "Copyright (c) 2026 Genshin Tools Project\0"
+            VALUE "OriginalFilename", "GenshinTools.exe\0"
+            VALUE "ProductName", "Genshin Tools\0"
+            VALUE "ProductVersion", "$Version\0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0409, 1200
+    END
+END
+"@
+    [IO.File]::WriteAllText($GeneratedRC, $ResourceText, [Text.UTF8Encoding]::new($false))
+
+    $Windres = (Get-Command windres -ErrorAction Stop).Source
+    Invoke-Checked -Command $Windres -Arguments @('--input', $GeneratedRC, '--output', $ResourcePath, '--output-format', 'coff')
+
+    $Configurations = if ($Configuration -eq 'Both') { @('Debug', 'Release') } else { @($Configuration) }
+    $BuiltFiles = @()
+    foreach ($CurrentConfiguration in $Configurations) {
+        $ConfigValue = $CurrentConfiguration.ToLowerInvariant()
+        $LdFlags = @(
+            "-X genshintools/internal/buildinfo.Version=$Version"
+            "-X genshintools/internal/buildinfo.Commit=$Commit"
+            "-X genshintools/internal/buildinfo.BuildTimeUTC=$BuildTimeUtc"
+            "-X genshintools/internal/buildinfo.Configuration=$ConfigValue"
+        )
+        $Output = if ($CurrentConfiguration -eq 'Release') {
+            $LdFlags += @('-H=windowsgui', '-s', '-w')
+            Join-Path $DistDir 'GenshinTools.exe'
+        } else {
+            Join-Path $DistDir 'GenshinTools-debug.exe'
+        }
+
+        Invoke-Checked -Command 'go' -Arguments @('build', '-trimpath', '-buildvcs=false', '-ldflags', ($LdFlags -join ' '), '-o', $Output, './cmd/genshin-tools')
+        $BuiltFiles += $Output
+    }
+
+    foreach ($directory in @('logs', 'cache', 'staging')) {
+        New-Item -ItemType Directory -Force -Path (Join-Path $DistDir "data\$directory") | Out-Null
+    }
+    Copy-Item -LiteralPath (Join-Path $ProjectRoot 'THIRD_PARTY_NOTICES.md') -Destination $DistDir -Force
+    Copy-Item -LiteralPath (Join-Path $ProjectRoot 'LICENSE_POLICY.md') -Destination $DistDir -Force
+    Copy-Item -LiteralPath (Join-Path $ProjectRoot 'LICENSES') -Destination $DistDir -Recurse -Force
+
+    $BuildInfo = [ordered]@{
+        product       = 'Genshin Tools'
+        version       = $Version
+        fileVersion   = $FileVersion
+        commit        = $Commit
+        buildTimeUtc  = $BuildTimeUtc
+        goVersion     = (& go version)
+        target        = 'windows/amd64'
+        configurations = $Configurations
+    }
+    $BuildInfo | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $DistDir 'build-info.json') -Encoding UTF8
+
+    Write-Host "Built Genshin Tools $Version ($Commit)"
+    $BuiltFiles | ForEach-Object { Write-Host "  $_" }
+} finally {
+    Pop-Location
+}

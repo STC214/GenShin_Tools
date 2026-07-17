@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "repository": "https://github.com/FufuLauncher/FufuLauncher.git",
+  "owner": "FufuLauncher",
+  "name": "FufuLauncher",
+  "branch": "master",
+  "commit": "b5a050ebd319341bddc4189491c90c22162d33fa",
+  "commitTimeUtc": "2026-07-16T12:14:09Z",
+  "checkedAtUtc": "2026-07-17T04:08:18Z",
+  "scopePolicy": "scope-v1",
+  "mode": "audit-only",
+  "notes": "Baseline for behavioral comparison. Updating this file requires a reviewed upstream diff; excluded modules must never be auto-imported."
+}
