@@ -7,7 +7,6 @@ import (
 	"os"
 
 	"genshintools/internal/buildinfo"
-	"genshintools/internal/paths"
 )
 
 func main() {
@@ -37,22 +36,5 @@ func run(args []string, stdout, stderr io.Writer) int {
 		}
 	}
 
-	executable, err := os.Executable()
-	if err != nil {
-		fmt.Fprintf(stderr, "locate executable: %v\n", err)
-		return 1
-	}
-
-	layout, err := paths.ForExecutable(executable)
-	if err != nil {
-		fmt.Fprintf(stderr, "resolve portable layout: %v\n", err)
-		return 1
-	}
-	if err := layout.Ensure(); err != nil {
-		fmt.Fprintf(stderr, "create portable data directories: %v\n", err)
-		return 1
-	}
-
-	fmt.Fprintf(stdout, "Genshin Tools foundation is ready (%s).\n", buildinfo.Current().Version)
-	return 0
+	return launchApplication(stderr)
 }

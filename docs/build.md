@@ -17,6 +17,8 @@ Run the complete source checks:
 ./scripts/test.ps1
 ```
 
+The test script runs all normal vet analyzers except `unsafeptr`. Win32 callbacks must reconstruct SDK-owned structures from `LPARAM`; those conversions are isolated to the shell callback boundary and are covered by the Windows integration tests.
+
 Build console Debug and Windows GUI Release executables:
 
 ```powershell
@@ -27,6 +29,24 @@ Verify the real emitted PE subsystem, icon, VERSIONINFO and portable layout:
 
 ```powershell
 ./scripts/verify-artifact.ps1
+```
+
+Run the S02 GUI lifecycle, second-instance, tray, recovery and stress checks:
+
+```powershell
+./scripts/test-s02-shell.ps1
+```
+
+Run the S03 input state-machine, hook lifecycle and real `SendInput` loopback gates:
+
+```powershell
+./scripts/test-s03-input.ps1
+```
+
+On a dedicated, idle test desktop only, run keyboard/left/right real-input soaks for 10 minutes each:
+
+```powershell
+./scripts/test-s03-input.ps1 -SoakMinutes 10
 ```
 
 Clean generated artifacts:

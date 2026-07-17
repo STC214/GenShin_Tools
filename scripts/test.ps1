@@ -33,11 +33,12 @@ try {
     if ($Race) {
         Invoke-Checked go test -race -count=1 ./...
     }
-    Invoke-Checked go vet ./...
+    # Win32 callbacks legitimately reconstruct SDK-owned structures from LPARAM.
+    # Keep every other vet analyzer enabled and isolate unsafe use in the shell boundary.
+    Invoke-Checked go vet -unsafeptr=false ./...
     if (Test-Path (Join-Path $ProjectRoot '.git')) {
         Invoke-Checked git diff --check
     }
 } finally {
     Pop-Location
 }
-

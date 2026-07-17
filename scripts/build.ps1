@@ -57,7 +57,11 @@ $Commit = if ($env:BUILD_COMMIT) {
     $status = @(& git -C $ProjectRoot status --porcelain=v1 --branch)
     if ($LASTEXITCODE -eq 0 -and $status.Count -gt 0 -and $status[0] -notmatch 'No commits yet') {
         $value = (& git -C $ProjectRoot rev-parse --short=12 HEAD)
-        if ($LASTEXITCODE -eq 0) { $value.Trim() } else { 'uncommitted' }
+        if ($LASTEXITCODE -eq 0) {
+            $identity = $value.Trim()
+            if ($status.Count -gt 1) { $identity += '-dirty' }
+            $identity
+        } else { 'uncommitted' }
     } else {
         'uncommitted'
     }

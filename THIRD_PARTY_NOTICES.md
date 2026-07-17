@@ -9,11 +9,18 @@
 - License: MIT License
 - License copy: `LICENSES/FufuLauncher-MIT.txt`
 
-No FufuLauncher executable, DLL, image, sound, font or other binary asset is redistributed by the current S01 foundation.
+No FufuLauncher executable, DLL, image, sound, font or other binary asset is redistributed by the current project.
+
+## golang.org/x/sys
+
+- Module: `golang.org/x/sys`
+- Version: `v0.47.0`
+- Role: typed Windows system calls and UTF-16 helpers
+- License: BSD 3-Clause
+- License copy: `LICENSES/golang-x-sys-BSD-3-Clause.txt`
 
 ## Build tools
 
 The Go toolchain and GNU `windres` are build-time tools and are not redistributed in the portable output.
 
 This notice is a living document. Injection modules and plugins cannot enter a release until their source, license, version, architecture and SHA-256 have been recorded here or in a generated dependency manifest.
-
