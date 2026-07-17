@@ -13,13 +13,14 @@ import (
 	"time"
 
 	"genshintools/internal/capture"
+	"genshintools/internal/injection"
 	"genshintools/internal/input"
 	"genshintools/internal/launch"
 	"genshintools/internal/localenhance"
 	"genshintools/internal/overlay"
 )
 
-const CurrentSchemaVersion = 6
+const CurrentSchemaVersion = 7
 
 // Settings contains only stable shell settings in S02. Feature settings are
 // added by their implementation stage instead of being guessed in advance.
@@ -32,6 +33,7 @@ type Settings struct {
 	LocalEnhance  LocalEnhanceConfig `json:"localEnhance"`
 	Capture       capture.Config     `json:"capture"`
 	Overlay       overlay.Config     `json:"overlay"`
+	Injection     injection.Config   `json:"injection"`
 }
 
 type LocalEnhanceConfig struct {
@@ -71,6 +73,7 @@ func Default() Settings {
 		LocalEnhance: LocalEnhanceConfig{HDR: localenhance.DefaultHDRConfig()},
 		Capture:      capture.DefaultConfig(),
 		Overlay:      overlay.DefaultConfig(),
+		Injection:    injection.DefaultConfig(),
 	}
 }
 
@@ -111,30 +114,33 @@ func migrateAndValidate(settings *Settings) error {
 		// Schema 0 was the pre-release shape with the same window fields.
 		settings.Input = input.DefaultConfig()
 		settings.LocalEnhance = Default().LocalEnhance
-		settings.Capture, settings.Overlay = Default().Capture, Default().Overlay
+		settings.Capture, settings.Overlay, settings.Injection = Default().Capture, Default().Overlay, Default().Injection
 		settings.SchemaVersion = CurrentSchemaVersion
 	case 1:
 		settings.Input = input.DefaultConfig()
 		settings.LocalEnhance = Default().LocalEnhance
-		settings.Capture, settings.Overlay = Default().Capture, Default().Overlay
+		settings.Capture, settings.Overlay, settings.Injection = Default().Capture, Default().Overlay, Default().Injection
 		settings.SchemaVersion = CurrentSchemaVersion
 	case 2:
 		settings.LocalEnhance = Default().LocalEnhance
-		settings.Capture, settings.Overlay = Default().Capture, Default().Overlay
+		settings.Capture, settings.Overlay, settings.Injection = Default().Capture, Default().Overlay, Default().Injection
 		settings.SchemaVersion = CurrentSchemaVersion
 	case 3:
 		settings.Launch = launch.DefaultConfig()
 		settings.LocalEnhance = Default().LocalEnhance
-		settings.Capture, settings.Overlay = Default().Capture, Default().Overlay
+		settings.Capture, settings.Overlay, settings.Injection = Default().Capture, Default().Overlay, Default().Injection
 		settings.SchemaVersion = CurrentSchemaVersion
 	case 4:
 		settings.LocalEnhance = Default().LocalEnhance
-		settings.Capture, settings.Overlay = Default().Capture, Default().Overlay
+		settings.Capture, settings.Overlay, settings.Injection = Default().Capture, Default().Overlay, Default().Injection
 		settings.SchemaVersion = CurrentSchemaVersion
 	case 5:
-		settings.Capture, settings.Overlay = Default().Capture, Default().Overlay
+		settings.Capture, settings.Overlay, settings.Injection = Default().Capture, Default().Overlay, Default().Injection
 		settings.SchemaVersion = CurrentSchemaVersion
 	case 6:
+		settings.Injection = Default().Injection
+		settings.SchemaVersion = CurrentSchemaVersion
+	case 7:
 	default:
 		return fmt.Errorf("unsupported schema version %d", settings.SchemaVersion)
 	}
@@ -187,6 +193,11 @@ func migrateAndValidate(settings *Settings) error {
 		return fmt.Errorf("overlay settings: %w", err)
 	}
 	settings.Overlay = normalizedOverlay
+	normalizedInjection, err := settings.Injection.Normalized()
+	if err != nil {
+		return fmt.Errorf("injection settings: %w", err)
+	}
+	settings.Injection = normalizedInjection
 	return nil
 }
 

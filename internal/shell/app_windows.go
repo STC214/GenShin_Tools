@@ -20,6 +20,7 @@ import (
 	"genshintools/internal/diagnostics"
 	"genshintools/internal/game"
 	"genshintools/internal/gamewindow"
+	"genshintools/internal/injection"
 	"genshintools/internal/input"
 	"genshintools/internal/launch"
 	"genshintools/internal/localenhance"
@@ -46,6 +47,7 @@ const (
 	messageCapture      = win32.WM_APP + 10
 	messageOverlay      = win32.WM_APP + 11
 	messageOverlayStats = win32.WM_APP + 12
+	messageInjection    = win32.WM_APP + 13
 
 	trayID          = 1
 	captureHotkeyID = 2001
@@ -112,6 +114,13 @@ type application struct {
 	overlayStatus           string
 	mediaTarget             gamewindow.Target
 	mediaTask               uint64
+	injectionUpdates        chan injectionUpdate
+	injectionModules        []injection.Audit
+	injectionWarnings       []string
+	injectionStatus         string
+	injectionAuditTask      uint64
+	injectionLaunchTask     uint64
+	injectionLaunching      bool
 	customArgumentsEdit     win32.HWND
 	editBrush               win32.HBRUSH
 	sessionNotifications    bool
@@ -181,6 +190,15 @@ type overlayUpdate struct {
 	err     error
 }
 
+type injectionUpdate struct {
+	taskID   uint64
+	kind     uint8
+	modules  []injection.Audit
+	warnings []string
+	status   string
+	err      string
+}
+
 var navigation = []struct{ title, subtitle string }{
 	{"首页", "启动状态与常用操作将在后续阶段接入。"},
 	{"游戏管理", "S05：只读状态、纯净启动和启动设置。"},
@@ -189,7 +207,8 @@ var navigation = []struct{ title, subtitle string }{
 	{"本地增强", "S07：HDR、启动声音、BetterGI 与可回滚区服操作。"},
 	{"截图与性能", "S08：游戏窗口截图与 FPS/CPU/GPU 覆盖层。"},
 	{"输入增强", "S03：鼠标连点与键盘连按。"},
-	{"插件", "S09/S10 才会启用注入与插件，当前保持隔离。"},
+	{"注入适配", "S09：独立 helper、模块预检与纯净启动回退。"},
+	{"插件", "S10：插件发现、配置、来源审计和更新。"},
 	{"设置", "S02 已启用便携配置、日志、DPI 和安全退出。"},
 }
 
@@ -258,8 +277,10 @@ func Run(layout paths.Layout, build buildinfo.Info) (returnErr error) {
 		captureResults:      make(chan capture.Result, 2),
 		overlayUpdates:      make(chan overlayUpdate, 4),
 		overlayStatsUpdates: make(chan overlay.Stats, 1),
+		injectionUpdates:    make(chan injectionUpdate, 2),
 		captureStatus:       "截图功能未启用",
 		overlayStatus:       "性能覆盖层未启用",
+		injectionStatus:     "注入默认关闭；纯净启动始终可用",
 	}
 	active = app
 	defer func() { active = nil }()
@@ -477,6 +498,10 @@ func (app *application) handleMessage(hwnd win32.HWND, message uint32, wParam, l
 			case app.launchSnap = <-app.launchUpdates:
 			default:
 				if previous != launch.StateRunning && app.launchSnap.State == launch.StateRunning {
+					if app.injectionLaunching {
+						app.injectionStatus = fmt.Sprintf("注入启动成功：PID %d；模块已由 helper 核验", app.launchSnap.PID)
+						app.injectionLaunching = false
+					}
 					app.applyPostLaunch(app.launchSnap.PostBehavior)
 					app.scheduleBetterGI()
 				}
@@ -560,6 +585,39 @@ func (app *application) handleMessage(hwnd win32.HWND, message uint32, wParam, l
 				return 0
 			}
 		}
+	case messageInjection:
+		for {
+			select {
+			case update := <-app.injectionUpdates:
+				valid := (update.kind == 0 && update.taskID == app.injectionAuditTask) || (update.kind == 1 && update.taskID == app.injectionLaunchTask)
+				if valid {
+					if update.kind == 0 {
+						app.injectionModules = update.modules
+						app.injectionWarnings = update.warnings
+						selected := false
+						for _, module := range update.modules {
+							selected = selected || module.Manifest.ID == app.settings.Injection.ModuleID
+						}
+						if !selected {
+							app.settings.Injection.ModuleID = ""
+							if len(update.modules) > 0 {
+								app.settings.Injection.ModuleID = update.modules[0].Manifest.ID
+							}
+							app.saveInjectionSettings()
+						}
+					}
+					if update.err != "" {
+						app.injectionStatus = update.err
+						app.injectionLaunching = false
+					} else if update.status != "" {
+						app.injectionStatus = update.status
+					}
+				}
+			default:
+				win32.Invalidate(hwnd)
+				return 0
+			}
+		}
 	case messageTray:
 		event := uint32(lParam & 0xffff)
 		switch event {
@@ -592,6 +650,8 @@ func (app *application) handleMessage(hwnd win32.HWND, message uint32, wParam, l
 			app.mediaClick(x, y)
 		} else if app.selected == 6 && x >= int(win32.Scale(210, app.dpi)) {
 			app.inputClick(x, y)
+		} else if app.selected == 7 && x >= int(win32.Scale(210, app.dpi)) {
+			app.injectionClick(y)
 		}
 		return 0
 	case win32.WM_HOTKEY:
@@ -715,6 +775,8 @@ func (app *application) requestShutdown() {
 			app.captureManager = nil
 		}
 		app.tasks.Cancel(app.mediaTask)
+		app.tasks.Cancel(app.injectionAuditTask)
+		app.tasks.Cancel(app.injectionLaunchTask)
 		if app.overlaySession != nil {
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 			if err := app.overlaySession.Close(ctx); err != nil {
@@ -737,6 +799,9 @@ func (app *application) requestShutdown() {
 			win32.DeleteTrayIcon(&app.tray)
 			app.trayAdded = false
 		}
+		if !app.tasks.Shutdown(2 * time.Second) {
+			app.logger.Error("background task shutdown timed out", nil)
+		}
 		if app.inputNative != nil {
 			app.inputNative.Close()
 			app.inputNative = nil
@@ -748,9 +813,6 @@ func (app *application) requestShutdown() {
 		if app.sessionNotifications {
 			win32.UnregisterSessionNotifications(app.hwnd)
 			app.sessionNotifications = false
-		}
-		if !app.tasks.Shutdown(2 * time.Second) {
-			app.logger.Error("background task shutdown timed out", nil)
 		}
 		app.deleteFonts()
 		win32.DeleteObject(uintptr(app.editBrush))
@@ -871,6 +933,8 @@ func (app *application) paint(hwnd win32.HWND) {
 		app.paintMedia(dc, client, contentLeft)
 	} else if app.selected == 6 {
 		app.paintInput(dc, client, contentLeft)
+	} else if app.selected == 7 {
+		app.paintInjection(dc, client, contentLeft)
 	} else {
 		cardBrush := win32.CreateSolidBrush(win32.Color(25, 29, 39))
 		defer win32.DeleteObject(uintptr(cardBrush))
@@ -1235,6 +1299,187 @@ func metricValue(value float64, valid bool) string {
 		return "N/A"
 	}
 	return fmt.Sprintf("%.1f", value)
+}
+
+func (app *application) saveInjectionSettings() bool {
+	normalized, err := app.settings.Injection.Normalized()
+	if err != nil {
+		app.injectionStatus = "注入设置无效：" + err.Error()
+		return false
+	}
+	app.settings.Injection = normalized
+	if err := config.Save(app.layout.Config, app.settings); err != nil {
+		app.injectionStatus = "保存注入设置失败：" + err.Error()
+		return false
+	}
+	return true
+}
+
+func (app *application) publishInjection(update injectionUpdate) {
+	select {
+	case app.injectionUpdates <- update:
+		win32.PostMessage(app.hwnd, messageInjection, 0, 0)
+	default:
+		select {
+		case <-app.injectionUpdates:
+		default:
+		}
+		select {
+		case app.injectionUpdates <- update:
+			win32.PostMessage(app.hwnd, messageInjection, 0, 0)
+		default:
+		}
+	}
+}
+
+func (app *application) startInjectionAudit() {
+	if app.gameState.Candidate == nil {
+		app.injectionStatus = "请先在游戏管理页完成游戏路径与版本扫描"
+		return
+	}
+	app.tasks.Cancel(app.injectionAuditTask)
+	candidate := *app.gameState.Candidate
+	app.injectionStatus = "正在后台核验模块 manifest、PE、版本与 SHA-256…"
+	app.injectionAuditTask = app.tasks.Run(func(ctx context.Context, id uint64) {
+		modules, warnings, err := injection.DiscoverCompatible(app.layout.Modules, candidate)
+		if ctx.Err() != nil {
+			return
+		}
+		update := injectionUpdate{taskID: id, kind: 0, modules: modules, warnings: warnings}
+		if err != nil {
+			update.err = "模块审计失败：" + err.Error()
+		} else {
+			update.status = fmt.Sprintf("审计完成：%d 个兼容模块，%d 个拒绝/警告", len(modules), len(warnings))
+		}
+		app.publishInjection(update)
+	})
+}
+
+func (app *application) startInjectionLaunch() {
+	if app.gameState.Candidate == nil || app.launchEngine == nil || !app.syncLaunchConfig() {
+		app.injectionStatus = "请先完成游戏扫描和启动设置校验"
+		return
+	}
+	if !app.saveInjectionSettings() {
+		return
+	}
+	settings := app.settings.Injection
+	launchSettings := app.settings.Launch
+	if !settings.Enabled || !settings.RiskAcknowledged || settings.ModuleID == "" {
+		app.injectionStatus = "注入启动被拒绝：请启用注入、确认风险并选择兼容模块"
+		return
+	}
+	app.tasks.Cancel(app.injectionLaunchTask)
+	candidate := *app.gameState.Candidate
+	app.injectionStatus = "正在独立 helper 中重复预检并启动…"
+	app.injectionLaunching = true
+	app.injectionLaunchTask = app.tasks.Run(func(ctx context.Context, id uint64) {
+		starter := injection.Starter{Context: ctx, HelperPath: filepath.Join(app.layout.Root, "GenshinTools-injector.exe"), ModulesRoot: app.layout.Modules, StagingRoot: app.layout.Staging, Config: settings}
+		err := app.launchEngine.LaunchWithStarter(candidate, launchSettings, starter)
+		update := injectionUpdate{taskID: id, kind: 1, status: "helper 已完成，正在接管游戏进程观察"}
+		if err != nil {
+			update.status = ""
+			update.err = "注入启动失败：" + err.Error() + "；可立即使用纯净启动"
+		}
+		app.publishInjection(update)
+	})
+}
+
+func (app *application) injectionClick(y int) {
+	sy := func(value int32) int { return int(win32.Scale(value, app.dpi)) }
+	switch {
+	case y >= sy(170) && y < sy(214):
+		app.settings.Injection.Enabled = !app.settings.Injection.Enabled
+		app.saveInjectionSettings()
+	case y >= sy(220) && y < sy(264):
+		app.settings.Injection.RiskAcknowledged = !app.settings.Injection.RiskAcknowledged
+		app.saveInjectionSettings()
+	case y >= sy(270) && y < sy(314):
+		if len(app.injectionModules) == 0 {
+			app.startInjectionAudit()
+			break
+		}
+		index := 0
+		for i, module := range app.injectionModules {
+			if module.Manifest.ID == app.settings.Injection.ModuleID {
+				index = (i + 1) % len(app.injectionModules)
+				break
+			}
+		}
+		app.settings.Injection.ModuleID = app.injectionModules[index].Manifest.ID
+		app.injectionStatus = "已选择模块：" + app.injectionModules[index].Manifest.Name
+		app.saveInjectionSettings()
+	case y >= sy(320) && y < sy(364):
+		app.startInjectionAudit()
+	case y >= sy(370) && y < sy(414):
+		app.startInjectionLaunch()
+	case y >= sy(420) && y < sy(464):
+		app.injectionLaunching = false
+		if app.gameState.Candidate == nil || app.launchEngine == nil || !app.syncLaunchConfig() {
+			app.injectionStatus = "请先完成游戏扫描"
+		} else if err := app.launchEngine.Launch(*app.gameState.Candidate, app.settings.Launch); err != nil {
+			app.injectionStatus = "纯净启动失败：" + err.Error()
+		} else {
+			app.injectionStatus = "已使用 S05 纯净启动路径"
+		}
+	case y >= sy(470) && y < sy(514):
+		presets := [][2]int{{15000, 5000}, {30000, 10000}, {60000, 20000}}
+		index := 0
+		for i, preset := range presets {
+			if preset[0] == app.settings.Injection.HelperTimeoutMS && preset[1] == app.settings.Injection.RemoteTimeoutMS {
+				index = (i + 1) % len(presets)
+				break
+			}
+		}
+		app.settings.Injection.HelperTimeoutMS, app.settings.Injection.RemoteTimeoutMS = presets[index][0], presets[index][1]
+		app.saveInjectionSettings()
+	}
+	win32.Invalidate(app.hwnd)
+}
+
+func (app *application) paintInjection(dc win32.HDC, client win32.Rect, left int32) {
+	cardBrush := win32.CreateSolidBrush(win32.Color(25, 29, 39))
+	defer win32.DeleteObject(uintptr(cardBrush))
+	buttonBrush := win32.CreateSolidBrush(win32.Color(35, 40, 54))
+	defer win32.DeleteObject(uintptr(buttonBrush))
+	warningBrush := win32.CreateSolidBrush(win32.Color(74, 48, 35))
+	defer win32.DeleteObject(uintptr(warningBrush))
+	accentBrush := win32.CreateSolidBrush(win32.Color(52, 66, 112))
+	defer win32.DeleteObject(uintptr(accentBrush))
+	right := client.Right - win32.Scale(42, app.dpi)
+	row := func(top, bottom int32, brush win32.HBRUSH) win32.Rect {
+		rect := win32.Rect{Left: left, Top: win32.Scale(top, app.dpi), Right: right, Bottom: win32.Scale(bottom, app.dpi)}
+		win32.FillRect(dc, &rect, brush)
+		return rect
+	}
+	draw := func(text string, rect win32.Rect, color uint32) {
+		win32.SetTextColor(dc, color)
+		rect.Left += win32.Scale(18, app.dpi)
+		rect.Right -= win32.Scale(12, app.dpi)
+		win32.DrawText(dc, text, &rect, win32.DT_LEFT|win32.DT_VCENTER|win32.DT_SINGLELINE|win32.DT_END_ELLIPSIS)
+	}
+	settings := app.settings.Injection
+	draw("注入适配："+map[bool]string{true: "启用", false: "关闭"}[settings.Enabled]+"    默认关闭，单击切换", row(170, 214, accentBrush), win32.Color(235, 238, 248))
+	draw("风险确认："+map[bool]string{true: "已确认", false: "未确认"}[settings.RiskAcknowledged]+"    可能触发反作弊、崩溃或账号风险", row(220, 264, warningBrush), win32.Color(255, 205, 150))
+	module := "无兼容模块"
+	for _, audit := range app.injectionModules {
+		if audit.Manifest.ID == settings.ModuleID {
+			module = audit.Manifest.Name + " · " + audit.SHA256[:12]
+			break
+		}
+	}
+	draw("模块："+module+"    单击切换", row(270, 314, buttonBrush), win32.Color(225, 229, 242))
+	draw("重新审计 data\\injection\\modules（不会联网下载）", row(320, 364, buttonBrush), win32.Color(190, 197, 216))
+	helperMode := map[bool]string{true: "管理员", false: "当前用户"}[settings.ElevatedHelper]
+	draw("使用独立 "+helperMode+" helper 注入启动", row(370, 414, warningBrush), win32.Color(255, 205, 150))
+	draw("立即纯净启动（与 S05 完全相同）", row(420, 464, accentBrush), win32.Color(235, 238, 248))
+	draw(fmt.Sprintf("超时：helper %.0f 秒 · 远程加载 %.0f 秒    单击切换", float64(settings.HelperTimeoutMS)/1000, float64(settings.RemoteTimeoutMS)/1000), row(470, 514, buttonBrush), win32.Color(190, 197, 216))
+	warning := "无模块审计警告"
+	if len(app.injectionWarnings) > 0 {
+		warning = app.injectionWarnings[0]
+	}
+	draw(warning, row(526, 566, cardBrush), win32.Color(166, 174, 197))
+	draw(app.injectionStatus, row(572, 612, cardBrush), win32.Color(145, 154, 180))
 }
 
 func (app *application) stopInputForSystemEvent(reason string) {

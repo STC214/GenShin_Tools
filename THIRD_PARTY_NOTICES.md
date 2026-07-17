@@ -11,6 +11,8 @@
 
 No FufuLauncher executable, DLL, image, sound, font or other binary asset is redistributed by the current project.
 
+The audited upstream baseline contains opaque `Launcher.dll` and `Launcher_2.exe` files whose current bytes do not match the repository's adjacent SHA-512 list and which have no source, signature or VERSIONINFO. They are not executed, copied or packaged. See `docs/s09-design.md` for recorded SHA-256 values and the independent helper decision.
+
 ## golang.org/x/sys
 
 - Module: `golang.org/x/sys`

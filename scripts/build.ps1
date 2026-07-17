@@ -18,7 +18,9 @@ $GoTemp = Join-Path $ProjectRoot '.tmp\go'
 $IconPath = Join-Path $ProjectRoot 'assets\app.ico'
 $ManifestPath = Join-Path $ProjectRoot 'assets\app.manifest'
 $ResourcePath = Join-Path $ProjectRoot 'cmd\genshin-tools\app.syso'
+$HelperResourcePath = Join-Path $ProjectRoot 'cmd\injection-helper\app.syso'
 $GeneratedRC = Join-Path $BuildDir 'app.generated.rc'
+$HelperGeneratedRC = Join-Path $BuildDir 'injector.generated.rc'
 
 function Invoke-Checked {
     param(
@@ -120,9 +122,12 @@ BEGIN
 END
 "@
     [IO.File]::WriteAllText($GeneratedRC, $ResourceText, [Text.UTF8Encoding]::new($false))
+    $HelperResourceText = $ResourceText.Replace('VALUE "FileDescription", "Genshin Tools\0"', 'VALUE "FileDescription", "Genshin Tools Injection Helper\0"').Replace('VALUE "InternalName", "GenshinTools\0"', 'VALUE "InternalName", "GenshinTools-injector\0"').Replace('VALUE "OriginalFilename", "GenshinTools.exe\0"', 'VALUE "OriginalFilename", "GenshinTools-injector.exe\0"')
+    [IO.File]::WriteAllText($HelperGeneratedRC, $HelperResourceText, [Text.UTF8Encoding]::new($false))
 
     $Windres = (Get-Command windres -ErrorAction Stop).Source
     Invoke-Checked -Command $Windres -Arguments @('--input', $GeneratedRC, '--output', $ResourcePath, '--output-format', 'coff')
+    Invoke-Checked -Command $Windres -Arguments @('--input', $HelperGeneratedRC, '--output', $HelperResourcePath, '--output-format', 'coff')
 
     $Configurations = if ($Configuration -eq 'Both') { @('Debug', 'Release') } else { @($Configuration) }
     $BuiltFiles = @()
@@ -145,7 +150,19 @@ END
         $BuiltFiles += $Output
     }
 
-    foreach ($directory in @('logs', 'cache', 'staging')) {
+    $HelperLdFlags = @(
+        "-X genshintools/internal/buildinfo.Version=$Version"
+        "-X genshintools/internal/buildinfo.Commit=$Commit"
+        "-X genshintools/internal/buildinfo.BuildTimeUTC=$BuildTimeUtc"
+        "-X genshintools/internal/buildinfo.Configuration=helper"
+        '-s'
+        '-w'
+    )
+    $HelperOutput = Join-Path $DistDir 'GenshinTools-injector.exe'
+    Invoke-Checked -Command 'go' -Arguments @('build', '-trimpath', '-buildvcs=false', '-ldflags', ($HelperLdFlags -join ' '), '-o', $HelperOutput, './cmd/injection-helper')
+    $BuiltFiles += $HelperOutput
+
+    foreach ($directory in @('logs', 'cache', 'staging', 'injection', 'injection\modules')) {
         New-Item -ItemType Directory -Force -Path (Join-Path $DistDir "data\$directory") | Out-Null
     }
     Copy-Item -LiteralPath (Join-Path $ProjectRoot 'THIRD_PARTY_NOTICES.md') -Destination $DistDir -Force

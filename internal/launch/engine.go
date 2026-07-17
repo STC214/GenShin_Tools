@@ -34,6 +34,13 @@ func NewEngine(starter Starter, checker ExistingChecker, onChange func(Snapshot)
 }
 
 func (e *Engine) Launch(candidate game.Candidate, config Config) error {
+	return e.LaunchWithStarter(candidate, config, e.starter)
+}
+
+func (e *Engine) LaunchWithStarter(candidate game.Candidate, config Config, starter Starter) error {
+	if starter == nil {
+		return errors.New("launch starter is required")
+	}
 	if candidate.Executable == "" || candidate.Root == "" {
 		return errors.New("validated game candidate is required")
 	}
@@ -76,7 +83,7 @@ func (e *Engine) Launch(candidate game.Candidate, config Config) error {
 	e.mu.Unlock()
 	e.notify(starting)
 
-	process, err := e.starter.Start(Request{Candidate: candidate, Config: config, Arguments: arguments})
+	process, err := starter.Start(Request{Candidate: candidate, Config: config, Arguments: arguments})
 	if err != nil {
 		e.fail(generation, fmt.Errorf("start game: %w", err))
 		return err

@@ -135,3 +135,18 @@ func TestLoadAcceptsUTF8BOM(t *testing.T) {
 		t.Fatalf("BOM settings = %+v", loaded)
 	}
 }
+
+func TestSchemaSixMigratesSafeInjectionDefaults(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	data := []byte(`{"schemaVersion":6,"window":{"width":1100,"height":720},"input":{"mode":0,"triggerKey":119,"outputKey":70,"stopKey":123,"intervalMs":50},"launch":{"width":1920,"height":1080}}`)
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Settings.SchemaVersion != CurrentSchemaVersion || loaded.Settings.Injection.Enabled || loaded.Settings.Injection.RiskAcknowledged || !loaded.Settings.Injection.ElevatedHelper {
+		t.Fatalf("migrated injection settings = %+v", loaded.Settings.Injection)
+	}
+}

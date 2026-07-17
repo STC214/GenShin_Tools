@@ -17,6 +17,8 @@ type Layout struct {
 	Logs       string
 	Cache      string
 	Staging    string
+	Injection  string
+	Modules    string
 	Config     string
 }
 
@@ -41,13 +43,15 @@ func ForExecutable(executable string) (Layout, error) {
 		Logs:       filepath.Join(data, "logs"),
 		Cache:      filepath.Join(data, "cache"),
 		Staging:    filepath.Join(data, "staging"),
+		Injection:  filepath.Join(data, "injection"),
+		Modules:    filepath.Join(data, "injection", "modules"),
 		Config:     filepath.Join(data, "config.json"),
 	}, nil
 }
 
 // Directories returns writable directories from parent to child.
 func (l Layout) Directories() []string {
-	return []string{l.Data, l.Logs, l.Cache, l.Staging}
+	return []string{l.Data, l.Logs, l.Cache, l.Staging, l.Injection, l.Modules}
 }
 
 // Ensure creates the writable runtime directories without creating a config file.

@@ -8,7 +8,8 @@ $Targets = @(
     (Join-Path $ProjectRoot '.cache'),
     (Join-Path $ProjectRoot '.tmp'),
     (Join-Path $ProjectRoot 'assets\app.ico'),
-    (Join-Path $ProjectRoot 'cmd\genshin-tools\app.syso')
+    (Join-Path $ProjectRoot 'cmd\genshin-tools\app.syso'),
+    (Join-Path $ProjectRoot 'cmd\injection-helper\app.syso')
 )
 
 foreach ($Target in $Targets) {
@@ -20,4 +21,3 @@ foreach ($Target in $Targets) {
         Remove-Item -LiteralPath $FullPath -Recurse -Force
     }
 }
-

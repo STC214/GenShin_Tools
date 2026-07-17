@@ -139,6 +139,24 @@ func TestEngineRefusesExistingAndConcurrentLaunch(t *testing.T) {
 	close(starter.process.exit)
 }
 
+func TestEngineLaunchWithStarterUsesOverride(t *testing.T) {
+	candidate := testCandidate(t)
+	defaultStarter := &fakeStarter{}
+	process := &fakeProcess{pid: 77, exit: make(chan struct{}), waiting: make(chan struct{})}
+	override := &fakeStarter{process: process}
+	engine, err := NewEngine(defaultStarter, func(game.Candidate) ([]game.ProcessIdentity, error) { return nil, nil }, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := engine.LaunchWithStarter(candidate, DefaultConfig(), override); err != nil {
+		t.Fatal(err)
+	}
+	if defaultStarter.starts != 0 || override.starts != 1 || engine.Snapshot().PID != 77 {
+		t.Fatalf("default starts=%d override starts=%d snapshot=%+v", defaultStarter.starts, override.starts, engine.Snapshot())
+	}
+	close(process.exit)
+}
+
 func testCandidate(t *testing.T) game.Candidate {
 	t.Helper()
 	root := t.TempDir()

@@ -28,6 +28,7 @@ function Get-PESubsystem {
 $Expected = @(
     @{ Path = (Join-Path $DistDirectory 'GenshinTools-debug.exe'); Subsystem = 3; Name = 'console' }
     @{ Path = (Join-Path $DistDirectory 'GenshinTools.exe'); Subsystem = 2; Name = 'windows-gui' }
+    @{ Path = (Join-Path $DistDirectory 'GenshinTools-injector.exe'); Subsystem = 3; Name = 'injection-helper' }
 )
 
 Add-Type -AssemblyName System.Drawing
@@ -54,7 +55,7 @@ foreach ($Item in $Expected) {
     Write-Host "Verified $([IO.Path]::GetFileName($Item.Path)): FileVersion=$($Info.FileVersion), ProductVersion=$($Info.ProductVersion), Subsystem=$Subsystem, Icon=ok"
 }
 
-$RequiredDirectories = @('data', 'data\logs', 'data\cache', 'data\staging')
+$RequiredDirectories = @('data', 'data\logs', 'data\cache', 'data\staging', 'data\injection', 'data\injection\modules')
 foreach ($Relative in $RequiredDirectories) {
     $Path = Join-Path $DistDirectory $Relative
     if (-not (Test-Path -LiteralPath $Path -PathType Container)) {
@@ -68,4 +69,3 @@ if ($BuildInfo.version -ne $Version -or $BuildInfo.target -ne 'windows/amd64') {
     throw "Unexpected build-info.json contents"
 }
 Write-Host "Verified portable data layout and build-info.json"
-
