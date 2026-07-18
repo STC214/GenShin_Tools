@@ -9,7 +9,8 @@ $Targets = @(
     (Join-Path $ProjectRoot '.tmp'),
     (Join-Path $ProjectRoot 'assets\app.ico'),
     (Join-Path $ProjectRoot 'cmd\genshin-tools\app.syso'),
-    (Join-Path $ProjectRoot 'cmd\injection-helper\app.syso')
+    (Join-Path $ProjectRoot 'cmd\injection-helper\app.syso'),
+    (Join-Path $ProjectRoot 'cmd\updater\app.syso')
 )
 
 foreach ($Target in $Targets) {

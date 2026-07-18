@@ -19,8 +19,10 @@ $IconPath = Join-Path $ProjectRoot 'assets\app.ico'
 $ManifestPath = Join-Path $ProjectRoot 'assets\app.manifest'
 $ResourcePath = Join-Path $ProjectRoot 'cmd\genshin-tools\app.syso'
 $HelperResourcePath = Join-Path $ProjectRoot 'cmd\injection-helper\app.syso'
+$UpdaterResourcePath = Join-Path $ProjectRoot 'cmd\updater\app.syso'
 $GeneratedRC = Join-Path $BuildDir 'app.generated.rc'
 $HelperGeneratedRC = Join-Path $BuildDir 'injector.generated.rc'
+$UpdaterGeneratedRC = Join-Path $BuildDir 'updater.generated.rc'
 
 function Invoke-Checked {
     param(
@@ -124,10 +126,13 @@ END
     [IO.File]::WriteAllText($GeneratedRC, $ResourceText, [Text.UTF8Encoding]::new($false))
     $HelperResourceText = $ResourceText.Replace('VALUE "FileDescription", "Genshin Tools\0"', 'VALUE "FileDescription", "Genshin Tools Injection Helper\0"').Replace('VALUE "InternalName", "GenshinTools\0"', 'VALUE "InternalName", "GenshinTools-injector\0"').Replace('VALUE "OriginalFilename", "GenshinTools.exe\0"', 'VALUE "OriginalFilename", "GenshinTools-injector.exe\0"')
     [IO.File]::WriteAllText($HelperGeneratedRC, $HelperResourceText, [Text.UTF8Encoding]::new($false))
+    $UpdaterResourceText = $ResourceText.Replace('VALUE "FileDescription", "Genshin Tools\0"', 'VALUE "FileDescription", "Genshin Tools Update Helper\0"').Replace('VALUE "InternalName", "GenshinTools\0"', 'VALUE "InternalName", "GenshinTools-updater\0"').Replace('VALUE "OriginalFilename", "GenshinTools.exe\0"', 'VALUE "OriginalFilename", "GenshinTools-updater.exe\0"')
+    [IO.File]::WriteAllText($UpdaterGeneratedRC, $UpdaterResourceText, [Text.UTF8Encoding]::new($false))
 
     $Windres = (Get-Command windres -ErrorAction Stop).Source
     Invoke-Checked -Command $Windres -Arguments @('--input', $GeneratedRC, '--output', $ResourcePath, '--output-format', 'coff')
     Invoke-Checked -Command $Windres -Arguments @('--input', $HelperGeneratedRC, '--output', $HelperResourcePath, '--output-format', 'coff')
+    Invoke-Checked -Command $Windres -Arguments @('--input', $UpdaterGeneratedRC, '--output', $UpdaterResourcePath, '--output-format', 'coff')
 
     $Configurations = if ($Configuration -eq 'Both') { @('Debug', 'Release') } else { @($Configuration) }
     $BuiltFiles = @()
@@ -162,7 +167,19 @@ END
     Invoke-Checked -Command 'go' -Arguments @('build', '-trimpath', '-buildvcs=false', '-ldflags', ($HelperLdFlags -join ' '), '-o', $HelperOutput, './cmd/injection-helper')
     $BuiltFiles += $HelperOutput
 
-    foreach ($directory in @('logs', 'cache', 'staging', 'injection', 'injection\modules', 'plugins', 'plugins\versions', 'plugins\staging')) {
+    $UpdaterLdFlags = @(
+        "-X genshintools/internal/buildinfo.Version=$Version"
+        "-X genshintools/internal/buildinfo.Commit=$Commit"
+        "-X genshintools/internal/buildinfo.BuildTimeUTC=$BuildTimeUtc"
+        "-X genshintools/internal/buildinfo.Configuration=updater"
+        '-s'
+        '-w'
+    )
+    $UpdaterOutput = Join-Path $DistDir 'GenshinTools-updater.exe'
+    Invoke-Checked -Command 'go' -Arguments @('build', '-trimpath', '-buildvcs=false', '-ldflags', ($UpdaterLdFlags -join ' '), '-o', $UpdaterOutput, './cmd/updater')
+    $BuiltFiles += $UpdaterOutput
+
+    foreach ($directory in @('logs', 'cache', 'staging', 'injection', 'injection\modules', 'plugins', 'plugins\versions', 'plugins\staging', 'updates', 'updates\versions', 'updates\backups', 'updates\runner')) {
         New-Item -ItemType Directory -Force -Path (Join-Path $DistDir "data\$directory") | Out-Null
     }
     Copy-Item -LiteralPath (Join-Path $ProjectRoot 'THIRD_PARTY_NOTICES.md') -Destination $DistDir -Force

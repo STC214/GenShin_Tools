@@ -29,6 +29,7 @@ $Expected = @(
     @{ Path = (Join-Path $DistDirectory 'GenshinTools-debug.exe'); Subsystem = 3; Name = 'console' }
     @{ Path = (Join-Path $DistDirectory 'GenshinTools.exe'); Subsystem = 2; Name = 'windows-gui' }
     @{ Path = (Join-Path $DistDirectory 'GenshinTools-injector.exe'); Subsystem = 3; Name = 'injection-helper' }
+    @{ Path = (Join-Path $DistDirectory 'GenshinTools-updater.exe'); Subsystem = 3; Name = 'update-helper' }
 )
 
 Add-Type -AssemblyName System.Drawing
@@ -55,7 +56,7 @@ foreach ($Item in $Expected) {
     Write-Host "Verified $([IO.Path]::GetFileName($Item.Path)): FileVersion=$($Info.FileVersion), ProductVersion=$($Info.ProductVersion), Subsystem=$Subsystem, Icon=ok"
 }
 
-$RequiredDirectories = @('data', 'data\logs', 'data\cache', 'data\staging', 'data\injection', 'data\injection\modules', 'data\plugins', 'data\plugins\versions', 'data\plugins\staging')
+$RequiredDirectories = @('data', 'data\logs', 'data\cache', 'data\staging', 'data\injection', 'data\injection\modules', 'data\plugins', 'data\plugins\versions', 'data\plugins\staging', 'data\updates', 'data\updates\versions', 'data\updates\backups', 'data\updates\runner')
 foreach ($Relative in $RequiredDirectories) {
     $Path = Join-Path $DistDirectory $Relative
     if (-not (Test-Path -LiteralPath $Path -PathType Container)) {
