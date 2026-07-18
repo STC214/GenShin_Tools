@@ -39,12 +39,9 @@ type HelperResult struct {
 }
 
 func LoadHelperRequest(path string) (HelperRequest, error) {
-	data, err := os.ReadFile(path)
+	data, err := readLimitedFile(path, 1<<20)
 	if err != nil {
 		return HelperRequest{}, err
-	}
-	if len(data) > 1<<20 {
-		return HelperRequest{}, errors.New("helper request exceeds 1 MiB")
 	}
 	var request HelperRequest
 	decoder := json.NewDecoder(bytes.NewReader(data))
@@ -77,6 +74,22 @@ func LoadHelperRequest(path string) (HelperRequest, error) {
 		}
 	}
 	return request, nil
+}
+
+func readLimitedFile(path string, maximum int64) ([]byte, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, maximum+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > maximum {
+		return nil, fmt.Errorf("%s exceeds %d bytes", filepath.Base(path), maximum)
+	}
+	return data, nil
 }
 
 func ExecuteHelper(request HelperRequest) HelperResult {

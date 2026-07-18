@@ -109,6 +109,15 @@ $Commit = if ($env:BUILD_COMMIT) {
     'unknown'
 }
 
+if (Test-Path -LiteralPath $DistDir) {
+    $ResolvedDist = (Resolve-Path -LiteralPath $DistDir).Path
+    $ExpectedDist = [IO.Path]::GetFullPath((Join-Path $ProjectRoot 'dist'))
+    if ($ResolvedDist -ne $ExpectedDist -or [IO.Path]::GetFileName($ResolvedDist) -ne 'dist') {
+        throw "Refusing to clean unexpected dist path: $ResolvedDist"
+    }
+    Remove-Item -LiteralPath $ResolvedDist -Recurse -Force
+}
+
 foreach ($directory in @($DistDir, $BuildDir, $GoCache, $GoTemp)) {
     New-Item -ItemType Directory -Force -Path $directory | Out-Null
 }

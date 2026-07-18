@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 )
@@ -15,9 +16,17 @@ func UpdateBaseline(path string, original []byte, lock Lock, report Report, disp
 	if err := ValidateDisposition(report, disposition); err != nil {
 		return err
 	}
-	current, err := os.ReadFile(path)
+	file, err := os.Open(path)
 	if err != nil {
 		return err
+	}
+	current, readErr := io.ReadAll(io.LimitReader(file, maxLockBytes+1))
+	closeErr := file.Close()
+	if readErr != nil || closeErr != nil {
+		return errors.Join(readErr, closeErr)
+	}
+	if len(current) > maxLockBytes {
+		return errors.New("upstream lock exceeds 64 KiB")
 	}
 	if !bytes.Equal(current, original) {
 		return errors.New("upstream lock changed after it was read")

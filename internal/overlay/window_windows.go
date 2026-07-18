@@ -102,10 +102,20 @@ var (
 	overlayGeneration                     atomic.Uint64
 )
 
-var overlayWndProc = windows.NewCallback(func(hwnd uintptr, msg uint32, wParam, lParam uintptr) uintptr {
+var overlayWndProc = windows.NewCallback(func(hwnd uintptr, msg uint32, wParam, lParam uintptr) (result uintptr) {
+	defer func() {
+		if recover() != nil {
+			if value, exists := overlayWindows.Load(hwnd); exists {
+				window := value.(*nativeWindow)
+				window.closing.Store(true)
+				procPostMessageOverlay.Call(hwnd, wmClose, 0, 0)
+			}
+			result, _, _ = procDefWindowProcOverlay.Call(hwnd, uintptr(msg), wParam, lParam)
+		}
+	}()
 	value, exists := overlayWindows.Load(hwnd)
 	if !exists {
-		result, _, _ := procDefWindowProcOverlay.Call(hwnd, uintptr(msg), wParam, lParam)
+		result, _, _ = procDefWindowProcOverlay.Call(hwnd, uintptr(msg), wParam, lParam)
 		return result
 	}
 	window := value.(*nativeWindow)
@@ -130,7 +140,7 @@ var overlayWndProc = windows.NewCallback(func(hwnd uintptr, msg uint32, wParam, 
 		procPostQuitMessageOverlay.Call(0)
 		return 0
 	}
-	result, _, _ := procDefWindowProcOverlay.Call(hwnd, uintptr(msg), wParam, lParam)
+	result, _, _ = procDefWindowProcOverlay.Call(hwnd, uintptr(msg), wParam, lParam)
 	return result
 })
 
@@ -166,13 +176,23 @@ func startNativeWindow(target gamewindow.Target, config Config) (*nativeWindow, 
 }
 
 func (window *nativeWindow) run() {
+	readySent := false
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 	defer close(window.done)
+	defer func() {
+		if recover() != nil && !readySent {
+			select {
+			case window.ready <- errors.New("panic while starting overlay window"):
+			default:
+			}
+		}
+	}()
 	instance, _, _ := procGetModuleHandleOverlay.Call(0)
 	className, _ := windows.UTF16PtrFromString(window.className)
 	class := wndClassEx{Size: uint32(unsafe.Sizeof(wndClassEx{})), WndProc: overlayWndProc, Instance: instance, ClassName: className}
 	if atom, _, err := procRegisterClassExOverlay.Call(uintptr(unsafe.Pointer(&class))); atom == 0 {
+		readySent = true
 		window.ready <- fmt.Errorf("RegisterClassEx overlay: %w", err)
 		return
 	}
@@ -181,22 +201,36 @@ func (window *nativeWindow) run() {
 	exStyle := uintptr(wsExTopmost | wsExTransparent | wsExToolWindow | wsExLayered | wsExNoActivate)
 	hwnd, _, err := procCreateWindowExOverlay.Call(exStyle, uintptr(unsafe.Pointer(className)), uintptr(unsafe.Pointer(title)), wsPopup, 0, 0, 260, 96, 0, 0, instance, 0)
 	if hwnd == 0 {
+		readySent = true
 		window.ready <- fmt.Errorf("CreateWindowEx overlay: %w", err)
 		return
 	}
 	window.hwnd.Store(hwnd)
 	overlayWindows.Store(hwnd, window)
+	defer func() {
+		if owned := window.hwnd.Swap(0); owned != 0 {
+			overlayWindows.Delete(owned)
+			procDestroyWindowOverlay.Call(owned)
+		}
+		if window.font != 0 {
+			procDeleteObjectOverlay.Call(window.font)
+			window.font = 0
+		}
+		if window.brush != 0 {
+			procDeleteObjectOverlay.Call(window.brush)
+			window.brush = 0
+		}
+	}()
 	if window.closing.Load() {
+		readySent = true
 		window.ready <- errors.New("overlay window startup canceled")
-		overlayWindows.Delete(hwnd)
-		window.hwnd.Store(0)
-		procDestroyWindowOverlay.Call(hwnd)
 		return
 	}
 	window.brush, _, _ = procCreateSolidBrushOverlay.Call(0x00251D19)
 	procSetLayeredWindowAttributesOverlay.Call(hwnd, 0, 220, lwaAlpha)
 	window.reposition(hwnd)
 	procSetTimerOverlay.Call(hwnd, 1, 500, 0)
+	readySent = true
 	window.ready <- nil
 	var msg message
 	for {
@@ -210,16 +244,6 @@ func (window *nativeWindow) run() {
 		}
 		procTranslateMessageOverlay.Call(uintptr(unsafe.Pointer(&msg)))
 		procDispatchMessageOverlay.Call(uintptr(unsafe.Pointer(&msg)))
-	}
-	if hwnd := window.hwnd.Swap(0); hwnd != 0 {
-		overlayWindows.Delete(hwnd)
-		procDestroyWindowOverlay.Call(hwnd)
-	}
-	if window.font != 0 {
-		procDeleteObjectOverlay.Call(window.font)
-	}
-	if window.brush != 0 {
-		procDeleteObjectOverlay.Call(window.brush)
 	}
 }
 

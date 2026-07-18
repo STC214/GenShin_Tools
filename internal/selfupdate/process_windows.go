@@ -88,31 +88,83 @@ func waitForProcessExit(ctx context.Context, identity ProcessIdentity, expectedP
 	}
 }
 
-func RestartMain(mainPath, installRoot string) error {
+func RestartMain(mainPath, installRoot string) (ProcessIdentity, error) {
 	main, err := filepath.Abs(mainPath)
 	if err != nil {
-		return err
+		return ProcessIdentity{}, err
 	}
 	root, err := filepath.Abs(installRoot)
 	if err != nil {
-		return err
+		return ProcessIdentity{}, err
 	}
 	if !strings.EqualFold(main, filepath.Join(root, "GenshinTools.exe")) {
-		return errors.New("refusing to restart a non-launcher executable")
+		return ProcessIdentity{}, errors.New("refusing to restart a non-launcher executable")
 	}
 	info, err := os.Lstat(main)
 	if err != nil || !info.Mode().IsRegular() {
-		return errors.New("launcher executable is not a regular file")
+		return ProcessIdentity{}, errors.New("launcher executable is not a regular file")
 	}
 	if err := rejectReparseWithin(root, main); err != nil {
-		return err
+		return ProcessIdentity{}, err
 	}
 	command := exec.Command(main)
 	command.Dir = root
 	if err := command.Start(); err != nil {
+		return ProcessIdentity{}, err
+	}
+	identity, err := processIdentity(uint32(command.Process.Pid))
+	if err != nil {
+		_ = command.Process.Kill()
+		_, _ = command.Process.Wait()
+		return ProcessIdentity{}, fmt.Errorf("capture restarted launcher identity: %w", err)
+	}
+	if err := command.Process.Release(); err != nil {
+		_ = command.Process.Kill()
+		_, _ = command.Process.Wait()
+		return ProcessIdentity{}, err
+	}
+	return identity, nil
+}
+
+func stopUnconfirmedProcess(identity ProcessIdentity, expectedPath string, timeout time.Duration) error {
+	if identity.PID == 0 || identity.CreationTime <= 0 {
+		return nil
+	}
+	process, err := windows.OpenProcess(windows.SYNCHRONIZE|windows.PROCESS_QUERY_LIMITED_INFORMATION|windows.PROCESS_TERMINATE, false, identity.PID)
+	if errors.Is(err, windows.ERROR_INVALID_PARAMETER) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("open unconfirmed launcher: %w", err)
+	}
+	defer windows.CloseHandle(process)
+	creationTime, err := queryProcessCreationTime(process)
+	if err != nil || creationTime != identity.CreationTime {
+		return nil
+	}
+	status, err := windows.WaitForSingleObject(process, 0)
+	if err != nil {
 		return err
 	}
-	return command.Process.Release()
+	if status == windows.WAIT_OBJECT_0 {
+		return nil
+	}
+	actualPath, err := queryProcessPath(process)
+	wantPath, pathErr := filepath.Abs(expectedPath)
+	if err != nil || pathErr != nil || !strings.EqualFold(filepath.Clean(actualPath), filepath.Clean(wantPath)) {
+		return errors.New("unconfirmed launcher path does not match the restarted process")
+	}
+	if err := windows.TerminateProcess(process, 0xE0000001); err != nil {
+		return fmt.Errorf("terminate unconfirmed launcher: %w", err)
+	}
+	status, err = windows.WaitForSingleObject(process, uint32(max(timeout.Milliseconds(), 1)))
+	if err != nil {
+		return err
+	}
+	if status != windows.WAIT_OBJECT_0 {
+		return errors.New("timed out stopping unconfirmed launcher")
+	}
+	return nil
 }
 
 func queryProcessCreationTime(process windows.Handle) (int64, error) {

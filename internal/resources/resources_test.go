@@ -159,6 +159,29 @@ func TestDownloaderHashMismatchNeverPublishesDestination(t *testing.T) {
 	}
 }
 
+func TestDownloaderBoundsOversizedResponse(t *testing.T) {
+	expected := []byte("small expected payload")
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		_, _ = writer.Write(bytes.Repeat([]byte("x"), 4<<20))
+	}))
+	defer server.Close()
+	manifest := testManifest(expected, server.URL+"/oversized")
+	root := t.TempDir()
+	downloader := NewDownloader()
+	downloader.MaxAttempts = 1
+	if err := downloader.Download(context.Background(), manifest, root); err == nil {
+		t.Fatal("oversized response succeeded")
+	}
+	part := filepath.Join(root, manifest.Files[0].Path) + ".part"
+	info, err := os.Stat(part)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Size() > int64(len(expected)+1) {
+		t.Fatalf("oversized response wrote %d bytes, want at most %d", info.Size(), len(expected)+1)
+	}
+}
+
 func TestDownloaderOfflineNeverPublishesDestination(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	rawURL := server.URL + "/offline"
@@ -230,6 +253,27 @@ func TestRepairPlanCommitAndRecovery(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertFileContent(t, recoveryTarget, old)
+}
+
+func TestRecoveryRejectsUnsafeJournalFiles(t *testing.T) {
+	for name, data := range map[string][]byte{
+		"trailing JSON": []byte(`{"schema_version":1,"id":"fixture","game_root":"C:\\\\game","state":"prepared","entries":[]} {}`),
+		"oversized":     make([]byte, maxTransactionJournalBytes+1),
+	} {
+		t.Run(name, func(t *testing.T) {
+			root := t.TempDir()
+			path := filepath.Join(root, "fixture", "transaction.json")
+			if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, data, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := RecoverTransactions(root); err == nil {
+				t.Fatal("unsafe recovery journal was accepted")
+			}
+		})
+	}
 }
 
 func TestCommitFileLockRollsBackWithoutChangingOriginal(t *testing.T) {
@@ -529,6 +573,19 @@ func TestSophonBranchDiscoveryAndPreloadURL(t *testing.T) {
 	parsed, _ := url.Parse(rawURL)
 	if parsed.Query().Get("branch") != "pre_download" || parsed.Query().Get("tag") != "6.8.0" || parsed.Query().Get("package_id") != "pre-pkg" {
 		t.Fatalf("pre-download URL = %s", rawURL)
+	}
+}
+
+func TestSophonBranchesRejectTrailingJSON(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		_, _ = io.WriteString(writer, `{"retcode":0,"message":"OK","data":{"game_branches":[]}} {}`)
+	}))
+	defer server.Close()
+	provider := NewSophonProvider()
+	provider.BranchesURL = server.URL
+	provider.MaxAttempts = 1
+	if _, err := provider.FetchBranches(context.Background()); err == nil {
+		t.Fatal("Sophon branches trailing JSON was accepted")
 	}
 }
 

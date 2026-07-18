@@ -56,7 +56,7 @@ func LoadLock(reader io.Reader) (Lock, error) {
 }
 
 func (lock Lock) Validate() error {
-	if lock.SchemaVersion != 1 || lock.Mode != "audit-only" || lock.ScopePolicy != "scope-v1" {
+	if lock.SchemaVersion != 1 || lock.Mode != "audit-only" || lock.ScopePolicy != "scope-v2" {
 		return errors.New("unsupported upstream lock schema, mode, or scope policy")
 	}
 	if lock.Owner != "FufuLauncher" || lock.Name != "FufuLauncher" || lock.Branch != "master" {

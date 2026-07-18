@@ -40,6 +40,7 @@ func (session *Session) run(ctx context.Context, publish func(Stats)) {
 	defer close(session.done)
 	defer session.sampler.Close()
 	defer session.window.requestClose()
+	defer func() { _ = recover() }()
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 	for {

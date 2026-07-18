@@ -97,6 +97,29 @@ func TestNativeHooksStartAndClose(t *testing.T) {
 	}
 }
 
+func TestNativeConcurrentStartCloseDoesNotLeakOrHang(t *testing.T) {
+	for range 5 {
+		n, err := NewNative(nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		finished := make(chan struct{})
+		go func() {
+			_ = n.Start()
+			close(finished)
+		}()
+		n.Close()
+		select {
+		case <-finished:
+		case <-time.After(2 * time.Second):
+			t.Fatal("concurrent Start/Close hung")
+		}
+		if activeNative.Load() == n {
+			t.Fatal("concurrent Start/Close left active hooks")
+		}
+	}
+}
+
 func TestForegroundChangeStopsRunningEngine(t *testing.T) {
 	injector := &fakeInjector{}
 	engine, err := NewEngine(injector, nil)

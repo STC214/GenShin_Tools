@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -57,10 +58,15 @@ func StageVersionMetadata(gameRoot, stagingRoot, version string) ([]PlanItem, er
 }
 
 func updatedGameConfig(path, version string) ([]byte, error) {
-	data, err := os.ReadFile(path)
+	file, err := os.Open(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return []byte("[General]\r\ngame_version=" + version + "\r\nchannel=1\r\nsub_channel=1\r\ncps=mihoyo\r\n"), nil
 	}
+	if err != nil {
+		return nil, fmt.Errorf("read config.ini: %w", err)
+	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, maxGameConfigBytes+1))
 	if err != nil {
 		return nil, fmt.Errorf("read config.ini: %w", err)
 	}

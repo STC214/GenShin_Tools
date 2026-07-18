@@ -218,6 +218,9 @@ func (p *SophonProvider) FetchBranches(ctx context.Context) (SophonBranches, err
 	if err := decoder.Decode(&response); err != nil {
 		return SophonBranches{}, fmt.Errorf("decode Sophon branches schema: %w", err)
 	}
+	if err := ensureJSONEnd(decoder); err != nil {
+		return SophonBranches{}, fmt.Errorf("decode Sophon branches schema: %w", err)
+	}
 	if response.Retcode != 0 || response.Message != "OK" {
 		return SophonBranches{}, fmt.Errorf("Sophon branches API rejected request: retcode=%d message=%q", response.Retcode, response.Message)
 	}

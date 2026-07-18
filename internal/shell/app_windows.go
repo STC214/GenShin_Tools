@@ -364,14 +364,16 @@ func Run(layout paths.Layout, build buildinfo.Info) (returnErr error) {
 		}
 	}
 	app := &application{
-		instance:            win32.ModuleHandle(),
-		settings:            loaded.Settings,
-		texts:               texts,
-		lastBounds:          loaded.Settings.Window,
-		layout:              layout,
-		build:               build,
-		logger:              logger,
-		tasks:               taskrunner.New(),
+		instance:   win32.ModuleHandle(),
+		settings:   loaded.Settings,
+		texts:      texts,
+		lastBounds: loaded.Settings.Window,
+		layout:     layout,
+		build:      build,
+		logger:     logger,
+		tasks: taskrunner.New(func(value any) {
+			logger.Panic("panic in background task", value)
+		}),
 		previousBad:         previousBad,
 		recovered:           loaded.RecoveredFrom,
 		snapshots:           make(chan diagnosticSnapshot, 1),

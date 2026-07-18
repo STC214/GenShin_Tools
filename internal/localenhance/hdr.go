@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 
 	"golang.org/x/sys/windows/registry"
@@ -16,6 +17,7 @@ const (
 	HDRStateName        = "WINDOWS_HDR_ON_h3132281285"
 	GeneralDataName     = "GENERAL_DATA_h2389025596"
 	genshinRegistryPath = `Software\miHoYo\原神`
+	maxHDRRegistryBytes = 1 << 20
 )
 
 type HDRConfig struct {
@@ -131,6 +133,9 @@ func decodeHDRGeneral(data []byte, config *HDRConfig) error {
 	if err := decoder.Decode(&values); err != nil {
 		return fmt.Errorf("decode Genshin HDR JSON: %w", err)
 	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		return errors.New("Genshin HDR JSON contains trailing data")
+	}
 	for name, target := range map[string]*int{"maxLuminosity": &config.MaxLuminance, "scenePaperWhite": &config.SceneLuminance, "uiPaperWhite": &config.UILuminance} {
 		if raw, exists := values[name]; exists {
 			number, ok := raw.(json.Number)
@@ -159,6 +164,9 @@ func encodeHDRGeneral(original RegistryValue, config HDRConfig) ([]byte, error) 
 		decoder.UseNumber()
 		if err := decoder.Decode(&values); err != nil {
 			return nil, fmt.Errorf("preserve Genshin settings JSON: %w", err)
+		}
+		if err := decoder.Decode(&struct{}{}); err != io.EOF {
+			return nil, errors.New("preserved Genshin settings JSON contains trailing data")
 		}
 	}
 	values["maxLuminosity"] = config.MaxLuminance

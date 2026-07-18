@@ -78,12 +78,9 @@ func loadManifest(path, directoryID string) (Manifest, error) {
 	if err := regularFile(path); err != nil {
 		return Manifest{}, err
 	}
-	data, err := os.ReadFile(path)
+	data, err := readFileBounded(path, 1<<20)
 	if err != nil {
 		return Manifest{}, err
-	}
-	if len(data) > 1<<20 {
-		return Manifest{}, errors.New("plugin manifest exceeds 1 MiB")
 	}
 	var manifest Manifest
 	decoder := json.NewDecoder(bytes.NewReader(bytes.TrimPrefix(data, []byte{0xEF, 0xBB, 0xBF})))

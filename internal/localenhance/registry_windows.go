@@ -26,6 +26,9 @@ func (NativeRegistry) Read(name string) (RegistryValue, error) {
 	if err != nil && !errors.Is(err, registry.ErrShortBuffer) {
 		return RegistryValue{}, err
 	}
+	if size > maxHDRRegistryBytes {
+		return RegistryValue{}, fmt.Errorf("registry value %s exceeds 1 MiB safety limit", name)
+	}
 	data := make([]byte, size)
 	n, kind, err := key.GetValue(name, data)
 	if err != nil {

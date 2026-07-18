@@ -107,6 +107,7 @@ var (
 )
 
 var fpsEventCallback = windows.NewCallback(func(recordPointer uintptr) uintptr {
+	defer func() { _ = recover() }()
 	if recordPointer == 0 {
 		return 0
 	}
@@ -172,6 +173,7 @@ func startFPSTrace(pid uint32) (*fpsTrace, error) {
 	cleanup = false
 	go func() {
 		defer close(trace.done)
+		defer func() { _ = recover() }()
 		procProcessTrace.Call(uintptr(unsafe.Pointer(&trace.traceHandle)), 1, 0, 0)
 	}()
 	return trace, nil

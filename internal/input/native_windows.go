@@ -17,6 +17,7 @@ const (
 	whKeyboardLL = 13
 	whMouseLL    = 14
 	wMQuit       = 0x0012
+	pmNoRemove   = 0x0000
 
 	wMKeyDown     = 0x0100
 	wMKeyUp       = 0x0101
@@ -89,7 +90,8 @@ type winInput struct {
 }
 
 type Native struct {
-	engine *Engine
+	engine    *Engine
+	lifecycle sync.Mutex
 
 	events      [nativeQueueSize]PhysicalEvent
 	head        atomic.Uint32
@@ -123,6 +125,7 @@ var (
 	procUnhookWindowsHookEx      = inputUser32.NewProc("UnhookWindowsHookEx")
 	procCallNextHookEx           = inputUser32.NewProc("CallNextHookEx")
 	procGetMessageW              = inputUser32.NewProc("GetMessageW")
+	procPeekMessageW             = inputUser32.NewProc("PeekMessageW")
 	procPostThreadMessageW       = inputUser32.NewProc("PostThreadMessageW")
 	procSendInput                = inputUser32.NewProc("SendInput")
 	procMapVirtualKeyExW         = inputUser32.NewProc("MapVirtualKeyExW")
@@ -156,6 +159,8 @@ func NewNative(onChange func(Snapshot)) (*Native, error) {
 }
 
 func (n *Native) Start() error {
+	n.lifecycle.Lock()
+	defer n.lifecycle.Unlock()
 	if n.closed.Load() {
 		return errors.New("native input is closed")
 	}
@@ -167,7 +172,7 @@ func (n *Native) Start() error {
 		return errors.New("another native input hook is active")
 	}
 	ready := make(chan error, 1)
-	go n.hookThread(ready)
+	go n.runHookThread(ready)
 	if err := <-ready; err != nil {
 		activeNative.CompareAndSwap(n, nil)
 		n.started.Store(false)
@@ -176,6 +181,20 @@ func (n *Native) Start() error {
 	go n.eventWorker()
 	go n.safetyMonitor()
 	return nil
+}
+
+func (n *Native) runHookThread(ready chan<- error) {
+	defer func() {
+		if recover() != nil {
+			err := errors.New("panic in input hook thread")
+			select {
+			case ready <- err:
+			default:
+			}
+			n.engine.Fail(err)
+		}
+	}()
+	n.hookThread(ready)
 }
 
 func (n *Native) Configure(config Config) error { return n.engine.Configure(config) }
@@ -195,15 +214,21 @@ func (n *Native) SetObserver(observer func(PhysicalEvent)) {
 }
 
 func (n *Native) Close() {
+	n.lifecycle.Lock()
 	if !n.closed.CompareAndSwap(false, true) {
+		n.lifecycle.Unlock()
 		return
 	}
 	n.engine.Enable(false)
-	if n.started.Load() {
+	started := n.started.Load()
+	if started {
 		close(n.monitorStop)
 		if id := n.threadID.Load(); id != 0 {
 			procPostThreadMessageW.Call(uintptr(id), wMQuit, 0, 0)
 		}
+	}
+	n.lifecycle.Unlock()
+	if started {
 		<-n.done
 		<-n.workerDone
 		<-n.monitorDone
@@ -213,6 +238,11 @@ func (n *Native) Close() {
 
 func (n *Native) safetyMonitor() {
 	defer close(n.monitorDone)
+	defer func() {
+		if recover() != nil {
+			n.engine.Fail(errors.New("panic in input safety monitor"))
+		}
+	}()
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
 	var target windows.HWND
@@ -255,6 +285,11 @@ func (n *Native) hookThread(ready chan<- error) {
 	defer close(n.done)
 	defer activeNative.CompareAndSwap(n, nil)
 
+	// PostThreadMessage fails if the target thread has not created a message
+	// queue yet. Create it before Start can report success, otherwise an
+	// immediate Close can wait forever for a WM_QUIT that was never posted.
+	var queueMessage message
+	procPeekMessageW.Call(uintptr(unsafe.Pointer(&queueMessage)), 0, 0, 0, pmNoRemove)
 	n.threadID.Store(windows.GetCurrentThreadId())
 	module, _, callErr := procGetModuleHandleW.Call(0)
 	if module == 0 {
@@ -291,6 +326,11 @@ func (n *Native) hookThread(ready chan<- error) {
 
 func (n *Native) eventWorker() {
 	defer close(n.workerDone)
+	defer func() {
+		if recover() != nil {
+			n.engine.Fail(errors.New("panic in physical input worker"))
+		}
+	}()
 	for {
 		select {
 		case <-n.wake:
@@ -348,20 +388,36 @@ func (n *Native) enqueue(event PhysicalEvent) {
 	}
 }
 
-func keyboardHookCallback(code int, wParam, lParam uintptr) uintptr {
+func keyboardHookCallback(code int, wParam, lParam uintptr) (result uintptr) {
+	defer func() {
+		if recover() != nil {
+			if n := activeNative.Load(); n != nil {
+				n.engine.Fail(errors.New("panic in keyboard hook callback"))
+			}
+			result, _, _ = procCallNextHookEx.Call(0, uintptr(code), wParam, lParam)
+		}
+	}()
 	if code >= 0 {
 		handleKeyboardHook((*keyboardHook)(unsafe.Pointer(lParam)), wParam)
 	}
-	value, _, _ := procCallNextHookEx.Call(0, uintptr(code), wParam, lParam)
-	return value
+	result, _, _ = procCallNextHookEx.Call(0, uintptr(code), wParam, lParam)
+	return result
 }
 
-func mouseHookCallback(code int, wParam, lParam uintptr) uintptr {
+func mouseHookCallback(code int, wParam, lParam uintptr) (result uintptr) {
+	defer func() {
+		if recover() != nil {
+			if n := activeNative.Load(); n != nil {
+				n.engine.Fail(errors.New("panic in mouse hook callback"))
+			}
+			result, _, _ = procCallNextHookEx.Call(0, uintptr(code), wParam, lParam)
+		}
+	}()
 	if code >= 0 {
 		handleMouseHook((*mouseHook)(unsafe.Pointer(lParam)), wParam)
 	}
-	value, _, _ := procCallNextHookEx.Call(0, uintptr(code), wParam, lParam)
-	return value
+	result, _, _ = procCallNextHookEx.Call(0, uintptr(code), wParam, lParam)
+	return result
 }
 
 func handleKeyboardHook(data *keyboardHook, message uintptr) {

@@ -15,20 +15,30 @@ type Manager struct {
 	mu         sync.Mutex
 	tasks      map[uint64]context.CancelFunc
 	wg         sync.WaitGroup
+	onPanic    func(any)
+	closing    bool
 }
 
-func New() *Manager {
+func New(panicHandler ...func(any)) *Manager {
 	root, cancel := context.WithCancel(context.Background())
-	return &Manager{root: root, cancelRoot: cancel, tasks: make(map[uint64]context.CancelFunc)}
+	var handler func(any)
+	if len(panicHandler) > 0 {
+		handler = panicHandler[0]
+	}
+	return &Manager{root: root, cancelRoot: cancel, tasks: make(map[uint64]context.CancelFunc), onPanic: handler}
 }
 
 func (m *Manager) Run(work func(context.Context, uint64)) uint64 {
 	id := m.nextID.Add(1)
-	ctx, cancel := context.WithCancel(m.root)
 	m.mu.Lock()
+	if m.closing {
+		m.mu.Unlock()
+		return 0
+	}
+	ctx, cancel := context.WithCancel(m.root)
 	m.tasks[id] = cancel
-	m.mu.Unlock()
 	m.wg.Add(1)
+	m.mu.Unlock()
 	go func() {
 		defer m.wg.Done()
 		defer func() {
@@ -36,6 +46,11 @@ func (m *Manager) Run(work func(context.Context, uint64)) uint64 {
 			delete(m.tasks, id)
 			m.mu.Unlock()
 			cancel()
+		}()
+		defer func() {
+			if value := recover(); value != nil && m.onPanic != nil {
+				m.onPanic(value)
+			}
 		}()
 		work(ctx, id)
 	}()
@@ -52,6 +67,9 @@ func (m *Manager) Cancel(id uint64) {
 }
 
 func (m *Manager) Shutdown(timeout time.Duration) bool {
+	m.mu.Lock()
+	m.closing = true
+	m.mu.Unlock()
 	m.cancelRoot()
 	done := make(chan struct{})
 	go func() {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -189,8 +190,13 @@ func updateAdvancedConfig(path string, target AdvancedServer, targetVersion stri
 }
 
 func readGameVersion(path string) string {
-	data, err := os.ReadFile(path)
+	file, err := os.Open(path)
 	if err != nil {
+		return ""
+	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, (1<<20)+1))
+	if err != nil || len(data) > 1<<20 {
 		return ""
 	}
 	for _, line := range strings.Split(strings.ReplaceAll(string(data), "\r\n", "\n"), "\n") {

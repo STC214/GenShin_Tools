@@ -3,8 +3,10 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"time"
@@ -26,9 +28,17 @@ func main() {
 
 func run(root, apiBase string, updateBaseline bool, dispositionPath string) error {
 	lockPath := filepath.Join(root, "upstream.lock.json")
-	lockData, err := os.ReadFile(lockPath)
+	lockFile, err := os.Open(lockPath)
 	if err != nil {
 		return err
+	}
+	lockData, readErr := io.ReadAll(io.LimitReader(lockFile, (64<<10)+1))
+	closeErr := lockFile.Close()
+	if readErr != nil || closeErr != nil {
+		return fmt.Errorf("read upstream lock: %w", errors.Join(readErr, closeErr))
+	}
+	if len(lockData) > 64<<10 {
+		return errors.New("upstream lock exceeds 64 KiB")
 	}
 	lock, err := upstreamaudit.LoadLock(bytes.NewReader(lockData))
 	if err != nil {

@@ -113,10 +113,11 @@ func TestExecuteUpdateCommitsAndRestartsFixedMain(t *testing.T) {
 			waited = got == request.Parent && strings.EqualFold(path, filepath.Join(layout.InstallRoot, "GenshinTools.exe")) && timeout == 10*time.Second
 			return nil
 		},
-		RestartMain: func(path, root string) error {
+		RestartMain: func(path, root string) (ProcessIdentity, error) {
 			restarted = strings.EqualFold(path, filepath.Join(layout.InstallRoot, "GenshinTools.exe")) && strings.EqualFold(root, layout.InstallRoot)
-			return nil
+			return ProcessIdentity{}, nil
 		},
+		WaitForConfirmation: func(context.Context, UpdateLayout, string, string, time.Duration) error { return nil },
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -130,6 +131,35 @@ func TestExecuteUpdateCommitsAndRestartsFixedMain(t *testing.T) {
 	}
 }
 
+func TestExecuteUpdateRestoresOldVersionWhenConfirmationTimesOut(t *testing.T) {
+	layout, staged := prepareTransaction(t)
+	old := writeInstalledFiles(t, layout.InstallRoot, staged.Manifest, "unconfirmed-")
+	request := validUpdaterRequest(staged.Manifest.Version, staged.ManifestSHA256)
+	restarts := 0
+	confirmed := false
+	err := ExecuteUpdate(context.Background(), layout, request, &UpdaterHooks{
+		WaitForParent: func(context.Context, ProcessIdentity, string, time.Duration) error { return nil },
+		RestartMain: func(string, string) (ProcessIdentity, error) {
+			restarts++
+			return ProcessIdentity{}, nil
+		},
+		WaitForConfirmation: func(_ context.Context, got UpdateLayout, version, digest string, timeout time.Duration) error {
+			confirmed = got == layout && version == request.Version && digest == request.ManifestSHA256 && timeout == 5*time.Second
+			return errors.New("injected confirmation timeout")
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "restored previous version") {
+		t.Fatalf("ExecuteUpdate error = %v", err)
+	}
+	if !confirmed || restarts != 2 {
+		t.Fatalf("confirmed=%v restart attempts=%d, want true and 2", confirmed, restarts)
+	}
+	assertInstalledFiles(t, layout.InstallRoot, old)
+	if _, err := os.Lstat(layout.Journal); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("confirmation rollback left the transaction journal behind")
+	}
+}
+
 func TestExecuteUpdateRestoresOldVersionWhenRestartFails(t *testing.T) {
 	layout, staged := prepareTransaction(t)
 	old := writeInstalledFiles(t, layout.InstallRoot, staged.Manifest, "restore-")
@@ -137,12 +167,12 @@ func TestExecuteUpdateRestoresOldVersionWhenRestartFails(t *testing.T) {
 	restarts := 0
 	err := ExecuteUpdate(context.Background(), layout, request, &UpdaterHooks{
 		WaitForParent: func(context.Context, ProcessIdentity, string, time.Duration) error { return nil },
-		RestartMain: func(string, string) error {
+		RestartMain: func(string, string) (ProcessIdentity, error) {
 			restarts++
 			if restarts == 1 {
-				return errors.New("new launcher failed to start")
+				return ProcessIdentity{}, errors.New("new launcher failed to start")
 			}
-			return nil
+			return ProcessIdentity{}, nil
 		},
 	})
 	if err == nil || !strings.Contains(err.Error(), "restored and restarted previous version") {

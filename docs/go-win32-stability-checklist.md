@@ -60,6 +60,7 @@
 | C10 | data race 让 UI 显示停止但后台仍运行 | 状态单一所有者；纯 Go 层 race 测试 | P0 |
 | C11 | 无限重试/立即重试造成 CPU 或网络风暴 | 有上限指数退避、jitter 和可取消等待 | P1 |
 | C12 | 日志 channel 堵满反向阻塞核心流程 | 有界队列；低级日志可丢弃并计数 | P1 |
+| C13 | 后台 goroutine/task panic 绕过主线程 recover，导致整进程退出 | 每个 goroutine 顶层 containment；状态转 Fault；诊断日志 | P0 |
 
 ## D. 输入 hook、热键与 SendInput（P0 专项）
 
@@ -81,6 +82,7 @@
 | D14 | Unhook 与 callback 并发，关闭时崩溃 | hook 线程自行卸载；shutdown handshake | P0 |
 | D15 | RDP、锁屏、切用户、休眠后状态错误 | session/power 通知统一停止并重新武装 | P0 |
 | D16 | 杀进程前无法释放正在按下的虚拟键 | 正常退出强制 release；异常退出后下次启动提示（OS 通常会清状态但不依赖它） | P0 |
+| D17 | hook ready 前线程消息队列尚未建立，立即 Close 的 WM_QUIT 丢失并永久等待 | ready 前 `PeekMessage` 建队列；Start/Close 生命周期锁；并发回归 | P0 |
 
 ## E. GDI、DWM、DPI 与窗口资源
 

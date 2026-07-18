@@ -67,6 +67,7 @@ func (starter Starter) Start(request launch.Request) (launch.Process, error) {
 	if err := os.MkdirAll(directory, 0o700); err != nil {
 		return nil, err
 	}
+	defer os.RemoveAll(directory)
 	requestPath := filepath.Join(directory, "request.json")
 	helperRequest := HelperRequest{ProtocolVersion: ProtocolVersion, RequestID: requestID, ModulesRoot: starter.ModulesRoot, ModuleIDs: moduleIDs, Candidate: request.Candidate, Arguments: append([]string(nil), request.Arguments...), RemoteTimeoutMS: config.RemoteTimeoutMS}
 	if err := writeRequest(requestPath, helperRequest); err != nil {
@@ -78,7 +79,7 @@ func (starter Starter) Start(request launch.Request) (launch.Process, error) {
 	}
 	ctx, cancel := context.WithTimeout(ctx, time.Duration(config.HelperTimeoutMS)*time.Millisecond)
 	defer cancel()
-	var output bytes.Buffer
+	var output limitedOutput
 	var runErr error
 	if config.ElevatedHelper {
 		runErr = runElevatedHelper(ctx, starter.HelperPath, requestPath)
@@ -93,10 +94,10 @@ func (starter Starter) Start(request launch.Request) (launch.Process, error) {
 	}
 	result, resultErr := loadResult(filepath.Join(directory, "result.json"), requestID)
 	if resultErr != nil {
-		return nil, fmt.Errorf("injection helper result: %w; process=%v; output=%s", resultErr, runErr, boundedOutput(output.String()))
+		return nil, fmt.Errorf("injection helper result: %w; process=%v; output=%s", resultErr, runErr, output.String())
 	}
 	if runErr != nil || !result.Success || result.PID <= 0 {
-		return nil, fmt.Errorf("injection helper failed (%s): %s; process=%v; output=%s", result.Code, result.Error, runErr, boundedOutput(output.String()))
+		return nil, fmt.Errorf("injection helper failed (%s): %s; process=%v; output=%s", result.Code, result.Error, runErr, output.String())
 	}
 	process, err := windows.OpenProcess(windows.SYNCHRONIZE|windows.PROCESS_QUERY_LIMITED_INFORMATION, false, uint32(result.PID))
 	if err != nil {
@@ -203,12 +204,9 @@ func writeRequest(path string, request HelperRequest) error {
 }
 
 func loadResult(path, requestID string) (HelperResult, error) {
-	data, err := os.ReadFile(path)
+	data, err := readLimitedFile(path, 1<<20)
 	if err != nil {
 		return HelperResult{}, err
-	}
-	if len(data) > 1<<20 {
-		return HelperResult{}, errors.New("result exceeds 1 MiB")
 	}
 	var result HelperResult
 	decoder := json.NewDecoder(bytes.NewReader(data))
@@ -252,9 +250,24 @@ func equalPath(left, right string) bool {
 	return result == 2
 }
 
-func boundedOutput(value string) string {
-	if len(value) > 4096 {
-		return value[:4096] + "..."
+type limitedOutput struct {
+	buffer bytes.Buffer
+	total  int64
+}
+
+func (output *limitedOutput) Write(data []byte) (int, error) {
+	output.total += int64(len(data))
+	remaining := 4096 - output.buffer.Len()
+	if remaining > 0 {
+		_, _ = output.buffer.Write(data[:min(len(data), remaining)])
+	}
+	return len(data), nil
+}
+
+func (output *limitedOutput) String() string {
+	value := output.buffer.String()
+	if output.total > int64(output.buffer.Len()) {
+		return value + "..."
 	}
 	return value
 }

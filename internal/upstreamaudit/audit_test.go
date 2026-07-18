@@ -14,7 +14,7 @@ const validLock = `{
   "commit": "b5a050ebd319341bddc4189491c90c22162d33fa",
   "commitTimeUtc": "2026-07-16T12:14:09Z",
   "checkedAtUtc": "2026-07-17T04:08:18Z",
-  "scopePolicy": "scope-v1",
+  "scopePolicy": "scope-v2",
   "mode": "audit-only",
   "notes": "fixture"
 }`
@@ -30,6 +30,12 @@ func TestLoadLockRejectsUnknownFieldsAndRepositoryChanges(t *testing.T) {
 	changed := strings.Replace(validLock, `"owner": "FufuLauncher"`, `"owner": "attacker"`, 1)
 	if _, err := LoadLock(strings.NewReader(changed)); err == nil {
 		t.Fatal("changed repository identity accepted")
+	}
+}
+
+func TestLoadLockRejectsOversizedInput(t *testing.T) {
+	if _, err := LoadLock(strings.NewReader(strings.Repeat(" ", maxLockBytes+1))); err == nil {
+		t.Fatal("oversized upstream lock was accepted")
 	}
 }
 

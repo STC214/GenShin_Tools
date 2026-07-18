@@ -46,6 +46,28 @@ func TestLoadQuarantinesCorruptSettings(t *testing.T) {
 	}
 }
 
+func TestLoadQuarantinesUnsafeJSONShapes(t *testing.T) {
+	for name, data := range map[string][]byte{
+		"unknown field": []byte(`{"schemaVersion":9,"unexpected":true}`),
+		"trailing JSON": []byte(`{"schemaVersion":9} {}`),
+		"oversized":     make([]byte, maxSettingsBytes+1),
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.json")
+			if err := os.WriteFile(path, data, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			result, err := Load(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.RecoveredFrom == "" || result.Settings != Default() {
+				t.Fatalf("unsafe settings were not quarantined: %+v", result)
+			}
+		})
+	}
+}
+
 func TestLoadMigratesSchemaZeroAndClampsSize(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
 	data := []byte(`{"schemaVersion":0,"window":{"x":1,"y":2,"width":10,"height":20}}`)

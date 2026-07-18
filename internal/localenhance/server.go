@@ -319,9 +319,17 @@ func updateServerConfig(path string, target QuickServer) ([]byte, error) {
 }
 
 func updateServerConfigValues(path string, values map[string]string) ([]byte, error) {
-	data, err := os.ReadFile(path)
+	file, err := os.Open(path)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return nil, err
+	}
+	var data []byte
+	if err == nil {
+		defer file.Close()
+		data, err = io.ReadAll(io.LimitReader(file, (1<<20)+1))
+		if err != nil {
+			return nil, err
+		}
 	}
 	if len(data) > 1<<20 {
 		return nil, errors.New("config.ini exceeds safety limit")

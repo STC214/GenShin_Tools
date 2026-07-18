@@ -86,6 +86,15 @@ func TestHDRWrongRegistryTypeFailsBeforeWrite(t *testing.T) {
 	}
 }
 
+func TestHDRRejectsTrailingRegistryJSON(t *testing.T) {
+	store := &fakeRegistry{values: map[string]RegistryValue{
+		GeneralDataName: {Exists: true, Kind: registry.BINARY, Data: []byte(`{"maxLuminosity":900} {}`)},
+	}}
+	if _, _, err := ReadHDR(store); err == nil {
+		t.Fatal("trailing HDR registry JSON was accepted")
+	}
+}
+
 func TestExecutableFromCommand(t *testing.T) {
 	for command, want := range map[string]string{
 		`"C:\Program Files\BetterGI\BetterGI.exe" "%1"`: `C:\Program Files\BetterGI\BetterGI.exe`,

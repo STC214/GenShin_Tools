@@ -15,12 +15,13 @@ var ErrAlreadyRunning = errors.New("game is already running")
 type ExistingChecker func(game.Candidate) ([]game.ProcessIdentity, error)
 
 type Engine struct {
-	mu       sync.Mutex
-	starter  Starter
-	checker  ExistingChecker
-	onChange func(Snapshot)
-	snapshot Snapshot
-	closed   bool
+	mu        sync.Mutex
+	starter   Starter
+	checker   ExistingChecker
+	onChange  func(Snapshot)
+	snapshot  Snapshot
+	closed    bool
+	launching bool
 }
 
 func NewEngine(starter Starter, checker ExistingChecker, onChange func(Snapshot)) (*Engine, error) {
@@ -61,21 +62,30 @@ func (e *Engine) LaunchWithStarter(candidate game.Candidate, config Config, star
 		e.mu.Unlock()
 		return errors.New("launch engine is closed")
 	}
-	if e.snapshot.State == StateStarting || e.snapshot.State == StateRunning {
+	if e.launching || e.snapshot.State == StateStarting || e.snapshot.State == StateRunning {
 		e.mu.Unlock()
 		return errors.New("a game launch is already active")
 	}
+	e.launching = true
 	e.mu.Unlock()
 
 	running, checkErr := e.checker(candidate)
 	if checkErr != nil {
+		e.clearLaunchReservation()
 		return fmt.Errorf("check existing game process: %w", checkErr)
 	}
 	if len(running) > 0 {
+		e.clearLaunchReservation()
 		return fmt.Errorf("%w: PID %d", ErrAlreadyRunning, running[0].PID)
 	}
 
 	e.mu.Lock()
+	if e.closed {
+		e.launching = false
+		e.mu.Unlock()
+		return errors.New("launch engine was closed while checking existing processes")
+	}
+	e.launching = false
 	e.snapshot.Generation++
 	generation := e.snapshot.Generation
 	e.snapshot = Snapshot{State: StateStarting, Generation: generation, Arguments: append([]string(nil), arguments...), Executable: candidate.Executable, WorkingDir: candidate.Root, PostBehavior: config.PostBehavior}
@@ -105,6 +115,12 @@ func (e *Engine) LaunchWithStarter(candidate game.Candidate, config Config, star
 	e.notify(runningSnapshot)
 	go e.wait(process, generation)
 	return nil
+}
+
+func (e *Engine) clearLaunchReservation() {
+	e.mu.Lock()
+	e.launching = false
+	e.mu.Unlock()
 }
 
 func (e *Engine) wait(process Process, generation uint64) {
@@ -164,6 +180,9 @@ func (e *Engine) notify(snapshot Snapshot) {
 	callback := e.onChange
 	e.mu.Unlock()
 	if callback != nil {
-		callback(snapshot)
+		func() {
+			defer func() { _ = recover() }()
+			callback(snapshot)
+		}()
 	}
 }

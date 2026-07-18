@@ -5,7 +5,6 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"os"
 	"sort"
 )
 
@@ -26,7 +25,7 @@ func inspectPE(path string) (peMetadata, error) {
 	if file.Machine == pe.IMAGE_FILE_MACHINE_AMD64 {
 		architecture = "amd64"
 	}
-	data, err := os.ReadFile(path)
+	data, err := readLimitedFile(path, maxModuleSize)
 	if err != nil {
 		return peMetadata{}, err
 	}

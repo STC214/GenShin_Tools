@@ -68,6 +68,22 @@ func TestRunAuditsSignedManifestAndPackage(t *testing.T) {
 	}
 }
 
+func TestReadPublicKeyRejectsOversizedFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "public.key")
+	if err := os.WriteFile(path, bytes.Repeat([]byte{'x'}, (1<<10)+1), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readPublicKey(path); err == nil {
+		t.Fatal("oversized public key was accepted")
+	}
+}
+
+func TestVerifyBuildInfoRejectsTrailingJSON(t *testing.T) {
+	if err := verifyBuildInfo([]byte(`{"version":"1.1.0"} {}`), "1.1.0"); err == nil {
+		t.Fatal("build-info trailing JSON was accepted")
+	}
+}
+
 func writeAuditZIP(t *testing.T, path string) {
 	t.Helper()
 	files := map[string][]byte{

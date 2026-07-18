@@ -1,9 +1,11 @@
 package localenhance
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"time"
@@ -34,12 +36,21 @@ func ApplyHDRWithBackup(store RegistryStore, config HDRConfig, backupPath string
 }
 
 func RestoreHDRBackup(store RegistryStore, backupPath string) error {
-	data, err := os.ReadFile(backupPath)
+	file, err := os.Open(backupPath)
 	if err != nil {
 		return err
 	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, (4<<20)+1))
+	if err != nil || len(data) > 4<<20 {
+		return errors.New("HDR backup exceeds safety limit or cannot be read")
+	}
 	var backup hdrBackupFile
-	if err := json.Unmarshal(data, &backup); err != nil || backup.SchemaVersion != 1 {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	decodeErr := decoder.Decode(&backup)
+	trailerErr := decoder.Decode(&struct{}{})
+	if decodeErr != nil || trailerErr != io.EOF || backup.SchemaVersion != 1 || backup.CreatedUTC.IsZero() {
 		return errors.New("invalid HDR backup file")
 	}
 	return RestoreHDR(store, backup.Snapshot)

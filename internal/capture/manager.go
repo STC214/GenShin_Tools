@@ -134,7 +134,7 @@ func (manager *Manager) captureOne() {
 	sequence := manager.sequence.Add(1)
 	name := fmt.Sprintf("Genshin_%s_%03d.png", time.Now().Format("20060102_150405_000"), sequence%1000)
 	path := filepath.Join(directory, name)
-	err := manager.capturer.Capture(target, path)
+	err := captureSafely(manager.capturer, target, path)
 	result := Result{Path: path, CompletedAt: time.Now()}
 	if err != nil {
 		result.Path = ""
@@ -145,8 +145,20 @@ func (manager *Manager) captureOne() {
 
 func (manager *Manager) publishResult(result Result) {
 	if manager.publish != nil && !manager.closed.Load() {
-		manager.publish(result)
+		func() {
+			defer func() { _ = recover() }()
+			manager.publish(result)
+		}()
 	}
+}
+
+func captureSafely(capturer Capturer, target Target, path string) (err error) {
+	defer func() {
+		if value := recover(); value != nil {
+			err = fmt.Errorf("screenshot capturer panic: %v", value)
+		}
+	}()
+	return capturer.Capture(target, path)
 }
 
 var ErrNoGameWindow = errors.New("no verified visible game window")

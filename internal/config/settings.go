@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -23,6 +24,7 @@ import (
 )
 
 const CurrentSchemaVersion = 9
+const maxSettingsBytes = 1 << 20
 
 // Settings contains only stable shell settings in S02. Feature settings are
 // added by their implementation stage instead of being guessed in advance.
@@ -84,12 +86,20 @@ func Default() Settings {
 }
 
 func Load(path string) (LoadResult, error) {
-	data, err := os.ReadFile(path)
+	file, err := os.Open(path)
 	if errors.Is(err, fs.ErrNotExist) {
 		return LoadResult{Settings: Default()}, nil
 	}
 	if err != nil {
 		return LoadResult{}, fmt.Errorf("read settings: %w", err)
+	}
+	data, readErr := io.ReadAll(io.LimitReader(file, maxSettingsBytes+1))
+	closeErr := file.Close()
+	if readErr != nil || closeErr != nil {
+		return LoadResult{}, fmt.Errorf("read settings: %w", errors.Join(readErr, closeErr))
+	}
+	if len(data) > maxSettingsBytes {
+		return recoverInvalidSettings(path, errors.New("settings exceed 1 MiB"))
 	}
 
 	data = bytes.TrimPrefix(data, []byte{0xEF, 0xBB, 0xBF})
@@ -97,21 +107,26 @@ func Load(path string) (LoadResult, error) {
 	// Interval is a runtime-only duration. Clear the default before decoding so
 	// the persisted intervalMs value remains authoritative.
 	settings.Input.Interval = 0
-	if err := json.Unmarshal(data, &settings); err != nil {
-		recovered, recoveryErr := quarantine(path)
-		if recoveryErr != nil {
-			return LoadResult{}, fmt.Errorf("decode settings: %v; quarantine: %w", err, recoveryErr)
-		}
-		return LoadResult{Settings: Default(), RecoveredFrom: recovered}, nil
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&settings); err != nil {
+		return recoverInvalidSettings(path, fmt.Errorf("decode settings: %w", err))
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		return recoverInvalidSettings(path, errors.New("settings contain trailing JSON"))
 	}
 	if err := migrateAndValidate(&settings); err != nil {
-		recovered, recoveryErr := quarantine(path)
-		if recoveryErr != nil {
-			return LoadResult{}, fmt.Errorf("validate settings: %v; quarantine: %w", err, recoveryErr)
-		}
-		return LoadResult{Settings: Default(), RecoveredFrom: recovered}, nil
+		return recoverInvalidSettings(path, fmt.Errorf("validate settings: %w", err))
 	}
 	return LoadResult{Settings: settings}, nil
+}
+
+func recoverInvalidSettings(path string, cause error) (LoadResult, error) {
+	recovered, recoveryErr := quarantine(path)
+	if recoveryErr != nil {
+		return LoadResult{}, fmt.Errorf("%v; quarantine: %w", cause, recoveryErr)
+	}
+	return LoadResult{Settings: Default(), RecoveredFrom: recovered}, nil
 }
 
 func migrateAndValidate(settings *Settings) error {

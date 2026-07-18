@@ -1,6 +1,7 @@
 package resources
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 )
 
 const journalSchemaVersion = 1
+const maxTransactionJournalBytes = 4 << 20
 
 type journal struct {
 	SchemaVersion int            `json:"schema_version"`
@@ -281,13 +283,16 @@ func RecoverTransactions(dataStagingRoot string) error {
 	if err != nil {
 		return err
 	}
+	if len(entries) > 10_000 {
+		return errors.New("staging root contains too many recovery entries")
+	}
 	var result error
 	for _, entry := range entries {
 		if !entry.IsDir() {
 			continue
 		}
 		path := filepath.Join(dataStagingRoot, entry.Name(), "transaction.json")
-		data, err := os.ReadFile(path)
+		file, err := os.Open(path)
 		if errors.Is(err, os.ErrNotExist) {
 			continue
 		}
@@ -295,11 +300,18 @@ func RecoverTransactions(dataStagingRoot string) error {
 			result = errors.Join(result, err)
 			continue
 		}
+		data, readErr := io.ReadAll(io.LimitReader(file, maxTransactionJournalBytes+1))
+		closeErr := file.Close()
+		if readErr != nil || closeErr != nil || len(data) > maxTransactionJournalBytes {
+			result = errors.Join(result, fmt.Errorf("cannot recover %s: journal exceeds safety limit or cannot be read", path))
+			continue
+		}
 		var saved journal
-		decoder := json.NewDecoder(strings.NewReader(string(data)))
+		decoder := json.NewDecoder(bytes.NewReader(data))
 		decoder.DisallowUnknownFields()
 		decoderErr := decoder.Decode(&saved)
-		if decoderErr != nil || saved.SchemaVersion != journalSchemaVersion || validateJournal(&saved) != nil {
+		trailerErr := decoder.Decode(&struct{}{})
+		if decoderErr != nil || trailerErr != io.EOF || saved.SchemaVersion != journalSchemaVersion || validateJournal(&saved) != nil {
 			result = errors.Join(result, fmt.Errorf("cannot recover %s: invalid journal", path))
 			continue
 		}

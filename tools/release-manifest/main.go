@@ -68,9 +68,13 @@ func parseOptions(arguments []string, stderr io.Writer) (manifestOptions, error)
 	if flags.NArg() != 0 {
 		return manifestOptions{}, errors.New("unexpected positional arguments")
 	}
-	for name, value := range map[string]string{"package": options.PackagePath, "output": options.OutputPath, "version": options.Version, "minimum-version": options.Minimum, "url": options.URL, "key-id": options.KeyID, "private-key": options.PrivateKey} {
-		if strings.TrimSpace(value) == "" {
-			return manifestOptions{}, fmt.Errorf("--%s is required", name)
+	required := []struct{ name, value string }{
+		{"package", options.PackagePath}, {"output", options.OutputPath}, {"version", options.Version},
+		{"minimum-version", options.Minimum}, {"url", options.URL}, {"key-id", options.KeyID}, {"private-key", options.PrivateKey},
+	}
+	for _, option := range required {
+		if strings.TrimSpace(option.value) == "" {
+			return manifestOptions{}, fmt.Errorf("--%s is required", option.name)
 		}
 	}
 	if options.PublishedUTC == "" {
@@ -126,7 +130,7 @@ func generateManifest(options manifestOptions) error {
 }
 
 func readPrivateKey(path string) (ed25519.PrivateKey, error) {
-	data, err := os.ReadFile(path)
+	data, err := readSmallFile(path, 1<<10)
 	if err != nil {
 		return nil, fmt.Errorf("read signing key: %w", err)
 	}
@@ -156,6 +160,22 @@ func readPrivateKey(path string) (ed25519.PrivateKey, error) {
 		return nil, errors.New("signing key must be 32-byte seed or 64-byte private key")
 	}
 	return ed25519.PrivateKey(append([]byte(nil), keyBytes...)), nil
+}
+
+func readSmallFile(path string, maximum int64) ([]byte, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, maximum+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > maximum {
+		return nil, fmt.Errorf("%s exceeds %d bytes", filepath.Base(path), maximum)
+	}
+	return data, nil
 }
 
 func hashFile(path string) (int64, string, error) {

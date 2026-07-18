@@ -1,12 +1,31 @@
 package injection
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"testing"
 
 	"golang.org/x/sys/windows"
 )
+
+func TestHelperIOIsBounded(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "request.json")
+	if err := os.WriteFile(path, bytes.Repeat([]byte("x"), (1<<20)+1), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadHelperRequest(path); err == nil {
+		t.Fatal("oversized helper request was accepted")
+	}
+	var output limitedOutput
+	payload := bytes.Repeat([]byte("y"), 1<<20)
+	if n, err := output.Write(payload); err != nil || n != len(payload) {
+		t.Fatalf("limited output write = %d, %v", n, err)
+	}
+	if len(output.String()) > 4100 {
+		t.Fatalf("limited output retained %d bytes", len(output.String()))
+	}
+}
 
 func TestValidateHelperRequestScope(t *testing.T) {
 	root := t.TempDir()

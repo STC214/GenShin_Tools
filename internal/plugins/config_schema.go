@@ -44,12 +44,9 @@ func LoadConfigSchema(path string) (ConfigSchema, error) {
 	if err := regularFile(path); err != nil {
 		return ConfigSchema{}, err
 	}
-	data, err := os.ReadFile(path)
+	data, err := readFileBounded(path, 1<<20)
 	if err != nil {
 		return ConfigSchema{}, err
-	}
-	if len(data) > 1<<20 {
-		return ConfigSchema{}, errors.New("plugin config schema exceeds 1 MiB")
 	}
 	var schema ConfigSchema
 	decoder := json.NewDecoder(bytes.NewReader(bytes.TrimPrefix(data, []byte{0xEF, 0xBB, 0xBF})))
@@ -74,7 +71,7 @@ func ReadConfig(configPath string, schema ConfigSchema) (map[string]string, erro
 	for _, field := range schema.Fields {
 		values[field.ID] = field.Default
 	}
-	data, err := os.ReadFile(configPath)
+	data, err := readFileBounded(configPath, 1<<20)
 	if errors.Is(err, os.ErrNotExist) {
 		return values, nil
 	}
@@ -151,7 +148,7 @@ func applyConfigValues(configPath string, schema ConfigSchema, values map[string
 			return fmt.Errorf("config field %s: %w", id, err)
 		}
 	}
-	data, err := os.ReadFile(configPath)
+	data, err := readFileBounded(configPath, 1<<20)
 	if errors.Is(err, os.ErrNotExist) {
 		data = nil
 	} else if err != nil {

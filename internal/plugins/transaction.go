@@ -242,12 +242,9 @@ func saveJournal(path string, journal installJournal) error {
 }
 
 func loadJournal(path string) (installJournal, error) {
-	data, err := os.ReadFile(path)
+	data, err := readFileBounded(path, 1<<20)
 	if err != nil {
 		return installJournal{}, err
-	}
-	if len(data) > 1<<20 {
-		return installJournal{}, errors.New("plugin transaction exceeds 1 MiB")
 	}
 	var journal installJournal
 	decoder := json.NewDecoder(bytes.NewReader(data))

@@ -48,15 +48,15 @@ func CloneState(state State) State {
 }
 
 func LoadState(path string) (StateLoadResult, error) {
-	data, err := os.ReadFile(path)
+	data, err := readFileBounded(path, 4<<20)
 	if errors.Is(err, os.ErrNotExist) {
 		return StateLoadResult{State: DefaultState()}, nil
 	}
+	if errors.Is(err, errFileTooLarge) {
+		return recoverState(path, err)
+	}
 	if err != nil {
 		return StateLoadResult{}, err
-	}
-	if len(data) > 4<<20 {
-		return recoverState(path, errors.New("plugin state exceeds 4 MiB"))
 	}
 	var state State
 	decoder := json.NewDecoder(bytes.NewReader(bytes.TrimPrefix(data, []byte{0xEF, 0xBB, 0xBF})))

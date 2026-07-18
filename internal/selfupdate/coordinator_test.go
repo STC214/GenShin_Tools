@@ -74,7 +74,7 @@ func TestCoordinatorSignedManifestDownloadAndStageFixture(t *testing.T) {
 	coordinator := Coordinator{
 		InstallRoot: t.TempDir(), CurrentVersion: "1.0.0",
 		ManifestURL: server.URL + "/manifest.json", HTTPClient: server.Client(),
-		TrustedKeys: map[string]ed25519.PublicKey{"fixture-1": publicKey},
+		trustedKeys: map[string]ed25519.PublicKey{"fixture-1": publicKey},
 	}
 	release, err := coordinator.Check(context.Background())
 	if err != nil {

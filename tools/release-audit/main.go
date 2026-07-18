@@ -59,9 +59,12 @@ func parseOptions(arguments []string, stderr io.Writer) (auditOptions, error) {
 	if flags.NArg() != 0 {
 		return auditOptions{}, errors.New("unexpected positional arguments")
 	}
-	for name, value := range map[string]string{"package": options.PackagePath, "manifest": options.ManifestPath, "public-key": options.PublicKeyPath} {
-		if strings.TrimSpace(value) == "" {
-			return auditOptions{}, fmt.Errorf("--%s is required", name)
+	required := []struct{ name, value string }{
+		{"package", options.PackagePath}, {"manifest", options.ManifestPath}, {"public-key", options.PublicKeyPath},
+	}
+	for _, option := range required {
+		if strings.TrimSpace(option.value) == "" {
+			return auditOptions{}, fmt.Errorf("--%s is required", option.name)
 		}
 	}
 	return options, nil
@@ -116,20 +119,46 @@ func audit(options auditOptions) error {
 	if err != nil {
 		return fmt.Errorf("audit release ZIP: %w", err)
 	}
-	data, err := os.ReadFile(filepath.Join(staged.Directory, "build-info.json"))
+	data, err := readBounded(filepath.Join(staged.Directory, "build-info.json"), 1<<20)
 	if err != nil {
 		return err
 	}
+	if err := verifyBuildInfo(data, manifest.Version); err != nil {
+		return err
+	}
+	return nil
+}
+
+func readBounded(path string, maximum int64) ([]byte, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, maximum+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > maximum {
+		return nil, fmt.Errorf("%s exceeds %d bytes", filepath.Base(path), maximum)
+	}
+	return data, nil
+}
+
+func verifyBuildInfo(data []byte, version string) error {
 	var info buildInfo
 	decoder := json.NewDecoder(bytes.NewReader(data))
-	if err := decoder.Decode(&info); err != nil || info.Version != manifest.Version {
+	if err := decoder.Decode(&info); err != nil || info.Version != version {
 		return errors.New("build-info.json version does not match the signed manifest")
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		return errors.New("build-info.json contains trailing JSON")
 	}
 	return nil
 }
 
 func loadManifest(path string) (selfupdate.Manifest, error) {
-	data, err := os.ReadFile(path)
+	data, err := readBounded(path, 1<<20)
 	if err != nil {
 		return selfupdate.Manifest{}, fmt.Errorf("read manifest: %w", err)
 	}
@@ -146,7 +175,7 @@ func loadManifest(path string) (selfupdate.Manifest, error) {
 }
 
 func readPublicKey(path string) (ed25519.PublicKey, error) {
-	data, err := os.ReadFile(path)
+	data, err := readBounded(path, 1<<10)
 	if err != nil {
 		return nil, fmt.Errorf("read public key: %w", err)
 	}

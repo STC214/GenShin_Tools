@@ -100,12 +100,9 @@ func AuditModule(modulesRoot, id string, candidate game.Candidate) (Audit, error
 		return Audit{}, errors.New("module directory path is not a directory")
 	}
 	manifestPath := filepath.Join(directory, "module.json")
-	data, err := os.ReadFile(manifestPath)
+	data, err := readLimitedFile(manifestPath, 1<<20)
 	if err != nil {
 		return Audit{}, fmt.Errorf("read module manifest: %w", err)
-	}
-	if len(data) > 1<<20 {
-		return Audit{}, errors.New("module manifest exceeds 1 MiB")
 	}
 	var manifest Manifest
 	decoder := json.NewDecoder(strings.NewReader(string(data)))

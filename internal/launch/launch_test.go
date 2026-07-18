@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -137,6 +138,32 @@ func TestEngineRefusesExistingAndConcurrentLaunch(t *testing.T) {
 		t.Fatal("concurrent launch accepted")
 	}
 	close(starter.process.exit)
+}
+
+func TestEngineReservesLaunchDuringProcessCheckAndHonorsClose(t *testing.T) {
+	candidate := testCandidate(t)
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	starter := &fakeStarter{process: &fakeProcess{pid: 1, exit: make(chan struct{}), waiting: make(chan struct{})}}
+	engine, _ := NewEngine(starter, func(game.Candidate) ([]game.ProcessIdentity, error) {
+		close(entered)
+		<-release
+		return nil, nil
+	}, nil)
+	result := make(chan error, 1)
+	go func() { result <- engine.Launch(candidate, DefaultConfig()) }()
+	<-entered
+	if err := engine.Launch(candidate, DefaultConfig()); err == nil {
+		t.Fatal("second launch entered while process check was active")
+	}
+	engine.Close()
+	close(release)
+	if err := <-result; err == nil || !strings.Contains(err.Error(), "closed") {
+		t.Fatalf("reserved launch after Close returned %v", err)
+	}
+	if starter.starts != 0 {
+		t.Fatalf("starter calls after Close = %d", starter.starts)
+	}
 }
 
 func TestEngineLaunchWithStarterUsesOverride(t *testing.T) {

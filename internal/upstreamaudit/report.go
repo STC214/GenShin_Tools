@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -47,7 +48,10 @@ func WriteReport(root string, report Report) (string, error) {
 	if err := os.MkdirAll(root, 0o755); err != nil {
 		return "", err
 	}
-	name := report.Base[:12] + "_" + report.Head[:12]
+	if report.ScopePolicy != "scope-v2" {
+		return "", errors.New("report scope policy is unsupported")
+	}
+	name := report.Base[:12] + "_" + report.Head[:12] + "_" + report.ScopePolicy
 	destination := filepath.Join(root, name)
 	changesData, err := json.MarshalIndent(struct {
 		SchemaVersion int            `json:"schemaVersion"`
@@ -86,9 +90,19 @@ func WriteReport(root string, report Report) (string, error) {
 	}
 	if _, err := os.Stat(destination); err == nil {
 		for name, expected := range files {
-			actual, readErr := os.ReadFile(filepath.Join(destination, name))
+			path := filepath.Join(destination, name)
+			actual, readErr := readReportFile(path, int64(len(expected)))
+			// disposition.template.json was added after the first report format.
+			// It is fully derived from the immutable base/head report, so adding
+			// only this missing file is a safe, deterministic format migration.
+			if errors.Is(readErr, os.ErrNotExist) && name == "disposition.template.json" {
+				if writeErr := writeSynced(path, expected); writeErr != nil && !errors.Is(writeErr, os.ErrExist) {
+					return "", writeErr
+				}
+				actual, readErr = readReportFile(path, int64(len(expected)))
+			}
 			if readErr != nil || !bytes.Equal(actual, expected) {
-				return "", fmt.Errorf("existing report differs from current result: %s", destination)
+				return "", fmt.Errorf("existing report file %s differs from current result: %s", name, destination)
 			}
 		}
 		return destination, nil
@@ -115,6 +129,22 @@ func WriteReport(root string, report Report) (string, error) {
 	}
 	committed = true
 	return destination, nil
+}
+
+func readReportFile(path string, maximum int64) ([]byte, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, maximum+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > maximum {
+		return nil, errors.New("report file exceeds expected size")
+	}
+	return data, nil
 }
 
 func summaryMarkdown(report Report) string {

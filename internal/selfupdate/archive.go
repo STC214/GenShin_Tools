@@ -179,9 +179,17 @@ func VerifyStaged(ctx context.Context, directory, expectedVersion, expectedManif
 	if err := rejectReparse(directory); err != nil {
 		return PackageManifest{}, err
 	}
-	data, err := os.ReadFile(filepath.Join(directory, "release.json"))
+	manifestFile, err := os.Open(filepath.Join(directory, "release.json"))
 	if err != nil {
 		return PackageManifest{}, err
+	}
+	data, readErr := io.ReadAll(io.LimitReader(manifestFile, maxPackageManifest+1))
+	closeErr := manifestFile.Close()
+	if readErr != nil || closeErr != nil {
+		return PackageManifest{}, errors.Join(readErr, closeErr)
+	}
+	if len(data) > maxPackageManifest {
+		return PackageManifest{}, errors.New("staged release.json exceeds 1 MiB")
 	}
 	digest := sha256.Sum256(data)
 	if !shaPattern.MatchString(expectedManifestSHA256) || hex.EncodeToString(digest[:]) != expectedManifestSHA256 {

@@ -53,6 +53,12 @@ func TestClientCompareAndWriteDeterministicReport(t *testing.T) {
 	if err != nil || repeated != first {
 		t.Fatalf("identical report was not idempotent: path=%s err=%v", repeated, err)
 	}
+	if err := os.Remove(filepath.Join(first, "disposition.template.json")); err != nil {
+		t.Fatal(err)
+	}
+	if migrated, err := WriteReport(filepath.Dir(first), report); err != nil || migrated != first {
+		t.Fatalf("old report migration failed: path=%s err=%v", migrated, err)
+	}
 	second, err := WriteReport(filepath.Join(t.TempDir(), "reports"), report)
 	if err != nil {
 		t.Fatal(err)

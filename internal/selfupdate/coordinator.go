@@ -17,7 +17,7 @@ type Coordinator struct {
 	CurrentVersion string
 	ManifestURL    string
 	HTTPClient     *http.Client
-	TrustedKeys    map[string]ed25519.PublicKey
+	trustedKeys    map[string]ed25519.PublicKey
 }
 
 func (c Coordinator) layout() (UpdateLayout, error) {
@@ -44,7 +44,7 @@ func (c Coordinator) Check(ctx context.Context) (Release, error) {
 		}
 	}
 	var err error
-	keys := c.TrustedKeys
+	keys := c.trustedKeys
 	if keys == nil {
 		keys, err = BuiltInKeys()
 		if err != nil {

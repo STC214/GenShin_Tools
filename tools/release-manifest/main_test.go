@@ -55,9 +55,19 @@ func TestRunGeneratesAndSelfVerifiesSignedManifest(t *testing.T) {
 	}
 }
 
+func TestReadPrivateKeyRejectsOversizedFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "private.key")
+	if err := os.WriteFile(path, bytes.Repeat([]byte{'x'}, (1<<10)+1), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readPrivateKey(path); err == nil {
+		t.Fatal("oversized private key was accepted")
+	}
+}
+
 func TestRunRejectsMissingRequiredOption(t *testing.T) {
 	var stderr bytes.Buffer
-	if code := run([]string{"--version", "1.1.0"}, &bytes.Buffer{}, &stderr); code != 2 || !strings.Contains(stderr.String(), "is required") {
+	if code := run([]string{"--version", "1.1.0"}, &bytes.Buffer{}, &stderr); code != 2 || !strings.Contains(stderr.String(), "--package is required") {
 		t.Fatalf("missing option result code=%d stderr=%q", code, stderr.String())
 	}
 }

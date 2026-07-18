@@ -103,6 +103,11 @@ func (e *Engine) Handle(event PhysicalEvent) {
 }
 
 func (e *Engine) outputLoop(ctx context.Context, generation uint64, config Config) {
+	defer func() {
+		if value := recover(); value != nil {
+			e.Fail(fmt.Errorf("panic in input output loop: %v", value))
+		}
+	}()
 	if !e.emit(generation, config) {
 		return
 	}
@@ -241,6 +246,9 @@ func (e *Engine) snapshotLocked() Snapshot {
 
 func (e *Engine) notify(snapshot Snapshot) {
 	if e.onChange != nil {
-		e.onChange(snapshot)
+		func() {
+			defer func() { _ = recover() }()
+			e.onChange(snapshot)
+		}()
 	}
 }

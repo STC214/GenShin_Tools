@@ -107,6 +107,15 @@ func (d *Downloader) Download(ctx context.Context, manifest Manifest, stagingRoo
 		workers.Add(1)
 		go func() {
 			defer workers.Done()
+			defer func() {
+				if value := recover(); value != nil {
+					select {
+					case errCh <- fmt.Errorf("download worker panic: %v", value):
+						cancel()
+					default:
+					}
+				}
+			}()
 			for file := range jobs {
 				if err := d.downloadFile(ctx, client, file, stagingRoot, attempts, &downloaded, report); err != nil {
 					select {
@@ -247,11 +256,17 @@ func fetchRange(ctx context.Context, client *http.Client, rawURL, path string, o
 		offset = 0
 		flags |= os.O_TRUNC
 	}
+	remaining := expectedSize - offset
+	if remaining < 0 {
+		return 0, false, reset, fmt.Errorf("download offset %d exceeds expected size %d", offset, expectedSize)
+	}
 	file, err := os.OpenFile(path, flags, 0o644)
 	if err != nil {
 		return 0, false, reset, err
 	}
-	written, copyErr := io.Copy(&countingWriter{writer: file, count: count}, response.Body)
+	// Never let an incorrect or hostile server fill the destination volume before
+	// the size check below can run. One extra byte is enough to detect overflow.
+	written, copyErr := io.Copy(&countingWriter{writer: file, count: count}, io.LimitReader(response.Body, remaining+1))
 	syncErr := file.Sync()
 	closeErr := file.Close()
 	if copyErr != nil {

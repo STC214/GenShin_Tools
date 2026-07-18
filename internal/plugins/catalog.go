@@ -10,7 +10,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"os"
 	"sort"
 	"strings"
 	"time"
@@ -95,7 +94,7 @@ type CatalogPage struct {
 }
 
 func LoadCatalog(path string) (Catalog, error) {
-	data, err := os.ReadFile(path)
+	data, err := readFileBounded(path, maxCatalogBytes)
 	if err != nil {
 		return Catalog{}, err
 	}

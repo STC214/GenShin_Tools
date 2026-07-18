@@ -14,6 +14,10 @@ if (-not $Version) {
 if (-not $DistDirectory) {
     $DistDirectory = Join-Path $ProjectRoot 'dist'
 }
+if ($Version -notmatch '^(\d+)\.(\d+)\.(\d+)(?:[-+][0-9A-Za-z.-]+)?$') {
+    throw "Version must be SemVer compatible: $Version"
+}
+$ExpectedFileVersion = "$($Matches[1]).$($Matches[2]).$($Matches[3]).0"
 
 function Get-PESubsystem {
     param([Parameter(Mandatory)] [string]$Path)
@@ -41,8 +45,8 @@ foreach ($Item in $Expected) {
     if ($Info.ProductVersion -ne $Version) {
         throw "$($Item.Path) ProductVersion is '$($Info.ProductVersion)', expected '$Version'"
     }
-    if (-not $Info.FileVersion.StartsWith("$Version.")) {
-        throw "$($Item.Path) FileVersion is '$($Info.FileVersion)', expected '$Version.0'"
+    if ($Info.FileVersion -ne $ExpectedFileVersion) {
+        throw "$($Item.Path) FileVersion is '$($Info.FileVersion)', expected '$ExpectedFileVersion'"
     }
     $Subsystem = Get-PESubsystem -Path $Item.Path
     if ($Subsystem -ne $Item.Subsystem) {
