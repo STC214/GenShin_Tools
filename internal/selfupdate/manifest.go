@@ -31,7 +31,9 @@ var (
 
 	// Set only with -ldflags from a protected release environment. It contains
 	// key IDs mapped to base64 Ed25519 public keys, never private keys.
-	trustedPublicKeysJSON = "{}"
+	trustedPublicKeysJSON   = "{}"
+	trustedPublicKeysBase64 = ""
+	updateManifestURL       = ""
 )
 
 type Manifest struct {
@@ -69,7 +71,23 @@ type signedPayload struct {
 }
 
 func BuiltInKeys() (map[string]ed25519.PublicKey, error) {
-	return ParseTrustedKeys([]byte(trustedPublicKeysJSON))
+	data := []byte(trustedPublicKeysJSON)
+	if trustedPublicKeysBase64 != "" {
+		decoded, err := base64.StdEncoding.DecodeString(trustedPublicKeysBase64)
+		if err != nil {
+			return nil, errors.New("decode built-in update public keys")
+		}
+		data = decoded
+	}
+	return ParseTrustedKeys(data)
+}
+
+func BuiltInManifestURL() (string, error) {
+	parsed, err := url.Parse(updateManifestURL)
+	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil || parsed.Fragment != "" {
+		return "", errors.New("built-in update manifest URL is not configured")
+	}
+	return updateManifestURL, nil
 }
 
 func ParseTrustedKeys(data []byte) (map[string]ed25519.PublicKey, error) {

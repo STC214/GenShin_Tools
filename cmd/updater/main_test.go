@@ -20,7 +20,7 @@ func TestRunLoadsFixedRequestAndExecutes(t *testing.T) {
 		ProtocolVersion: selfupdate.UpdaterProtocolVersion,
 		Version:         "1.2.3", ManifestSHA256: strings.Repeat("a", 64),
 		Parent:        selfupdate.ProcessIdentity{PID: 10, CreationTime: 20},
-		WaitTimeoutMS: 5_000, Restart: true,
+		WaitTimeoutMS: 5_000, ConfirmationTimeoutMS: 5_000, Restart: true,
 	}
 	data, err := json.Marshal(request)
 	if err != nil {

@@ -31,6 +31,12 @@ func TestCommitStagedAndConfirm(t *testing.T) {
 			t.Fatalf("installed %s was not replaced", file.Path)
 		}
 	}
+	if err := MarkTransactionRestarting(layout, staged.Manifest.Version, staged.ManifestSHA256); err != nil {
+		t.Fatal(err)
+	}
+	if journal, err = loadJournal(layout.Journal); err != nil || journal.Phase != "restarting" {
+		t.Fatalf("restart phase = %+v, %v", journal, err)
+	}
 	if err := ConfirmTransaction(layout, staged.Manifest.Version, staged.ManifestSHA256); err != nil {
 		t.Fatal(err)
 	}

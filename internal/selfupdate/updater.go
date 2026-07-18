@@ -27,12 +27,13 @@ type ProcessIdentity struct {
 }
 
 type UpdaterRequest struct {
-	ProtocolVersion int             `json:"protocolVersion"`
-	Version         string          `json:"version"`
-	ManifestSHA256  string          `json:"manifestSha256"`
-	Parent          ProcessIdentity `json:"parent"`
-	WaitTimeoutMS   int             `json:"waitTimeoutMs"`
-	Restart         bool            `json:"restart"`
+	ProtocolVersion       int             `json:"protocolVersion"`
+	Version               string          `json:"version"`
+	ManifestSHA256        string          `json:"manifestSha256"`
+	Parent                ProcessIdentity `json:"parent"`
+	WaitTimeoutMS         int             `json:"waitTimeoutMs"`
+	ConfirmationTimeoutMS int             `json:"confirmationTimeoutMs"`
+	Restart               bool            `json:"restart"`
 }
 
 type UpdaterHooks struct {
@@ -241,6 +242,9 @@ func ValidateUpdaterRequest(request UpdaterRequest) error {
 	if request.WaitTimeoutMS < 1_000 || request.WaitTimeoutMS > 300_000 {
 		return errors.New("updater wait timeout must be within 1000..300000 ms")
 	}
+	if request.ConfirmationTimeoutMS < 5_000 || request.ConfirmationTimeoutMS > 300_000 {
+		return errors.New("updater confirmation timeout must be within 5000..300000 ms")
+	}
 	return nil
 }
 
@@ -281,8 +285,25 @@ func ExecuteUpdate(ctx context.Context, layout UpdateLayout, request UpdaterRequ
 	if !request.Restart {
 		return nil
 	}
+	if err := MarkTransactionRestarting(layout, request.Version, request.ManifestSHA256); err != nil {
+		return fmt.Errorf("mark update restarting: %w", err)
+	}
 	if err := restart(mainPath, layout.InstallRoot); err == nil {
-		return nil
+		if hooks != nil {
+			return nil
+		}
+		if err := waitForTransactionConfirmation(ctx, layout, request.Version, request.ManifestSHA256, time.Duration(request.ConfirmationTimeoutMS)*time.Millisecond); err == nil {
+			return nil
+		} else {
+			confirmationErr := err
+			if rollbackErr := RollbackCommitted(context.Background(), layout, request.Version, request.ManifestSHA256); rollbackErr != nil {
+				return errors.Join(fmt.Errorf("wait for updated launcher confirmation: %w", confirmationErr), fmt.Errorf("rollback unconfirmed update: %w", rollbackErr))
+			}
+			if oldRestartErr := restart(mainPath, layout.InstallRoot); oldRestartErr != nil {
+				return errors.Join(fmt.Errorf("wait for updated launcher confirmation: %w", confirmationErr), fmt.Errorf("restart restored launcher: %w", oldRestartErr))
+			}
+			return fmt.Errorf("updated launcher was not confirmed; restored previous version: %w", confirmationErr)
+		}
 	} else {
 		restartErr := err
 		if rollbackErr := RollbackCommitted(context.Background(), layout, request.Version, request.ManifestSHA256); rollbackErr != nil {
@@ -292,6 +313,29 @@ func ExecuteUpdate(ctx context.Context, layout UpdateLayout, request UpdaterRequ
 			return errors.Join(fmt.Errorf("restart updated launcher: %w", restartErr), fmt.Errorf("restart restored launcher: %w", oldRestartErr))
 		}
 		return fmt.Errorf("updated launcher could not start; restored and restarted previous version: %w", restartErr)
+	}
+}
+
+func waitForTransactionConfirmation(ctx context.Context, layout UpdateLayout, version, manifestSHA256 string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		status, exists, err := PendingTransaction(layout)
+		if err != nil {
+			return err
+		}
+		if !exists {
+			return nil
+		}
+		if status.Version != version || status.ManifestSHA256 != manifestSHA256 || (status.Phase != "committed" && status.Phase != "restarting") {
+			return errors.New("update confirmation journal changed unexpectedly")
+		}
+		if time.Now().After(deadline) {
+			return errors.New("timed out waiting for updated launcher confirmation")
+		}
+		time.Sleep(100 * time.Millisecond)
 	}
 }
 

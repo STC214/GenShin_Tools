@@ -32,6 +32,7 @@ import (
 	"genshintools/internal/platform/win32"
 	"genshintools/internal/plugins"
 	"genshintools/internal/resources"
+	"genshintools/internal/selfupdate"
 	"genshintools/internal/shellconfig"
 	"genshintools/internal/taskrunner"
 	"genshintools/internal/uitheme"
@@ -56,6 +57,7 @@ const (
 	messageInjection    = win32.WM_APP + 13
 	messagePlugins      = win32.WM_APP + 14
 	messageDiagnostics  = win32.WM_APP + 15
+	messageUpdate       = win32.WM_APP + 16
 
 	trayID          = 1
 	captureHotkeyID = 2001
@@ -150,6 +152,10 @@ type application struct {
 	shellStatus             string
 	diagnosticUpdates       chan diagnosticUpdate
 	diagnosticBusy          bool
+	updateUpdates           chan updateCheckUpdate
+	updateTask              uint64
+	updateBusy              bool
+	updateRelease           *selfupdate.Release
 	cpuWarning              atomic.Pointer[cpuWarningConfig]
 	editBrush               win32.HBRUSH
 	sessionNotifications    bool
@@ -236,6 +242,13 @@ type pluginUpdate struct {
 	page    plugins.CatalogPage
 	status  string
 	err     string
+}
+
+type updateCheckUpdate struct {
+	taskID  uint64
+	apply   bool
+	release *selfupdate.Release
+	err     error
 }
 
 type diagnosticSnapshot struct {
@@ -384,6 +397,7 @@ func Run(layout paths.Layout, build buildinfo.Info) (returnErr error) {
 		pluginCatalogPage:   pluginCatalogPage,
 		pluginUpdates:       make(chan pluginUpdate, 1),
 		diagnosticUpdates:   make(chan diagnosticUpdate, 1),
+		updateUpdates:       make(chan updateCheckUpdate, 1),
 		shellStatus:         "",
 		captureStatus:       "",
 		overlayStatus:       "",
@@ -796,6 +810,37 @@ func (app *application) handleMessage(hwnd win32.HWND, message uint32, wParam, l
 		}
 		win32.Invalidate(hwnd)
 		return 0
+	case messageUpdate:
+		for {
+			select {
+			case update := <-app.updateUpdates:
+				if update.taskID != app.updateTask {
+					continue
+				}
+				app.updateBusy = false
+				if update.apply {
+					if update.err != nil {
+						app.shellStatus = app.updateStatus("update failed: ", "更新失败：") + update.err.Error()
+						app.logger.Error("apply application update", map[string]any{"error": update.err.Error()})
+					} else {
+						app.shellStatus = app.updateStatus("update prepared; restarting...", "更新已准备，正在重启……")
+						win32.PostMessage(app.hwnd, win32.WM_CLOSE, 0, 0)
+					}
+					app.updateRelease = nil
+				} else if update.err != nil {
+					app.updateRelease = nil
+					app.shellStatus = app.updateStatus("update check failed: ", "更新检查失败：") + update.err.Error()
+					app.logger.Error("check application update", map[string]any{"error": update.err.Error()})
+				} else if update.release != nil {
+					release := *update.release
+					app.updateRelease = &release
+					app.shellStatus = app.updateStatus("update available: v", "发现新版本：v") + release.Manifest.Version
+				}
+			default:
+				win32.Invalidate(hwnd)
+				return 0
+			}
+		}
 	case messageTray:
 		event := uint32(lParam & 0xffff)
 		switch event {
@@ -980,6 +1025,7 @@ func (app *application) requestShutdown() {
 		app.tasks.Cancel(app.injectionAuditTask)
 		app.tasks.Cancel(app.injectionLaunchTask)
 		app.tasks.Cancel(app.pluginTask)
+		app.tasks.Cancel(app.updateTask)
 		if app.overlaySession != nil {
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 			if err := app.overlaySession.Close(ctx); err != nil {
@@ -2581,8 +2627,65 @@ func (app *application) settingsClick(y int) {
 		app.saveShellSettings(next)
 	case y >= sy(520) && y < sy(564):
 		app.startDiagnosticExport()
+	case y >= sy(670) && y < sy(714):
+		if app.updateRelease != nil {
+			app.startUpdateApply()
+		} else {
+			app.startUpdateCheck()
+		}
 	}
 	win32.Invalidate(app.hwnd)
+}
+
+func (app *application) updateStatus(english, chinese string) string {
+	if app.settings.Shell.Language == shellconfig.LanguageEN {
+		return english
+	}
+	return chinese
+}
+
+func (app *application) startUpdateCheck() {
+	if app.updateBusy {
+		return
+	}
+	app.updateBusy = true
+	app.updateRelease = nil
+	app.shellStatus = app.updateStatus("checking for updates...", "正在检查更新……")
+	app.updateTask = app.tasks.Run(func(ctx context.Context, taskID uint64) {
+		coordinator := selfupdate.Coordinator{InstallRoot: app.layout.Root, CurrentVersion: app.build.Version}
+		release, err := coordinator.Check(ctx)
+		result := updateCheckUpdate{taskID: taskID, err: err}
+		if err == nil {
+			result.release = &release
+		}
+		select {
+		case app.updateUpdates <- result:
+		default:
+		}
+		win32.PostMessage(app.hwnd, messageUpdate, 0, 0)
+	})
+}
+
+func (app *application) startUpdateApply() {
+	if app.updateBusy || app.updateRelease == nil {
+		return
+	}
+	release := *app.updateRelease
+	app.updateBusy = true
+	app.shellStatus = app.updateStatus("downloading and verifying update...", "正在下载并校验更新……")
+	app.updateTask = app.tasks.Run(func(ctx context.Context, taskID uint64) {
+		coordinator := selfupdate.Coordinator{InstallRoot: app.layout.Root, CurrentVersion: app.build.Version}
+		staged, err := coordinator.DownloadAndStage(ctx, release)
+		if err == nil {
+			_, err = coordinator.PrepareAndLaunch(ctx, staged)
+		}
+		result := updateCheckUpdate{taskID: taskID, apply: true, err: err}
+		select {
+		case app.updateUpdates <- result:
+		default:
+		}
+		win32.PostMessage(app.hwnd, messageUpdate, 0, 0)
+	})
 }
 
 func (app *application) paintSettings(dc win32.HDC, client win32.Rect, left int32) {
@@ -2620,6 +2723,13 @@ func (app *application) paintSettings(dc win32.HDC, client win32.Rect, left int3
 	draw(diagnosticText, row(520, 564, buttonBrush), win32.Color(225, 229, 242))
 	draw(fmt.Sprintf("%s · v%s · %s · %s b5a050ebd319", app.texts.Text("settings.about"), app.build.Version, app.build.Commit, app.texts.Text("settings.upstream")), row(570, 614, cardBrush), win32.Color(166, 174, 197))
 	draw(app.shellStatus, row(620, 660, cardBrush), win32.Color(145, 154, 180))
+	updateText := app.updateStatus("Check for updates", "检查更新")
+	if app.updateBusy {
+		updateText = app.updateStatus("Checking for updates...", "正在检查更新……")
+	} else if app.updateRelease != nil {
+		updateText = app.updateStatus("Update available; click to check again", "发现更新；单击重新检查")
+	}
+	draw(updateText, row(670, 714, buttonBrush), win32.Color(225, 229, 242))
 }
 
 func onOffText(language localization.Language, enabled bool) string {

@@ -24,6 +24,7 @@ type UpdateLayout struct {
 	Root        string
 	Versions    string
 	Backups     string
+	Downloads   string
 	Runner      string
 	Journal     string
 }
@@ -53,7 +54,7 @@ func NewUpdateLayout(installRoot string) (UpdateLayout, error) {
 		return UpdateLayout{}, err
 	}
 	root := filepath.Join(installRoot, "data", "updates")
-	return UpdateLayout{InstallRoot: installRoot, Root: root, Versions: filepath.Join(root, "versions"), Backups: filepath.Join(root, "backups"), Runner: filepath.Join(root, "runner"), Journal: filepath.Join(root, "transaction.json")}, nil
+	return UpdateLayout{InstallRoot: installRoot, Root: root, Versions: filepath.Join(root, "versions"), Backups: filepath.Join(root, "backups"), Downloads: filepath.Join(root, "downloads"), Runner: filepath.Join(root, "runner"), Journal: filepath.Join(root, "transaction.json")}, nil
 }
 
 func (layout UpdateLayout) Ensure() error {
@@ -67,7 +68,7 @@ func (layout UpdateLayout) Ensure() error {
 	if err := rejectReparse(layout.InstallRoot); err != nil {
 		return fmt.Errorf("update install root: %w", err)
 	}
-	for _, directory := range []string{layout.Root, layout.Versions, layout.Backups, layout.Runner} {
+	for _, directory := range []string{layout.Root, layout.Versions, layout.Backups, layout.Downloads, layout.Runner} {
 		if err := rejectReparseWithin(layout.InstallRoot, directory); err != nil {
 			return fmt.Errorf("update directory %s: %w", directory, err)
 		}
@@ -86,12 +87,32 @@ func validateUpdateLayout(layout UpdateLayout) error {
 	if err != nil {
 		return err
 	}
-	for _, pair := range [][2]string{{layout.InstallRoot, want.InstallRoot}, {layout.Root, want.Root}, {layout.Versions, want.Versions}, {layout.Backups, want.Backups}, {layout.Runner, want.Runner}, {layout.Journal, want.Journal}} {
+	for _, pair := range [][2]string{{layout.InstallRoot, want.InstallRoot}, {layout.Root, want.Root}, {layout.Versions, want.Versions}, {layout.Backups, want.Backups}, {layout.Downloads, want.Downloads}, {layout.Runner, want.Runner}, {layout.Journal, want.Journal}} {
 		if !strings.EqualFold(filepath.Clean(pair[0]), filepath.Clean(pair[1])) {
 			return errors.New("update layout does not match the install root")
 		}
 	}
 	return nil
+}
+
+type TransactionStatus struct {
+	Version        string
+	ManifestSHA256 string
+	Phase          string
+}
+
+func PendingTransaction(layout UpdateLayout) (TransactionStatus, bool, error) {
+	if err := validateUpdateLayout(layout); err != nil {
+		return TransactionStatus{}, false, err
+	}
+	journal, err := loadJournal(layout.Journal)
+	if errors.Is(err, os.ErrNotExist) {
+		return TransactionStatus{}, false, nil
+	}
+	if err != nil {
+		return TransactionStatus{}, false, err
+	}
+	return TransactionStatus{Version: journal.Version, ManifestSHA256: journal.ManifestSHA256, Phase: journal.Phase}, true, nil
 }
 
 func CommitStaged(ctx context.Context, layout UpdateLayout, version, manifestSHA256 string, hooks *CommitHooks) error {
@@ -215,7 +236,7 @@ func ConfirmTransaction(layout UpdateLayout, version, manifestSHA256 string) err
 	if err != nil {
 		return err
 	}
-	if journal.Phase != "committed" || journal.Version != version || journal.ManifestSHA256 != manifestSHA256 {
+	if (journal.Phase != "committed" && journal.Phase != "restarting") || journal.Version != version || journal.ManifestSHA256 != manifestSHA256 {
 		return errors.New("update confirmation does not match the committed transaction")
 	}
 	stagedDirectory := filepath.Join(layout.Versions, version)
@@ -244,7 +265,7 @@ func ConfirmTransaction(layout UpdateLayout, version, manifestSHA256 string) err
 	return os.Remove(layout.Journal)
 }
 
-func RollbackCommitted(ctx context.Context, layout UpdateLayout, version, manifestSHA256 string) error {
+func MarkTransactionRestarting(layout UpdateLayout, version, manifestSHA256 string) error {
 	if err := validateUpdateLayout(layout); err != nil {
 		return err
 	}
@@ -253,6 +274,21 @@ func RollbackCommitted(ctx context.Context, layout UpdateLayout, version, manife
 		return err
 	}
 	if journal.Phase != "committed" || journal.Version != version || journal.ManifestSHA256 != manifestSHA256 {
+		return errors.New("update restart marker does not match the committed transaction")
+	}
+	journal.Phase = "restarting"
+	return saveJournal(layout.Journal, journal)
+}
+
+func RollbackCommitted(ctx context.Context, layout UpdateLayout, version, manifestSHA256 string) error {
+	if err := validateUpdateLayout(layout); err != nil {
+		return err
+	}
+	journal, err := loadJournal(layout.Journal)
+	if err != nil {
+		return err
+	}
+	if (journal.Phase != "committed" && journal.Phase != "restarting") || journal.Version != version || journal.ManifestSHA256 != manifestSHA256 {
 		return errors.New("update rollback does not match the committed transaction")
 	}
 	return rollbackTransaction(ctx, layout, journal)
@@ -383,7 +419,7 @@ func validateJournal(journal transactionJournal) error {
 	if _, ok := parseVersion(journal.Version); !ok {
 		return errors.New("update transaction version is invalid")
 	}
-	if journal.Phase != "prepared" && journal.Phase != "backing-up" && journal.Phase != "backed-up" && journal.Phase != "committing" && journal.Phase != "committed" {
+	if journal.Phase != "prepared" && journal.Phase != "backing-up" && journal.Phase != "backed-up" && journal.Phase != "committing" && journal.Phase != "committed" && journal.Phase != "restarting" {
 		return errors.New("update transaction phase is invalid")
 	}
 	if len(journal.Files) == 0 || len(journal.Files) > maxPackageFiles {

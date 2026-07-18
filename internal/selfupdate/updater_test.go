@@ -125,8 +125,8 @@ func TestExecuteUpdateCommitsAndRestartsFixedMain(t *testing.T) {
 		t.Fatal("updater did not wait for and restart the fixed launcher")
 	}
 	journal, err := loadJournal(layout.Journal)
-	if err != nil || journal.Phase != "committed" {
-		t.Fatalf("committed journal = %+v, %v", journal, err)
+	if err != nil || journal.Phase != "restarting" {
+		t.Fatalf("restarting journal = %+v, %v", journal, err)
 	}
 }
 
@@ -162,6 +162,6 @@ func validUpdaterRequest(version, manifestSHA256 string) UpdaterRequest {
 		ProtocolVersion: UpdaterProtocolVersion,
 		Version:         version, ManifestSHA256: manifestSHA256,
 		Parent:        ProcessIdentity{PID: 1234, CreationTime: 5678},
-		WaitTimeoutMS: 10_000, Restart: true,
+		WaitTimeoutMS: 10_000, ConfirmationTimeoutMS: 5_000, Restart: true,
 	}
 }

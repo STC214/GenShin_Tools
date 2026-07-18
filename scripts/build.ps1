@@ -3,7 +3,9 @@ param(
     [ValidateSet('Debug', 'Release', 'Both')]
     [string]$Configuration = 'Both',
     [string]$Version,
-    [string]$BuildTimeUtc
+    [string]$BuildTimeUtc,
+    [string]$UpdateManifestUrl = $env:GENSHINTOOLS_UPDATE_MANIFEST_URL,
+    [string]$UpdatePublicKeysBase64 = $env:GENSHINTOOLS_UPDATE_PUBLIC_KEYS_BASE64
 )
 
 $ErrorActionPreference = 'Stop'
@@ -52,6 +54,40 @@ if (-not $BuildTimeUtc) {
         $BuildTimeUtc = [DateTimeOffset]::FromUnixTimeSeconds([long]$env:SOURCE_DATE_EPOCH).UtcDateTime.ToString('yyyy-MM-ddTHH:mm:ssZ')
     } else {
         $BuildTimeUtc = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+    }
+}
+
+if ([bool]$UpdateManifestUrl -ne [bool]$UpdatePublicKeysBase64) {
+    throw 'UpdateManifestUrl and UpdatePublicKeysBase64 must be configured together'
+}
+if ($UpdateManifestUrl) {
+    $ParsedUpdateUrl = [Uri]$UpdateManifestUrl
+    if (-not $ParsedUpdateUrl.IsAbsoluteUri -or $ParsedUpdateUrl.Scheme -ne 'https' -or $ParsedUpdateUrl.UserInfo -or $ParsedUpdateUrl.Fragment) {
+        throw 'UpdateManifestUrl must be an absolute HTTPS URL without credentials or fragment'
+    }
+    try {
+        $DecodedKeys = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($UpdatePublicKeysBase64)) | ConvertFrom-Json
+    } catch {
+        throw 'UpdatePublicKeysBase64 must encode valid trusted-key JSON'
+    }
+    if ($null -eq $DecodedKeys -or $DecodedKeys -isnot [PSCustomObject]) {
+        throw 'UpdatePublicKeysBase64 must encode a JSON object'
+    }
+    $KeyProperties = @($DecodedKeys.PSObject.Properties)
+    if ($KeyProperties.Count -lt 1 -or $KeyProperties.Count -gt 16) {
+        throw 'UpdatePublicKeysBase64 must contain 1..16 trusted keys'
+    }
+    foreach ($KeyProperty in $KeyProperties) {
+        if ($KeyProperty.Name -notmatch '^[a-z0-9][a-z0-9._-]{0,63}$' -or $KeyProperty.Value -isnot [string]) {
+            throw 'UpdatePublicKeysBase64 contains an invalid key ID or value'
+        }
+        try {
+            if ([Convert]::FromBase64String($KeyProperty.Value).Length -ne 32) {
+                throw 'wrong key length'
+            }
+        } catch {
+            throw 'UpdatePublicKeysBase64 contains a key that is not a 32-byte base64 Ed25519 public key'
+        }
     }
 }
 
@@ -144,6 +180,10 @@ END
             "-X genshintools/internal/buildinfo.BuildTimeUTC=$BuildTimeUtc"
             "-X genshintools/internal/buildinfo.Configuration=$ConfigValue"
         )
+        if ($UpdateManifestUrl) {
+            $LdFlags += "-X genshintools/internal/selfupdate.updateManifestURL=$UpdateManifestUrl"
+            $LdFlags += "-X genshintools/internal/selfupdate.trustedPublicKeysBase64=$UpdatePublicKeysBase64"
+        }
         $Output = if ($CurrentConfiguration -eq 'Release') {
             $LdFlags += @('-H=windowsgui', '-s', '-w')
             Join-Path $DistDir 'GenshinTools.exe'
@@ -179,7 +219,7 @@ END
     Invoke-Checked -Command 'go' -Arguments @('build', '-trimpath', '-buildvcs=false', '-ldflags', ($UpdaterLdFlags -join ' '), '-o', $UpdaterOutput, './cmd/updater')
     $BuiltFiles += $UpdaterOutput
 
-    foreach ($directory in @('logs', 'cache', 'staging', 'injection', 'injection\modules', 'plugins', 'plugins\versions', 'plugins\staging', 'updates', 'updates\versions', 'updates\backups', 'updates\runner')) {
+    foreach ($directory in @('logs', 'cache', 'staging', 'injection', 'injection\modules', 'plugins', 'plugins\versions', 'plugins\staging', 'updates', 'updates\versions', 'updates\backups', 'updates\downloads', 'updates\runner')) {
         New-Item -ItemType Directory -Force -Path (Join-Path $DistDir "data\$directory") | Out-Null
     }
     Copy-Item -LiteralPath (Join-Path $ProjectRoot 'THIRD_PARTY_NOTICES.md') -Destination $DistDir -Force

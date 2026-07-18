@@ -7,6 +7,7 @@ import (
 
 	"genshintools/internal/buildinfo"
 	"genshintools/internal/paths"
+	"genshintools/internal/selfupdate"
 	"genshintools/internal/shell"
 )
 
@@ -24,6 +25,9 @@ func launchApplication(stderr io.Writer) int {
 	if err := layout.Ensure(); err != nil {
 		fmt.Fprintf(stderr, "create portable data directories: %v\n", err)
 		return 1
+	}
+	if status, err := selfupdate.RecoverAtStartup(layout.Root, buildinfo.Version); err != nil {
+		fmt.Fprintf(stderr, "update recovery warning (%s): %v\n", status, err)
 	}
 	if err := shell.Run(layout, buildinfo.Current()); err != nil {
 		fmt.Fprintf(stderr, "run application: %v\n", err)
