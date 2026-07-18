@@ -105,7 +105,7 @@ try {
         throw 'Clean shutdown left session.marker behind'
     }
     $Configuration = Get-Content -LiteralPath $ConfigFile -Raw -Encoding UTF8 | ConvertFrom-Json
-    if ($Configuration.schemaVersion -ne 8 -or $null -eq $Configuration.input -or $null -eq $Configuration.plugins) {
+    if ($Configuration.schemaVersion -ne 9 -or $null -eq $Configuration.input -or $null -eq $Configuration.plugins -or $null -eq $Configuration.shell) {
         throw 'Unexpected config schema after clean shutdown'
     }
     $Entries = @(Get-Content -LiteralPath $LogFile -Encoding UTF8 | ForEach-Object { $_ | ConvertFrom-Json })

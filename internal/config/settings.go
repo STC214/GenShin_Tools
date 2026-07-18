@@ -19,9 +19,10 @@ import (
 	"genshintools/internal/localenhance"
 	"genshintools/internal/overlay"
 	"genshintools/internal/plugins"
+	"genshintools/internal/shellconfig"
 )
 
-const CurrentSchemaVersion = 8
+const CurrentSchemaVersion = 9
 
 // Settings contains only stable shell settings in S02. Feature settings are
 // added by their implementation stage instead of being guessed in advance.
@@ -36,6 +37,7 @@ type Settings struct {
 	Overlay       overlay.Config     `json:"overlay"`
 	Injection     injection.Config   `json:"injection"`
 	Plugins       plugins.Config     `json:"plugins"`
+	Shell         shellconfig.Config `json:"shell"`
 }
 
 type LocalEnhanceConfig struct {
@@ -77,6 +79,7 @@ func Default() Settings {
 		Overlay:      overlay.DefaultConfig(),
 		Injection:    injection.DefaultConfig(),
 		Plugins:      plugins.DefaultConfig(),
+		Shell:        shellconfig.DefaultConfig(),
 	}
 }
 
@@ -147,11 +150,16 @@ func migrateAndValidate(settings *Settings) error {
 	case 7:
 		settings.SchemaVersion = CurrentSchemaVersion
 	case 8:
+		settings.SchemaVersion = CurrentSchemaVersion
+	case 9:
 	default:
 		return fmt.Errorf("unsupported schema version %d", settings.SchemaVersion)
 	}
 	if loadedSchema < 8 {
 		settings.Plugins = plugins.DefaultConfig()
+	}
+	if loadedSchema < 9 {
+		settings.Shell = shellconfig.DefaultConfig()
 	}
 	if settings.Window.Width < 640 || settings.Window.Width > 10000 {
 		settings.Window.Width = Default().Window.Width
@@ -212,6 +220,11 @@ func migrateAndValidate(settings *Settings) error {
 		return fmt.Errorf("plugin settings: %w", err)
 	}
 	settings.Plugins = normalizedPlugins
+	normalizedShell, err := settings.Shell.Normalized()
+	if err != nil {
+		return fmt.Errorf("shell settings: %w", err)
+	}
+	settings.Shell = normalizedShell
 	return nil
 }
 

@@ -4,7 +4,9 @@ package win32
 import (
 	"errors"
 	"fmt"
+	"sync/atomic"
 	"syscall"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -99,12 +101,22 @@ type ThreadEntry32 struct {
 	Flags          uint32
 }
 
+type fileTime struct{ Low, High uint32 }
+
 type ResourceSnapshot struct {
 	Handles uint32
 	Threads uint32
 	GDI     uint32
 	USER    uint32
 }
+
+type highContrast struct {
+	Size          uint32
+	Flags         uint32
+	DefaultScheme *uint16
+}
+
+var colorTransform atomic.Pointer[func(uint32) uint32]
 
 type openFileName struct {
 	Size            uint32
@@ -170,6 +182,8 @@ const (
 	WM_GETMINMAXINFO    = 0x0024
 	WM_SETFONT          = 0x0030
 	WM_ERASEBKGND       = 0x0014
+	WM_SYSCOLORCHANGE   = 0x0015
+	WM_SETTINGCHANGE    = 0x001A
 	WM_COMMAND          = 0x0111
 	WM_CTLCOLOREDIT     = 0x0133
 	WM_SYSCOMMAND       = 0x0112
@@ -180,6 +194,7 @@ const (
 	WM_KEYDOWN          = 0x0100
 	WM_KEYUP            = 0x0101
 	WM_HOTKEY           = 0x0312
+	WM_THEMECHANGED     = 0x031A
 	WM_POWERBROADCAST   = 0x0218
 	WM_WTSSESSIONCHANGE = 0x02B1
 	WM_DPICHANGED       = 0x02E0
@@ -220,15 +235,28 @@ const (
 	NIF_MESSAGE          = 0x0001
 	NIF_ICON             = 0x0002
 	NIF_TIP              = 0x0004
+	NIF_INFO             = 0x0010
 	NOTIFYICON_VERSION_4 = 4
+	NIIF_WARNING         = 0x00000002
 
 	MF_STRING       = 0x0000
 	TPM_RIGHTBUTTON = 0x0002
 	TPM_RETURNCMD   = 0x0100
 
-	TH32CS_SNAPTHREAD = 0x00000004
-	GR_GDIOBJECTS     = 0
-	GR_USEROBJECTS    = 1
+	TH32CS_SNAPTHREAD           = 0x00000004
+	BELOW_NORMAL_PRIORITY_CLASS = 0x00004000
+	NORMAL_PRIORITY_CLASS       = 0x00000020
+	ABOVE_NORMAL_PRIORITY_CLASS = 0x00008000
+	GR_GDIOBJECTS               = 0
+	GR_USEROBJECTS              = 1
+	SPI_GETHIGHCONTRAST         = 0x0042
+	HCF_HIGHCONTRASTON          = 0x00000001
+	COLOR_GRAYTEXT              = 17
+	COLOR_HIGHLIGHT             = 13
+	COLOR_HIGHLIGHTTEXT         = 14
+	COLOR_BTNFACE               = 15
+	COLOR_WINDOW                = 5
+	COLOR_WINDOWTEXT            = 8
 
 	COINIT_APARTMENTTHREADED      = 0x2
 	DWMWA_USE_IMMERSIVE_DARK_MODE = 20
@@ -295,6 +323,8 @@ var (
 	procGetCursorPos                  = user32.NewProc("GetCursorPos")
 	procSetCursorPos                  = user32.NewProc("SetCursorPos")
 	procGetGuiResources               = user32.NewProc("GetGuiResources")
+	procGetSysColor                   = user32.NewProc("GetSysColor")
+	procSystemParametersInfoW         = user32.NewProc("SystemParametersInfoW")
 
 	procCreateSolidBrush = gdi32.NewProc("CreateSolidBrush")
 	procDeleteObject     = gdi32.NewProc("DeleteObject")
@@ -314,8 +344,11 @@ var (
 	procGetModuleHandleW         = kernel32.NewProc("GetModuleHandleW")
 	procCreateMutexW             = kernel32.NewProc("CreateMutexW")
 	procGetCurrentProcess        = kernel32.NewProc("GetCurrentProcess")
+	procSetPriorityClass         = kernel32.NewProc("SetPriorityClass")
 	procGetCurrentProcessId      = kernel32.NewProc("GetCurrentProcessId")
+	procGetUserDefaultLocaleName = kernel32.NewProc("GetUserDefaultLocaleName")
 	procGetProcessHandleCount    = kernel32.NewProc("GetProcessHandleCount")
+	procGetProcessTimes          = kernel32.NewProc("GetProcessTimes")
 	procCreateToolhelp32Snapshot = kernel32.NewProc("CreateToolhelp32Snapshot")
 	procThread32First            = kernel32.NewProc("Thread32First")
 	procThread32Next             = kernel32.NewProc("Thread32Next")
@@ -345,7 +378,11 @@ func SelectPluginPackage(owner HWND, initialDirectory string) (path string, sele
 }
 
 func SelectWaveFile(owner HWND, initialDirectory string) (path string, selected bool, err error) {
-	return selectFile(owner, initialDirectory, "Wave audio (*.wav)", "*.wav", "选择启动声音", "wav")
+	return SelectWaveFileWithTitle(owner, initialDirectory, "选择启动声音")
+}
+
+func SelectWaveFileWithTitle(owner HWND, initialDirectory, prompt string) (path string, selected bool, err error) {
+	return selectFile(owner, initialDirectory, "Wave audio (*.wav)", "*.wav", prompt, "wav")
 }
 
 var browseCallback = windows.NewCallback(func(hwnd uintptr, message uint32, _ uintptr, parameter uintptr) uintptr {
@@ -360,8 +397,12 @@ var browseCallback = windows.NewCallback(func(hwnd uintptr, message uint32, _ ui
 })
 
 func SelectFolder(owner HWND, initialDirectory string) (path string, selected bool, err error) {
+	return SelectFolderWithTitle(owner, initialDirectory, "选择截图保存目录")
+}
+
+func SelectFolderWithTitle(owner HWND, initialDirectory, prompt string) (path string, selected bool, err error) {
 	display := make([]uint16, 32768)
-	title := UTF16("选择截图保存目录")
+	title := UTF16(prompt)
 	var initial *uint16
 	if initialDirectory != "" {
 		initial = UTF16(initialDirectory)
@@ -531,6 +572,24 @@ func GetWindowText(hwnd HWND) string {
 	return windows.UTF16ToString(buffer)
 }
 
+func UserDefaultLocaleName() string {
+	buffer := make([]uint16, 85)
+	length, _, _ := procGetUserDefaultLocaleName.Call(uintptr(unsafe.Pointer(&buffer[0])), uintptr(len(buffer)))
+	if length == 0 {
+		return ""
+	}
+	return windows.UTF16ToString(buffer)
+}
+
+func SetCurrentProcessPriority(priorityClass uint32) error {
+	process, _, _ := procGetCurrentProcess.Call()
+	value, _, callErr := procSetPriorityClass.Call(process, uintptr(priorityClass))
+	if value == 0 {
+		return errno(callErr)
+	}
+	return nil
+}
+
 func SendMessage(hwnd HWND, message uint32, wParam, lParam uintptr) uintptr {
 	value, _, _ := procSendMessageW.Call(uintptr(hwnd), uintptr(message), wParam, lParam)
 	return value
@@ -541,8 +600,12 @@ func SetTextLimit(hwnd HWND, limit uint32) { SendMessage(hwnd, EM_SETLIMITTEXT, 
 func SetCueBanner(hwnd HWND, value string) {
 	SendMessage(hwnd, EM_SETCUEBANNER, 1, uintptr(unsafe.Pointer(UTF16(value))))
 }
-func EnableDarkControl(hwnd HWND) {
-	procSetWindowTheme.Call(uintptr(hwnd), uintptr(unsafe.Pointer(UTF16("DarkMode_Explorer"))), 0)
+func SetControlDarkTheme(hwnd HWND, enabled bool) {
+	theme := "Explorer"
+	if enabled {
+		theme = "DarkMode_Explorer"
+	}
+	procSetWindowTheme.Call(uintptr(hwnd), uintptr(unsafe.Pointer(UTF16(theme))), 0)
 }
 func MonitorCount() int {
 	value, _, _ := procGetSystemMetrics.Call(SM_CMONITORS)
@@ -598,12 +661,26 @@ func DPIForWindow(hwnd HWND) uint32 {
 	}
 	return uint32(value)
 }
-func EnableDarkTitleBar(hwnd HWND) {
-	enabled := int32(1)
+func SetDarkTitleBar(hwnd HWND, dark bool) {
+	enabled := int32(0)
+	if dark {
+		enabled = 1
+	}
 	result, _, _ := procDwmSetWindowAttribute.Call(uintptr(hwnd), DWMWA_USE_IMMERSIVE_DARK_MODE, uintptr(unsafe.Pointer(&enabled)), unsafe.Sizeof(enabled))
 	if result != 0 {
 		procDwmSetWindowAttribute.Call(uintptr(hwnd), 19, uintptr(unsafe.Pointer(&enabled)), unsafe.Sizeof(enabled))
 	}
+}
+
+func HighContrastEnabled() bool {
+	value := highContrast{Size: uint32(unsafe.Sizeof(highContrast{}))}
+	result, _, _ := procSystemParametersInfoW.Call(SPI_GETHIGHCONTRAST, uintptr(value.Size), uintptr(unsafe.Pointer(&value)), 0)
+	return result != 0 && value.Flags&HCF_HIGHCONTRASTON != 0
+}
+
+func SystemColor(index uint32) uint32 {
+	value, _, _ := procGetSysColor.Call(uintptr(index))
+	return uint32(value)
 }
 
 func WorkAreaFor(rect Rect) Rect {
@@ -634,6 +711,14 @@ func AddTrayIcon(data *NotifyIconData) bool {
 }
 func DeleteTrayIcon(data *NotifyIconData) {
 	procShellNotifyIconW.Call(NIM_DELETE, uintptr(unsafe.Pointer(data)))
+}
+
+func ShowTrayWarning(data NotifyIconData, title, message string) {
+	data.Flags = NIF_INFO
+	data.InfoFlags = NIIF_WARNING
+	CopyUTF16(data.InfoTitle[:], title)
+	CopyUTF16(data.Info[:], message)
+	procShellNotifyIconW.Call(NIM_MODIFY, uintptr(unsafe.Pointer(&data)))
 }
 
 func ShowTrayMenu(hwnd HWND, showID, exitID uintptr) uintptr {
@@ -700,9 +785,32 @@ func SnapshotResources() ResourceSnapshot {
 	return ResourceSnapshot{Handles: handles, Threads: threads, GDI: uint32(gdi), USER: uint32(user)}
 }
 
+func CurrentProcessCPUTime() (time.Duration, error) {
+	process, _, _ := procGetCurrentProcess.Call()
+	var creation, exit, kernel, user fileTime
+	result, _, err := procGetProcessTimes.Call(process, uintptr(unsafe.Pointer(&creation)), uintptr(unsafe.Pointer(&exit)), uintptr(unsafe.Pointer(&kernel)), uintptr(unsafe.Pointer(&user)))
+	if result == 0 {
+		return 0, errno(err)
+	}
+	ticks := uint64(kernel.High)<<32 | uint64(kernel.Low)
+	ticks += uint64(user.High)<<32 | uint64(user.Low)
+	return time.Duration(ticks * 100), nil
+}
+
 func CloseHandle(handle windows.Handle) { _ = windows.CloseHandle(handle) }
 
-func Color(r, g, b byte) uint32           { return uint32(r) | uint32(g)<<8 | uint32(b)<<16 }
+// SetColorTransform installs the shell's semantic color transform. Win32
+// views call Color at paint time, so changing this function does not retain or
+// leak any GDI object.
+func SetColorTransform(transform func(uint32) uint32) { colorTransform.Store(&transform) }
+
+func Color(r, g, b byte) uint32 {
+	value := uint32(r) | uint32(g)<<8 | uint32(b)<<16
+	if transform := colorTransform.Load(); transform != nil {
+		return (*transform)(value)
+	}
+	return value
+}
 func Scale(value int32, dpi uint32) int32 { return value * int32(dpi) / 96 }
 
 func errno(err error) error {

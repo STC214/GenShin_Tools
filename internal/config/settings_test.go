@@ -165,3 +165,18 @@ func TestSchemaSevenMigratesSafePluginDefaults(t *testing.T) {
 		t.Fatalf("migrated plugin settings = %+v", loaded.Settings.Plugins)
 	}
 }
+
+func TestSchemaEightMigratesShellDefaults(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	data := []byte(`{"schemaVersion":8,"window":{"width":1100,"height":720},"input":{"mode":0,"triggerKey":119,"outputKey":70,"stopKey":123,"intervalMs":50},"launch":{"width":1920,"height":1080},"injection":{"elevatedHelper":true,"helperTimeoutMs":15000,"remoteTimeoutMs":5000},"plugins":{"safeMode":true,"sort":"popular","page":1,"pageSize":20}}`)
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Settings.SchemaVersion != CurrentSchemaVersion || !loaded.Settings.Shell.MinimizeToTray || !loaded.Settings.Shell.RememberWindowSize || loaded.Settings.Shell.Language != "system" {
+		t.Fatalf("migrated shell settings = %+v", loaded.Settings.Shell)
+	}
+}

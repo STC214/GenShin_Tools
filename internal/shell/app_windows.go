@@ -11,12 +11,14 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unsafe"
 
 	"genshintools/internal/buildinfo"
 	"genshintools/internal/capture"
 	"genshintools/internal/config"
+	"genshintools/internal/cpumonitor"
 	"genshintools/internal/diagnostics"
 	"genshintools/internal/game"
 	"genshintools/internal/gamewindow"
@@ -24,12 +26,15 @@ import (
 	"genshintools/internal/input"
 	"genshintools/internal/launch"
 	"genshintools/internal/localenhance"
+	"genshintools/internal/localization"
 	"genshintools/internal/overlay"
 	"genshintools/internal/paths"
 	"genshintools/internal/platform/win32"
 	"genshintools/internal/plugins"
 	"genshintools/internal/resources"
+	"genshintools/internal/shellconfig"
 	"genshintools/internal/taskrunner"
+	"genshintools/internal/uitheme"
 )
 
 const (
@@ -50,6 +55,7 @@ const (
 	messageOverlayStats = win32.WM_APP + 12
 	messageInjection    = win32.WM_APP + 13
 	messagePlugins      = win32.WM_APP + 14
+	messageDiagnostics  = win32.WM_APP + 15
 
 	trayID          = 1
 	captureHotkeyID = 2001
@@ -67,6 +73,8 @@ type application struct {
 	selected    int
 	lastBounds  config.WindowConfig
 	settings    config.Settings
+	texts       localization.Catalog
+	palette     uitheme.Palette
 	layout      paths.Layout
 	build       buildinfo.Info
 	logger      *diagnostics.Logger
@@ -81,8 +89,8 @@ type application struct {
 	fontBody  win32.HFONT
 	fontNav   win32.HFONT
 
-	snapshots               chan win32.ResourceSnapshot
-	lastSnap                win32.ResourceSnapshot
+	snapshots               chan diagnosticSnapshot
+	lastSnap                diagnosticSnapshot
 	inputNative             *input.Native
 	inputUpdates            chan input.Snapshot
 	physicalEvents          chan input.PhysicalEvent
@@ -139,6 +147,10 @@ type application struct {
 	pluginAliasEdit         win32.HWND
 	pluginCatalogEdit       win32.HWND
 	pluginSearchEdit        win32.HWND
+	shellStatus             string
+	diagnosticUpdates       chan diagnosticUpdate
+	diagnosticBusy          bool
+	cpuWarning              atomic.Pointer[cpuWarningConfig]
 	editBrush               win32.HBRUSH
 	sessionNotifications    bool
 	shutdown                sync.Once
@@ -184,6 +196,7 @@ type resourceUpdate struct {
 
 type serverViewState struct {
 	Busy           bool
+	Committing     bool
 	Confirm        bool
 	Advanced       bool
 	Target         localenhance.QuickServer
@@ -225,18 +238,36 @@ type pluginUpdate struct {
 	err     string
 }
 
-var navigation = []struct{ title, subtitle string }{
-	{"首页", "启动状态与常用操作将在后续阶段接入。"},
-	{"游戏管理", "S05：只读状态、纯净启动和启动设置。"},
-	{"资源管理", "S06：检查、下载、校验和事务修复。"},
-	{"区服工具", "S07：官服/B服快速切换与高级服务器转换。"},
-	{"本地增强", "S07：HDR、启动声音、BetterGI 与可回滚区服操作。"},
-	{"截图与性能", "S08：游戏窗口截图与 FPS/CPU/GPU 覆盖层。"},
-	{"输入增强", "S03：鼠标连点与键盘连按。"},
-	{"注入适配", "S09：独立 helper、模块预检与纯净启动回退。"},
-	{"插件", "S10：插件发现、配置、来源审计和更新。"},
-	{"插件商店", "S10：显式 HTTPS 目录、搜索分类、分页和事务安装。"},
-	{"设置", "S02 已启用便携配置、日志、DPI 和安全退出。"},
+type diagnosticSnapshot struct {
+	Resources  win32.ResourceSnapshot
+	CPUPercent float64
+	CPUValid   bool
+	CPUAlert   bool
+}
+
+type diagnosticUpdate struct {
+	path string
+	err  error
+}
+
+type cpuWarningConfig struct {
+	Enabled    bool
+	Threshold  float64
+	DurationMS int
+}
+
+var navigation = []struct{ titleKey, subtitleKey string }{
+	{"nav.home", "nav.home.subtitle"},
+	{"nav.game", "nav.game.subtitle"},
+	{"nav.resources", "nav.resources.subtitle"},
+	{"nav.server", "nav.server.subtitle"},
+	{"nav.local", "nav.local.subtitle"},
+	{"nav.capture", "nav.capture.subtitle"},
+	{"nav.input", "nav.input.subtitle"},
+	{"nav.injection", "nav.injection.subtitle"},
+	{"nav.plugins", "nav.plugins.subtitle"},
+	{"nav.pluginStore", "nav.pluginStore.subtitle"},
+	{"nav.settings", "nav.settings.subtitle"},
 }
 
 func Run(layout paths.Layout, build buildinfo.Info) (returnErr error) {
@@ -321,6 +352,7 @@ func Run(layout paths.Layout, build buildinfo.Info) (returnErr error) {
 	app := &application{
 		instance:            win32.ModuleHandle(),
 		settings:            loaded.Settings,
+		texts:               localization.New(localization.Language(loaded.Settings.Shell.Language), win32.UserDefaultLocaleName()),
 		lastBounds:          loaded.Settings.Window,
 		layout:              layout,
 		build:               build,
@@ -328,15 +360,15 @@ func Run(layout paths.Layout, build buildinfo.Info) (returnErr error) {
 		tasks:               taskrunner.New(),
 		previousBad:         previousBad,
 		recovered:           loaded.RecoveredFrom,
-		snapshots:           make(chan win32.ResourceSnapshot, 1),
+		snapshots:           make(chan diagnosticSnapshot, 1),
 		inputUpdates:        make(chan input.Snapshot, 1),
 		physicalEvents:      make(chan input.PhysicalEvent, 16),
 		gameUpdates:         make(chan gameUpdate, 1),
 		launchUpdates:       make(chan launch.Snapshot, 1),
 		resourceUpdates:     make(chan resourceUpdate, 1),
-		resourceState:       resourceViewState{Language: "zh-cn", Status: "先检查在线资源并生成只读修复计划"},
+		resourceState:       resourceViewState{Language: "zh-cn"},
 		serverUpdates:       make(chan serverUpdate, 1),
-		serverState:         serverViewState{Target: localenhance.QuickOfficial, AdvancedTarget: localenhance.AdvancedGlobal, Status: "先生成区服变更预览；不会直接修改游戏目录"},
+		serverState:         serverViewState{Target: localenhance.QuickOfficial, AdvancedTarget: localenhance.AdvancedGlobal},
 		captureResults:      make(chan capture.Result, 2),
 		overlayUpdates:      make(chan overlayUpdate, 4),
 		overlayStatsUpdates: make(chan overlay.Stats, 1),
@@ -350,16 +382,30 @@ func Run(layout paths.Layout, build buildinfo.Info) (returnErr error) {
 		pluginCatalog:       pluginCatalog,
 		pluginCatalogPage:   pluginCatalogPage,
 		pluginUpdates:       make(chan pluginUpdate, 1),
-		captureStatus:       "截图功能未启用",
-		overlayStatus:       "性能覆盖层未启用",
+		diagnosticUpdates:   make(chan diagnosticUpdate, 1),
+		shellStatus:         "",
+		captureStatus:       "",
+		overlayStatus:       "",
 		injectionStatus:     "注入默认关闭；纯净启动始终可用",
 	}
+	app.shellStatus = app.texts.Text("settings.status.ready")
+	app.resourceState.Status = app.texts.Text("resource.status.ready")
+	app.serverState.Status = app.texts.Text("server.status.ready")
+	app.captureStatus = app.texts.Text("media.status.captureDisabled")
+	app.overlayStatus = app.texts.Text("media.status.overlayDisabled")
+	app.publishCPUWarningConfig()
+	app.palette = uitheme.Current(app.settings.Shell.Theme)
+	win32.SetColorTransform(app.palette.Map)
 	active = app
 	defer func() { active = nil }()
 
 	logger.Info("application starting", map[string]any{"version": build.Version, "commit": build.Commit, "previousUncleanExit": previousBad})
 	if loaded.RecoveredFrom != "" {
 		logger.Error("corrupt settings quarantined", map[string]any{"path": loaded.RecoveredFrom})
+	}
+	if err := app.applyProcessPriority(); err != nil {
+		app.shellStatus = "Apply process priority failed: " + err.Error()
+		logger.Error("apply process priority", map[string]any{"error": err.Error()})
 	}
 	if pluginLoad.RecoveredFrom != "" {
 		logger.Error("corrupt plugin state quarantined", map[string]any{"path": pluginLoad.RecoveredFrom})
@@ -448,9 +494,13 @@ func (app *application) createWindow() error {
 		return err
 	}
 
-	bounds := clampBounds(app.settings.Window)
+	windowSettings := app.settings.Window
+	if !app.settings.Shell.RememberWindowSize {
+		windowSettings = config.Default().Window
+	}
+	bounds := clampBounds(windowSettings)
 	app.lastBounds = bounds
-	title := win32.UTF16("Genshin Tools " + app.build.Version)
+	title := win32.UTF16(app.texts.Text("app.title") + " " + app.build.Version)
 	hwnd, err := win32.CreateWindow(className, title, int32(bounds.X), int32(bounds.Y), int32(bounds.Width), int32(bounds.Height), app.instance)
 	if err != nil {
 		return err
@@ -462,7 +512,7 @@ func (app *application) createWindow() error {
 		win32.DestroyWindow(hwnd)
 		return err
 	}
-	win32.EnableDarkTitleBar(hwnd)
+	win32.SetDarkTitleBar(hwnd, app.palette.Dark)
 	app.taskbarMsg = win32.RegisterWindowMessage("TaskbarCreated")
 	app.addTrayIcon()
 	win32.ShowWindow(hwnd, win32.SW_SHOWNORMAL)
@@ -532,6 +582,13 @@ func (app *application) handleMessage(hwnd win32.HWND, message uint32, wParam, l
 	case messageSnapshot:
 		select {
 		case app.lastSnap = <-app.snapshots:
+			if app.lastSnap.CPUAlert {
+				app.shellStatus = fmt.Sprintf("%s %.1f%%", app.texts.Text("settings.cpuWarning.title"), app.lastSnap.CPUPercent)
+				if app.trayAdded {
+					win32.ShowTrayWarning(app.tray, app.texts.Text("settings.cpuWarning.title"), app.texts.Text("settings.cpuWarning.message"))
+				}
+				app.logger.Error("sustained launcher CPU usage", map[string]any{"percent": app.lastSnap.CPUPercent, "threshold": app.settings.Shell.CPUWarningThreshold, "durationMs": app.settings.Shell.CPUWarningDurationMS})
+			}
 		default:
 		}
 		win32.Invalidate(hwnd)
@@ -620,10 +677,10 @@ func (app *application) handleMessage(hwnd win32.HWND, message uint32, wParam, l
 			select {
 			case result := <-app.captureResults:
 				if result.Error != "" {
-					app.captureStatus = "截图失败：" + result.Error
+					app.captureStatus = fmt.Sprintf(app.texts.Text("media.status.captureFailed"), result.Error)
 					app.logger.Error("capture game window", map[string]any{"error": result.Error})
 				} else {
-					app.captureStatus = "截图已保存：" + result.Path
+					app.captureStatus = fmt.Sprintf(app.texts.Text("media.status.captureSaved"), result.Path)
 					app.logger.Info("game screenshot saved", map[string]any{"path": result.Path})
 				}
 			default:
@@ -638,11 +695,11 @@ func (app *application) handleMessage(hwnd win32.HWND, message uint32, wParam, l
 				if update.taskID == app.mediaTask {
 					app.overlaySession = update.session
 					if update.err != nil {
-						app.overlayStatus = "覆盖层启动失败：" + update.err.Error()
+						app.overlayStatus = fmt.Sprintf(app.texts.Text("media.status.overlayFailed"), update.err)
 					} else if update.session != nil {
-						app.overlayStatus = fmt.Sprintf("覆盖层运行中：PID %d", update.target.PID)
+						app.overlayStatus = fmt.Sprintf(app.texts.Text("media.status.overlayRunning"), update.target.PID)
 					} else {
-						app.overlayStatus = "性能覆盖层已停止"
+						app.overlayStatus = app.texts.Text("media.status.overlayStopped")
 					}
 				} else if update.session != nil {
 					app.tasks.Run(func(ctx context.Context, _ uint64) { _ = update.session.Close(ctx) })
@@ -719,6 +776,21 @@ func (app *application) handleMessage(hwnd win32.HWND, message uint32, wParam, l
 				return 0
 			}
 		}
+	case messageDiagnostics:
+		select {
+		case update := <-app.diagnosticUpdates:
+			app.diagnosticBusy = false
+			if update.err != nil {
+				app.shellStatus = app.texts.Text("settings.status.exportFailed") + update.err.Error()
+				app.logger.Error("export diagnostics", map[string]any{"error": update.err.Error()})
+			} else {
+				app.shellStatus = app.texts.Text("settings.status.exported") + update.path
+				app.logger.Info("diagnostics exported", map[string]any{"path": update.path})
+			}
+		default:
+		}
+		win32.Invalidate(hwnd)
+		return 0
 	case messageTray:
 		event := uint32(lParam & 0xffff)
 		switch event {
@@ -757,14 +829,16 @@ func (app *application) handleMessage(hwnd win32.HWND, message uint32, wParam, l
 			app.pluginClick(x, y)
 		} else if app.selected == 9 && x >= int(win32.Scale(210, app.dpi)) {
 			app.pluginStoreClick(x, y)
+		} else if app.selected == 10 && x >= int(win32.Scale(210, app.dpi)) {
+			app.settingsClick(y)
 		}
 		return 0
 	case win32.WM_HOTKEY:
 		if int32(wParam) == captureHotkeyID && app.captureManager != nil {
 			if app.captureManager.Request() {
-				app.captureStatus = "截图请求已进入有界队列…"
+				app.captureStatus = app.texts.Text("media.status.requestQueued")
 			} else {
-				app.captureStatus = "截图请求未接受：无已核验游戏窗口或队列已满"
+				app.captureStatus = app.texts.Text("media.status.requestRejected")
 			}
 			win32.Invalidate(hwnd)
 		}
@@ -800,6 +874,9 @@ func (app *application) handleMessage(hwnd win32.HWND, message uint32, wParam, l
 		win32.SetTextColor(win32.HDC(wParam), win32.Color(225, 229, 242))
 		win32.SetBackgroundColor(win32.HDC(wParam), win32.Color(25, 29, 39))
 		return uintptr(app.editBrush)
+	case win32.WM_SYSCOLORCHANGE, win32.WM_SETTINGCHANGE, win32.WM_THEMECHANGED:
+		app.refreshTheme()
+		return 0
 	case win32.WM_PAINT:
 		app.paint(hwnd)
 		return 0
@@ -810,7 +887,9 @@ func (app *application) handleMessage(hwnd win32.HWND, message uint32, wParam, l
 		return 0
 	case win32.WM_SIZE:
 		if wParam == win32.SIZE_MINIMIZED {
-			win32.ShowWindow(hwnd, win32.SW_HIDE)
+			if app.settings.Shell.MinimizeToTray {
+				win32.ShowWindow(hwnd, win32.SW_HIDE)
+			}
 		} else {
 			app.captureBounds()
 			app.layoutLaunchControls()
@@ -825,8 +904,10 @@ func (app *application) handleMessage(hwnd win32.HWND, message uint32, wParam, l
 		win32.SetWindowPos(hwnd, suggested, win32.SWP_NOZORDER|win32.SWP_NOACTIVATE)
 		return 0
 	case win32.WM_GETMINMAXINFO:
-		info := (*win32.MinMaxInfo)(unsafe.Pointer(lParam))
-		info.MinTrackSize = win32.Point{X: win32.Scale(840, app.dpi), Y: win32.Scale(560, app.dpi)}
+		if app.settings.Shell.EnforceMinimumSize {
+			info := (*win32.MinMaxInfo)(unsafe.Pointer(lParam))
+			info.MinTrackSize = win32.Point{X: win32.Scale(840, app.dpi), Y: win32.Scale(560, app.dpi)}
+		}
 		return 0
 	case win32.WM_QUERYENDSESSION:
 		return 1
@@ -860,7 +941,7 @@ func (app *application) addTrayIcon() {
 		win32.DeleteTrayIcon(&app.tray)
 	}
 	app.tray = win32.NotifyIconData{Window: app.hwnd, ID: trayID, Flags: win32.NIF_MESSAGE | win32.NIF_ICON | win32.NIF_TIP, CallbackMsg: messageTray, Icon: app.icon}
-	win32.CopyUTF16(app.tray.Tip[:], "Genshin Tools "+app.build.Version)
+	win32.CopyUTF16(app.tray.Tip[:], app.texts.Text("app.title")+" "+app.build.Version)
 	app.trayAdded = win32.AddTrayIcon(&app.tray)
 	if app.trayAdded {
 		app.logger.Info("tray icon added", nil)
@@ -908,7 +989,9 @@ func (app *application) requestShutdown() {
 		}
 		app.syncLaunchConfig()
 		app.captureBounds()
-		app.settings.Window = app.lastBounds
+		if app.settings.Shell.RememberWindowSize {
+			app.settings.Window = app.lastBounds
+		}
 		if err := config.Save(app.layout.Config, app.settings); err != nil {
 			app.logger.Error("save settings", map[string]any{"error": err.Error()})
 		}
@@ -1061,21 +1144,21 @@ func (app *application) paint(hwnd win32.HWND) {
 			win32.FillRect(dc, &bar, accent)
 		}
 		row.Left += win32.Scale(18, app.dpi)
-		win32.DrawText(dc, item.title, &row, win32.DT_LEFT|win32.DT_VCENTER|win32.DT_SINGLELINE)
+		win32.DrawText(dc, app.texts.Text(item.titleKey), &row, win32.DT_LEFT|win32.DT_VCENTER|win32.DT_SINGLELINE)
 	}
 
 	contentLeft := sidebarWidth + win32.Scale(42, app.dpi)
 	win32.SelectObject(dc, uintptr(app.fontTitle))
 	titleRect := win32.Rect{Left: contentLeft, Top: win32.Scale(52, app.dpi), Right: client.Right - win32.Scale(30, app.dpi), Bottom: win32.Scale(104, app.dpi)}
-	win32.DrawText(dc, navigation[app.selected].title, &titleRect, win32.DT_LEFT|win32.DT_VCENTER|win32.DT_SINGLELINE)
+	win32.DrawText(dc, app.texts.Text(navigation[app.selected].titleKey), &titleRect, win32.DT_LEFT|win32.DT_VCENTER|win32.DT_SINGLELINE)
 	win32.SelectObject(dc, uintptr(app.fontBody))
 	win32.SetTextColor(dc, win32.Color(166, 174, 197))
-	subtitle := navigation[app.selected].subtitle
+	subtitle := app.texts.Text(navigation[app.selected].subtitleKey)
 	if app.previousBad {
-		subtitle += "  已检测到上次异常退出。"
+		subtitle += "  " + app.texts.Text("status.previousUncleanExit")
 	}
 	if app.recovered != "" {
-		subtitle += "  已隔离损坏配置。"
+		subtitle += "  " + app.texts.Text("status.configRecovered")
 	}
 	subtitleRect := win32.Rect{Left: contentLeft, Top: win32.Scale(112, app.dpi), Right: client.Right - win32.Scale(30, app.dpi), Bottom: win32.Scale(158, app.dpi)}
 	win32.DrawText(dc, subtitle, &subtitleRect, win32.DT_LEFT|win32.DT_VCENTER|win32.DT_SINGLELINE|win32.DT_END_ELLIPSIS)
@@ -1098,6 +1181,8 @@ func (app *application) paint(hwnd win32.HWND) {
 		app.paintPlugins(dc, client, contentLeft)
 	} else if app.selected == 9 {
 		app.paintPluginStore(dc, client, contentLeft)
+	} else if app.selected == 10 {
+		app.paintSettings(dc, client, contentLeft)
 	} else {
 		cardBrush := win32.CreateSolidBrush(win32.Color(25, 29, 39))
 		defer win32.DeleteObject(uintptr(cardBrush))
@@ -1108,17 +1193,25 @@ func (app *application) paint(hwnd win32.HWND) {
 		card.Top += win32.Scale(18, app.dpi)
 		card.Right -= win32.Scale(20, app.dpi)
 		card.Bottom = card.Top + win32.Scale(34, app.dpi)
-		win32.DrawText(dc, "S02 稳定外壳运行中", &card, win32.DT_LEFT|win32.DT_VCENTER|win32.DT_SINGLELINE)
+		win32.DrawText(dc, app.texts.Text("home.ready"), &card, win32.DT_LEFT|win32.DT_VCENTER|win32.DT_SINGLELINE)
 		win32.SetTextColor(dc, win32.Color(145, 154, 180))
 		card.Top += win32.Scale(42, app.dpi)
-		card.Bottom += win32.Scale(66, app.dpi)
-		win32.DrawText(dc, "已启用：单实例 · 托盘 · DPI · 原子配置 · JSON 日志 · 安全退出", &card, win32.DT_LEFT|win32.DT_VCENTER|win32.DT_SINGLELINE|win32.DT_END_ELLIPSIS)
+		card.Bottom = card.Top + win32.Scale(32, app.dpi)
+		win32.DrawText(dc, app.texts.Text("home.summary"), &card, win32.DT_LEFT|win32.DT_VCENTER|win32.DT_SINGLELINE|win32.DT_END_ELLIPSIS)
+		card.Top += win32.Scale(38, app.dpi)
+		card.Bottom = card.Top + win32.Scale(32, app.dpi)
+		win32.DrawText(dc, app.texts.Text("home.scope"), &card, win32.DT_LEFT|win32.DT_VCENTER|win32.DT_SINGLELINE|win32.DT_END_ELLIPSIS)
 	}
 
 	win32.SetTextColor(dc, win32.Color(126, 136, 160))
 	win32.SelectObject(dc, uintptr(app.fontBody))
 	statusRect.Left += win32.Scale(16, app.dpi)
-	statusText := fmt.Sprintf("v%s  |  DPI %d  |  Goroutines %d  |  Threads %d  |  Handles %d  |  USER %d  |  GDI %d", app.build.Version, app.dpi, runtime.NumGoroutine(), app.lastSnap.Threads, app.lastSnap.Handles, app.lastSnap.USER, app.lastSnap.GDI)
+	cpu := "--"
+	if app.lastSnap.CPUValid {
+		cpu = fmt.Sprintf("%.1f%%", app.lastSnap.CPUPercent)
+	}
+	resources := app.lastSnap.Resources
+	statusText := fmt.Sprintf("v%s  |  DPI %d  |  CPU %s  |  Goroutines %d  |  Threads %d  |  Handles %d  |  USER %d  |  GDI %d", app.build.Version, app.dpi, cpu, runtime.NumGoroutine(), resources.Threads, resources.Handles, resources.USER, resources.GDI)
 	if app.selected == 8 || app.selected == 9 {
 		statusText = app.pluginStatus
 	}
@@ -1190,10 +1283,10 @@ func (app *application) startCaptureOverlay() error {
 		return err
 	}
 	if err := app.applyCaptureHotkey(); err != nil {
-		app.captureStatus = "截图快捷键注册失败：" + err.Error()
+		app.captureStatus = fmt.Sprintf(app.texts.Text("media.status.hotkeyFailed"), err)
 		app.logger.Error("register screenshot hotkey", map[string]any{"error": err.Error()})
 	} else if app.settings.Capture.Enabled {
-		app.captureStatus = "截图已启用，等待已核验游戏窗口"
+		app.captureStatus = app.texts.Text("media.status.captureWaiting")
 	}
 	return nil
 }
@@ -1210,7 +1303,7 @@ func (app *application) applyCaptureHotkey() error {
 		return nil
 	}
 	if app.settings.Capture.ConflictsWith(app.settings.Input.TriggerKey, app.settings.Input.OutputKey, app.settings.Input.StopKey) {
-		return errors.New("截图键与输入增强物理键冲突")
+		return errors.New(app.texts.Text("media.error.hotkeyConflict"))
 	}
 	if err := win32.RegisterHotKey(app.hwnd, captureHotkeyID, app.settings.Capture.Modifiers, app.settings.Capture.VirtualKey); err != nil {
 		return err
@@ -1249,9 +1342,9 @@ func (app *application) reconcileCaptureOverlay(force bool) {
 	app.overlaySession = nil
 	app.mediaTarget = target
 	if app.settings.Overlay.Enabled && target.PID == 0 {
-		app.overlayStatus = "覆盖层已启用，等待已核验游戏窗口"
+		app.overlayStatus = app.texts.Text("media.status.overlayWaiting")
 	} else {
-		app.overlayStatus = "正在协调覆盖层生命周期…"
+		app.overlayStatus = app.texts.Text("media.status.overlayReconciling")
 	}
 	configCopy := app.settings.Overlay
 	app.mediaTask = app.tasks.Run(func(ctx context.Context, id uint64) {
@@ -1315,11 +1408,38 @@ func (app *application) portableCapturePath(selected string) string {
 	return selected
 }
 
-func (app *application) saveMediaSettings() bool {
-	if err := config.Save(app.layout.Config, app.settings); err != nil {
-		app.captureStatus = "保存 S08 设置失败：" + err.Error()
+func (app *application) commitCaptureSettings(next capture.Config) bool {
+	previous := app.settings
+	settings := previous
+	settings.Capture = next
+	app.settings = settings
+	if err := app.applyCaptureHotkey(); err != nil {
+		app.settings = previous
+		if rollbackErr := app.applyCaptureHotkey(); rollbackErr != nil {
+			app.logger.Error("restore capture hotkey after apply failure", map[string]any{"error": rollbackErr.Error()})
+		}
+		app.captureStatus = fmt.Sprintf(app.texts.Text("media.status.hotkeyFailed"), err)
 		return false
 	}
+	if err := config.Save(app.layout.Config, settings); err != nil {
+		app.settings = previous
+		if rollbackErr := app.applyCaptureHotkey(); rollbackErr != nil {
+			app.logger.Error("restore capture hotkey after save failure", map[string]any{"error": rollbackErr.Error()})
+		}
+		app.captureStatus = fmt.Sprintf(app.texts.Text("media.status.saveFailed"), err)
+		return false
+	}
+	return true
+}
+
+func (app *application) commitOverlaySettings(next overlay.Config) bool {
+	settings := app.settings
+	settings.Overlay = next
+	if err := config.Save(app.layout.Config, settings); err != nil {
+		app.overlayStatus = fmt.Sprintf(app.texts.Text("media.status.saveFailed"), err)
+		return false
+	}
+	app.settings = settings
 	return true
 }
 
@@ -1327,20 +1447,21 @@ func (app *application) mediaClick(_, y int) {
 	sy := func(value int32) int { return int(win32.Scale(value, app.dpi)) }
 	switch {
 	case y >= sy(170) && y < sy(214):
-		app.settings.Capture.Enabled = !app.settings.Capture.Enabled
-		if err := app.applyCaptureHotkey(); err != nil {
-			app.captureStatus = "截图快捷键注册失败：" + err.Error()
-		} else if app.settings.Capture.Enabled {
-			app.captureStatus = "截图已启用：" + app.settings.Capture.HotkeyString()
-		} else {
-			app.captureStatus = "截图功能已停用"
+		next := app.settings.Capture
+		next.Enabled = !next.Enabled
+		if app.commitCaptureSettings(next) {
+			if next.Enabled {
+				app.captureStatus = fmt.Sprintf(app.texts.Text("media.status.captureEnabled"), next.HotkeyString())
+			} else {
+				app.captureStatus = app.texts.Text("media.status.captureStopped")
+			}
 		}
-		app.saveMediaSettings()
 	case y >= sy(220) && y < sy(264):
+		next := app.settings.Capture
 		presets := []uint32{0x79, 0x78, 0x2C}
 		index := 0
 		for i, key := range presets {
-			if app.settings.Capture.VirtualKey == key {
+			if next.VirtualKey == key {
 				index = (i + 1) % len(presets)
 				break
 			}
@@ -1349,63 +1470,63 @@ func (app *application) mediaClick(_, y int) {
 			key := presets[index]
 			index = (index + 1) % len(presets)
 			if key != app.settings.Input.TriggerKey && key != app.settings.Input.OutputKey && key != app.settings.Input.StopKey {
-				app.settings.Capture.VirtualKey = key
+				next.VirtualKey = key
 				break
 			}
 		}
-		if err := app.applyCaptureHotkey(); err != nil {
-			app.captureStatus = "切换截图键失败：" + err.Error()
-		} else {
-			app.captureStatus = "截图键已改为 " + app.settings.Capture.HotkeyString()
+		if app.commitCaptureSettings(next) {
+			app.captureStatus = fmt.Sprintf(app.texts.Text("media.status.hotkeyChanged"), next.HotkeyString())
 		}
-		app.saveMediaSettings()
 	case y >= sy(270) && y < sy(314):
 		if app.captureManager != nil && app.captureManager.Request() {
-			app.captureStatus = "手动截图请求已进入有界队列…"
+			app.captureStatus = app.texts.Text("media.status.requestQueued")
 		} else {
-			app.captureStatus = "无法截图：请启用截图并启动已核验的游戏窗口"
+			app.captureStatus = app.texts.Text("media.status.requestRejected")
 		}
 	case y >= sy(320) && y < sy(364):
-		path, selected, err := win32.SelectFolder(app.hwnd, app.settings.Capture.SaveDir)
+		path, selected, err := win32.SelectFolderWithTitle(app.hwnd, app.settings.Capture.SaveDir, app.texts.Text("media.folder.prompt"))
 		if err != nil {
-			app.captureStatus = "选择截图目录失败：" + err.Error()
+			app.captureStatus = fmt.Sprintf(app.texts.Text("media.status.folderFailed"), err)
 		} else if selected {
-			app.settings.Capture.SaveDir = app.portableCapturePath(path)
-			if err := app.captureManager.Configure(app.runtimeCaptureConfig()); err != nil {
-				app.captureStatus = "截图目录无效：" + err.Error()
-			} else {
-				app.captureStatus = "截图目录已设置：" + path
-				app.saveMediaSettings()
+			next := app.settings.Capture
+			next.SaveDir = app.portableCapturePath(path)
+			if app.commitCaptureSettings(next) {
+				app.captureStatus = fmt.Sprintf(app.texts.Text("media.status.folderSet"), path)
 			}
 		}
 	case y >= sy(370) && y < sy(414):
-		app.settings.Overlay.Enabled = !app.settings.Overlay.Enabled
-		app.saveMediaSettings()
-		app.reconcileCaptureOverlay(true)
-	case y >= sy(420) && y < sy(464):
-		settings := &app.settings.Overlay
-		switch {
-		case settings.ShowFPS && settings.ShowCPU && settings.ShowGPU:
-			settings.ShowCPU, settings.ShowGPU = false, false
-		case settings.ShowFPS && !settings.ShowCPU && !settings.ShowGPU:
-			settings.ShowFPS, settings.ShowCPU, settings.ShowGPU = false, true, true
-		default:
-			settings.ShowFPS, settings.ShowCPU, settings.ShowGPU = true, true, true
+		next := app.settings.Overlay
+		next.Enabled = !next.Enabled
+		if app.commitOverlaySettings(next) {
+			app.reconcileCaptureOverlay(true)
 		}
-		app.saveMediaSettings()
-		app.reconcileCaptureOverlay(true)
+	case y >= sy(420) && y < sy(464):
+		next := app.settings.Overlay
+		switch {
+		case next.ShowFPS && next.ShowCPU && next.ShowGPU:
+			next.ShowCPU, next.ShowGPU = false, false
+		case next.ShowFPS && !next.ShowCPU && !next.ShowGPU:
+			next.ShowFPS, next.ShowCPU, next.ShowGPU = false, true, true
+		default:
+			next.ShowFPS, next.ShowCPU, next.ShowGPU = true, true, true
+		}
+		if app.commitOverlaySettings(next) {
+			app.reconcileCaptureOverlay(true)
+		}
 	case y >= sy(470) && y < sy(514):
+		next := app.settings.Overlay
 		presets := [][2]int{{16, 16}, {16, 120}, {300, 16}}
 		index := 0
 		for i, preset := range presets {
-			if app.settings.Overlay.OffsetX == preset[0] && app.settings.Overlay.OffsetY == preset[1] {
+			if next.OffsetX == preset[0] && next.OffsetY == preset[1] {
 				index = (i + 1) % len(presets)
 				break
 			}
 		}
-		app.settings.Overlay.OffsetX, app.settings.Overlay.OffsetY = presets[index][0], presets[index][1]
-		app.saveMediaSettings()
-		app.reconcileCaptureOverlay(true)
+		next.OffsetX, next.OffsetY = presets[index][0], presets[index][1]
+		if app.commitOverlaySettings(next) {
+			app.reconcileCaptureOverlay(true)
+		}
 	}
 	win32.Invalidate(app.hwnd)
 }
@@ -1429,19 +1550,11 @@ func (app *application) paintMedia(dc win32.HDC, client win32.Rect, left int32) 
 		rect.Right -= win32.Scale(12, app.dpi)
 		win32.DrawText(dc, text, &rect, win32.DT_LEFT|win32.DT_VCENTER|win32.DT_SINGLELINE|win32.DT_END_ELLIPSIS)
 	}
-	captureState := "停用"
-	if app.settings.Capture.Enabled {
-		captureState = "启用"
-	}
-	draw("游戏窗口截图："+captureState+"    单击切换", row(170, 214, activeBrush), win32.Color(235, 238, 248))
-	draw("全局截图键："+app.settings.Capture.HotkeyString()+"    单击切换安全预设", row(220, 264, buttonBrush), win32.Color(225, 229, 242))
-	draw("立即截取已核验游戏窗口", row(270, 314, buttonBrush), win32.Color(225, 229, 242))
-	draw("保存目录："+app.settings.Capture.SaveDir, row(320, 364, buttonBrush), win32.Color(190, 197, 216))
-	overlayState := "停用"
-	if app.settings.Overlay.Enabled {
-		overlayState = "启用"
-	}
-	draw("性能覆盖层："+overlayState+"    单击切换", row(370, 414, activeBrush), win32.Color(235, 238, 248))
+	draw(fmt.Sprintf(app.texts.Text("media.capture"), onOffText(app.texts.Language(), app.settings.Capture.Enabled)), row(170, 214, activeBrush), win32.Color(235, 238, 248))
+	draw(fmt.Sprintf(app.texts.Text("media.hotkey"), app.settings.Capture.HotkeyString()), row(220, 264, buttonBrush), win32.Color(225, 229, 242))
+	draw(app.texts.Text("media.captureNow"), row(270, 314, buttonBrush), win32.Color(225, 229, 242))
+	draw(fmt.Sprintf(app.texts.Text("media.saveDir"), app.settings.Capture.SaveDir), row(320, 364, buttonBrush), win32.Color(190, 197, 216))
+	draw(fmt.Sprintf(app.texts.Text("media.overlay"), onOffText(app.texts.Language(), app.settings.Overlay.Enabled)), row(370, 414, activeBrush), win32.Color(235, 238, 248))
 	metrics := []string{}
 	if app.settings.Overlay.ShowFPS {
 		metrics = append(metrics, "FPS")
@@ -1452,9 +1565,9 @@ func (app *application) paintMedia(dc win32.HDC, client win32.Rect, left int32) 
 	if app.settings.Overlay.ShowGPU {
 		metrics = append(metrics, "GPU")
 	}
-	draw("显示指标："+strings.Join(metrics, " / ")+"    单击切换组合", row(420, 464, buttonBrush), win32.Color(225, 229, 242))
-	draw(fmt.Sprintf("覆盖层偏移：X %d · Y %d    单击切换预设", app.settings.Overlay.OffsetX, app.settings.Overlay.OffsetY), row(470, 514, buttonBrush), win32.Color(225, 229, 242))
-	statsText := fmt.Sprintf("实时：FPS %s · CPU %s · GPU %s", metricValue(app.overlayStats.FPS, app.overlayStats.FPSValid), metricValue(app.overlayStats.CPU, app.overlayStats.CPUValid), metricValue(app.overlayStats.GPU, app.overlayStats.GPUValid))
+	draw(fmt.Sprintf(app.texts.Text("media.metrics"), strings.Join(metrics, " / ")), row(420, 464, buttonBrush), win32.Color(225, 229, 242))
+	draw(fmt.Sprintf(app.texts.Text("media.offset"), app.settings.Overlay.OffsetX, app.settings.Overlay.OffsetY), row(470, 514, buttonBrush), win32.Color(225, 229, 242))
+	statsText := fmt.Sprintf(app.texts.Text("media.realtime"), metricValue(app.overlayStats.FPS, app.overlayStats.FPSValid), metricValue(app.overlayStats.CPU, app.overlayStats.CPUValid), metricValue(app.overlayStats.GPU, app.overlayStats.GPUValid))
 	draw(statsText, row(526, 566, cardBrush), win32.Color(166, 174, 197))
 	status := app.captureStatus + "  |  " + app.overlayStatus
 	draw(status, row(572, 612, cardBrush), win32.Color(126, 136, 160))
@@ -1819,6 +1932,7 @@ func (app *application) savePluginCatalogURL() {
 		return
 	}
 	app.settings = settings
+	app.publishCPUWarningConfig()
 	if normalized.CatalogURL == "" {
 		app.pluginCatalog = plugins.Catalog{}
 		app.pluginCatalogPage = plugins.CatalogPage{}
@@ -2287,6 +2401,242 @@ func (app *application) paintPluginStore(dc win32.HDC, client win32.Rect, left i
 	draw(app.pluginStatus, row(570, 614, cardBrush), win32.Color(145, 154, 180))
 }
 
+func (app *application) saveShellSettings(next shellconfig.Config) bool {
+	normalized, err := next.Normalized()
+	if err != nil {
+		app.shellStatus = err.Error()
+		return false
+	}
+	settings := app.settings
+	settings.Shell = normalized
+	if err := config.Save(app.layout.Config, settings); err != nil {
+		app.shellStatus = app.texts.Text("settings.status.saveFailed") + err.Error()
+		return false
+	}
+	app.settings = settings
+	app.shellStatus = app.texts.Text("settings.status.saved")
+	return true
+}
+
+func (app *application) applyProcessPriority() error {
+	priority := uint32(win32.NORMAL_PRIORITY_CLASS)
+	switch app.settings.Shell.ProcessPriority {
+	case shellconfig.PriorityBelowNormal:
+		priority = win32.BELOW_NORMAL_PRIORITY_CLASS
+	case shellconfig.PriorityAboveNormal:
+		priority = win32.ABOVE_NORMAL_PRIORITY_CLASS
+	}
+	return win32.SetCurrentProcessPriority(priority)
+}
+
+func (app *application) publishCPUWarningConfig() {
+	app.cpuWarning.Store(&cpuWarningConfig{
+		Enabled:    app.settings.Shell.CPUWarningEnabled,
+		Threshold:  float64(app.settings.Shell.CPUWarningThreshold),
+		DurationMS: app.settings.Shell.CPUWarningDurationMS,
+	})
+}
+
+func (app *application) settingsClick(y int) {
+	sy := func(value int32) int { return int(app.pluginContentY(value)) }
+	switch {
+	case y >= sy(170) && y < sy(214):
+		languages := []string{shellconfig.LanguageSystem, shellconfig.LanguageZH, shellconfig.LanguageEN}
+		index := 0
+		for i, value := range languages {
+			if app.settings.Shell.Language == value {
+				index = (i + 1) % len(languages)
+				break
+			}
+		}
+		next := app.settings.Shell
+		next.Language = languages[index]
+		if app.saveShellSettings(next) {
+			app.texts = localization.New(localization.Language(app.settings.Shell.Language), win32.UserDefaultLocaleName())
+			win32.SetWindowText(app.hwnd, app.texts.Text("app.title")+" "+app.build.Version)
+			app.addTrayIcon()
+		}
+	case y >= sy(220) && y < sy(264):
+		next := app.settings.Shell
+		if next.Theme == shellconfig.ThemeDark {
+			next.Theme = shellconfig.ThemeSystem
+		} else {
+			next.Theme = shellconfig.ThemeDark
+		}
+		if app.saveShellSettings(next) {
+			app.refreshTheme()
+		}
+	case y >= sy(270) && y < sy(314):
+		next := app.settings.Shell
+		next.MinimizeToTray = !next.MinimizeToTray
+		app.saveShellSettings(next)
+	case y >= sy(320) && y < sy(364):
+		next := app.settings.Shell
+		next.RememberWindowSize = !next.RememberWindowSize
+		app.saveShellSettings(next)
+	case y >= sy(370) && y < sy(414):
+		next := app.settings.Shell
+		next.EnforceMinimumSize = !next.EnforceMinimumSize
+		app.saveShellSettings(next)
+	case y >= sy(420) && y < sy(464):
+		priorities := []string{shellconfig.PriorityBelowNormal, shellconfig.PriorityNormal, shellconfig.PriorityAboveNormal}
+		index := 0
+		for i, value := range priorities {
+			if app.settings.Shell.ProcessPriority == value {
+				index = (i + 1) % len(priorities)
+				break
+			}
+		}
+		next := app.settings.Shell
+		next.ProcessPriority = priorities[index]
+		previous := app.settings.Shell.ProcessPriority
+		app.settings.Shell.ProcessPriority = next.ProcessPriority
+		if err := app.applyProcessPriority(); err != nil {
+			app.settings.Shell.ProcessPriority = previous
+			app.shellStatus = "Apply process priority failed: " + err.Error()
+		} else if !app.saveShellSettings(next) {
+			app.settings.Shell.ProcessPriority = previous
+			_ = app.applyProcessPriority()
+		}
+	case y >= sy(470) && y < sy(514):
+		next := app.settings.Shell
+		next.CPUWarningEnabled = !next.CPUWarningEnabled
+		app.saveShellSettings(next)
+	case y >= sy(520) && y < sy(564):
+		app.startDiagnosticExport()
+	}
+	win32.Invalidate(app.hwnd)
+}
+
+func (app *application) paintSettings(dc win32.HDC, client win32.Rect, left int32) {
+	cardBrush := win32.CreateSolidBrush(win32.Color(25, 29, 39))
+	defer win32.DeleteObject(uintptr(cardBrush))
+	buttonBrush := win32.CreateSolidBrush(win32.Color(35, 40, 54))
+	defer win32.DeleteObject(uintptr(buttonBrush))
+	accentBrush := win32.CreateSolidBrush(win32.Color(52, 66, 112))
+	defer win32.DeleteObject(uintptr(accentBrush))
+	right := client.Right - win32.Scale(42, app.dpi)
+	row := func(top, bottom int32, brush win32.HBRUSH) win32.Rect {
+		rect := win32.Rect{Left: left, Top: app.pluginContentY(top), Right: right, Bottom: app.pluginContentY(bottom)}
+		win32.FillRect(dc, &rect, brush)
+		return rect
+	}
+	draw := func(value string, rect win32.Rect, color uint32) {
+		win32.SetTextColor(dc, color)
+		rect.Left += win32.Scale(18, app.dpi)
+		rect.Right -= win32.Scale(12, app.dpi)
+		win32.DrawText(dc, value, &rect, win32.DT_LEFT|win32.DT_VCENTER|win32.DT_SINGLELINE|win32.DT_END_ELLIPSIS)
+	}
+	languageKey := map[string]string{shellconfig.LanguageSystem: "settings.language.system", shellconfig.LanguageZH: "settings.language.zh", shellconfig.LanguageEN: "settings.language.en"}[app.settings.Shell.Language]
+	draw(app.texts.Text("settings.language")+"："+app.texts.Text(languageKey), row(170, 214, accentBrush), win32.Color(235, 238, 248))
+	draw(app.texts.Text("settings.theme")+"："+app.texts.Text("settings.theme."+app.settings.Shell.Theme), row(220, 264, buttonBrush), win32.Color(225, 229, 242))
+	draw(app.texts.Text("settings.tray")+"："+onOffText(app.texts.Language(), app.settings.Shell.MinimizeToTray), row(270, 314, buttonBrush), win32.Color(225, 229, 242))
+	draw(app.texts.Text("settings.rememberWindow")+"："+onOffText(app.texts.Language(), app.settings.Shell.RememberWindowSize), row(320, 364, buttonBrush), win32.Color(225, 229, 242))
+	draw(app.texts.Text("settings.minimumSize")+"："+onOffText(app.texts.Language(), app.settings.Shell.EnforceMinimumSize), row(370, 414, buttonBrush), win32.Color(225, 229, 242))
+	priorityKey := map[string]string{shellconfig.PriorityBelowNormal: "settings.priority.below", shellconfig.PriorityNormal: "settings.priority.normal", shellconfig.PriorityAboveNormal: "settings.priority.above"}[app.settings.Shell.ProcessPriority]
+	draw(app.texts.Text("settings.priority")+"："+app.texts.Text(priorityKey), row(420, 464, buttonBrush), win32.Color(225, 229, 242))
+	draw(fmt.Sprintf("%s：%s · %d%% / %.0fs", app.texts.Text("settings.cpuWarning"), onOffText(app.texts.Language(), app.settings.Shell.CPUWarningEnabled), app.settings.Shell.CPUWarningThreshold, float64(app.settings.Shell.CPUWarningDurationMS)/1000), row(470, 514, buttonBrush), win32.Color(225, 229, 242))
+	diagnosticText := app.texts.Text("settings.diagnostics")
+	if app.diagnosticBusy {
+		diagnosticText = app.texts.Text("settings.status.exporting")
+	}
+	draw(diagnosticText, row(520, 564, buttonBrush), win32.Color(225, 229, 242))
+	draw(fmt.Sprintf("%s · v%s · %s · %s b5a050ebd319", app.texts.Text("settings.about"), app.build.Version, app.build.Commit, app.texts.Text("settings.upstream")), row(570, 614, cardBrush), win32.Color(166, 174, 197))
+	draw(app.shellStatus, row(620, 660, cardBrush), win32.Color(145, 154, 180))
+}
+
+func onOffText(language localization.Language, enabled bool) string {
+	texts := localization.New(language, "")
+	if enabled {
+		return texts.Text("common.on")
+	}
+	return texts.Text("common.off")
+}
+
+func (app *application) refreshTheme() {
+	app.palette = uitheme.Current(app.settings.Shell.Theme)
+	win32.SetColorTransform(app.palette.Map)
+	if app.editBrush != 0 {
+		win32.DeleteObject(uintptr(app.editBrush))
+	}
+	app.editBrush = win32.CreateSolidBrush(win32.Color(25, 29, 39))
+	for _, control := range []win32.HWND{app.customArgumentsEdit, app.pluginAliasEdit, app.pluginCatalogEdit, app.pluginSearchEdit} {
+		if control != 0 {
+			win32.SetControlDarkTheme(control, app.palette.Dark)
+			win32.Invalidate(control)
+		}
+	}
+	if app.hwnd != 0 {
+		win32.SetDarkTitleBar(app.hwnd, app.palette.Dark)
+		win32.Invalidate(app.hwnd)
+	}
+}
+
+func (app *application) startDiagnosticExport() {
+	if app.diagnosticBusy {
+		return
+	}
+	directory, selected, err := win32.SelectFolderWithTitle(app.hwnd, app.layout.Root, app.texts.Text("settings.diagnostics.prompt"))
+	if err != nil {
+		app.shellStatus = app.texts.Text("settings.status.exportFailed") + err.Error()
+		return
+	}
+	if !selected {
+		return
+	}
+	destination := filepath.Join(directory, "genshin-tools-diagnostics-"+time.Now().Format("20060102-150405")+".json")
+	resources := app.lastSnap.Resources
+	input := diagnostics.ExportInput{
+		Build:          app.build,
+		UpstreamCommit: "b5a050ebd319341bddc4189491c90c22162d33fa",
+		MonitorCount:   win32.MonitorCount(),
+		DPI:            app.dpi,
+		Resources: diagnostics.ResourceReport{
+			CPUPercent: app.lastSnap.CPUPercent,
+			Goroutines: runtime.NumGoroutine(),
+			Threads:    resources.Threads,
+			Handles:    resources.Handles,
+			USER:       resources.USER,
+			GDI:        resources.GDI,
+		},
+		Config: diagnostics.ConfigSummary{
+			SchemaVersion: app.settings.SchemaVersion,
+			Language:      app.settings.Shell.Language,
+			Theme:         app.settings.Shell.Theme,
+			Tray:          app.settings.Shell.MinimizeToTray,
+			RememberSize:  app.settings.Shell.RememberWindowSize,
+			MinimumSize:   app.settings.Shell.EnforceMinimumSize,
+			Priority:      app.settings.Shell.ProcessPriority,
+			CPUWarning:    app.settings.Shell.CPUWarningEnabled,
+			InputMode:     app.settings.Input.Mode.String(),
+			InputInterval: app.settings.Input.IntervalMS,
+			PluginCount:   len(app.pluginItems),
+			PluginSafe:    app.settings.Plugins.SafeMode,
+			Features: map[string]bool{
+				"capture":   app.settings.Capture.Enabled,
+				"overlay":   app.settings.Overlay.Enabled,
+				"injection": app.settings.Injection.Enabled,
+				"betterGI":  app.settings.LocalEnhance.BetterGIEnabled,
+			},
+		},
+		LogPath: filepath.Join(app.layout.Logs, "genshin-tools.log"),
+	}
+	app.diagnosticBusy = true
+	app.shellStatus = app.texts.Text("settings.status.exporting")
+	app.tasks.Run(func(ctx context.Context, _ uint64) {
+		var memory runtime.MemStats
+		runtime.ReadMemStats(&memory)
+		input.Resources.HeapBytes = memory.HeapAlloc
+		exportErr := diagnostics.Export(destination, input)
+		select {
+		case <-ctx.Done():
+			return
+		case app.diagnosticUpdates <- diagnosticUpdate{path: destination, err: exportErr}:
+			win32.PostMessage(app.hwnd, messageDiagnostics, 0, 0)
+		}
+	})
+}
+
 func (app *application) stopInputForSystemEvent(reason string) {
 	if app.inputNative == nil {
 		return
@@ -2425,14 +2775,14 @@ func (app *application) paintInput(dc win32.HDC, client win32.Rect, left int32) 
 	if config.Enabled {
 		toggleBrush = greenBrush
 	}
-	action := "启用"
+	action := app.texts.Text("common.enable")
 	if config.Enabled {
-		action = "禁用"
+		action = app.texts.Text("common.disable")
 	}
-	draw(fmt.Sprintf("输入增强：%s    单击%s", inputStateText(snapshot.State), action), row(170, 216, toggleBrush), win32.Color(235, 238, 248))
+	draw(fmt.Sprintf(app.texts.Text("input.toggle"), inputStateText(app.texts, snapshot.State), action), row(170, 216, toggleBrush), win32.Color(235, 238, 248))
 
 	modeWidth := win32.Scale(132, app.dpi)
-	modeNames := []string{"键盘连按", "左键连点", "右键连点"}
+	modeNames := []string{app.texts.Text("input.mode.keyboard"), app.texts.Text("input.mode.mouseLeft"), app.texts.Text("input.mode.mouseRight")}
 	for index, name := range modeNames {
 		rect := win32.Rect{Left: left + int32(index)*modeWidth, Top: win32.Scale(226, app.dpi), Right: left + int32(index+1)*modeWidth - win32.Scale(8, app.dpi), Bottom: win32.Scale(266, app.dpi)}
 		brush := buttonBrush
@@ -2443,46 +2793,47 @@ func (app *application) paintInput(dc win32.HDC, client win32.Rect, left int32) 
 		draw(name, rect, win32.Color(225, 229, 242))
 	}
 	if config.Mode == input.ModeKeyboard {
-		draw(recordLabel("触发键", config.TriggerKey, app.recording == 1), row(276, 316, buttonBrush), win32.Color(225, 229, 242))
-		draw(recordLabel("输出键", config.OutputKey, app.recording == 2), row(326, 366, buttonBrush), win32.Color(225, 229, 242))
+		draw(recordLabel(app.texts, "input.key.trigger", config.TriggerKey, app.recording == 1), row(276, 316, buttonBrush), win32.Color(225, 229, 242))
+		draw(recordLabel(app.texts, "input.key.output", config.OutputKey, app.recording == 2), row(326, 366, buttonBrush), win32.Color(225, 229, 242))
 	} else {
-		draw("触发方式：按住对应物理鼠标键", row(276, 366, cardBrush), win32.Color(166, 174, 197))
+		draw(app.texts.Text("input.mouseTrigger"), row(276, 366, cardBrush), win32.Color(166, 174, 197))
 	}
-	draw(recordLabel("全局停止键", config.StopKey, app.recording == 3), row(376, 416, buttonBrush), win32.Color(225, 229, 242))
-	draw(fmt.Sprintf("－       间隔 %d ms       ＋", config.IntervalMS), row(426, 466, buttonBrush), win32.Color(225, 229, 242))
+	draw(recordLabel(app.texts, "input.key.stop", config.StopKey, app.recording == 3), row(376, 416, buttonBrush), win32.Color(225, 229, 242))
+	draw(fmt.Sprintf(app.texts.Text("input.interval"), config.IntervalMS), row(426, 466, buttonBrush), win32.Color(225, 229, 242))
 	visibleError := snapshot.LastError
 	if visibleError == "" {
 		visibleError = app.inputUIError
 	}
 	if visibleError != "" {
-		draw("错误："+visibleError, row(476, 516, cardBrush), win32.Color(255, 126, 126))
+		draw(fmt.Sprintf(app.texts.Text("input.error"), visibleError), row(476, 516, cardBrush), win32.Color(255, 126, 126))
 	} else {
-		draw(fmt.Sprintf("已输出 %d 组完整 down/up；重启后默认保持禁用", snapshot.OutputCount), row(476, 516, cardBrush), win32.Color(145, 154, 180))
+		draw(fmt.Sprintf(app.texts.Text("input.outputCount"), snapshot.OutputCount), row(476, 516, cardBrush), win32.Color(145, 154, 180))
 	}
 }
 
-func inputStateText(state input.State) string {
+func inputStateText(texts localization.Catalog, state input.State) string {
 	switch state {
 	case input.StateDisabled:
-		return "已禁用"
+		return texts.Text("input.state.disabled")
 	case input.StateArmed:
-		return "待触发"
+		return texts.Text("input.state.armed")
 	case input.StateRunning:
-		return "运行中"
+		return texts.Text("input.state.running")
 	case input.StateStopping:
-		return "停止中"
+		return texts.Text("input.state.stopping")
 	case input.StateFault:
-		return "故障"
+		return texts.Text("input.state.fault")
 	default:
-		return "未知"
+		return texts.Text("input.state.unknown")
 	}
 }
 
-func recordLabel(name string, key uint32, recording bool) string {
+func recordLabel(texts localization.Catalog, nameKey string, key uint32, recording bool) string {
+	name := texts.Text(nameKey)
 	if recording {
-		return name + "：请按下新按键…"
+		return fmt.Sprintf(texts.Text("input.record.pending"), name)
 	}
-	return fmt.Sprintf("%s：%s    单击录制", name, virtualKeyName(key))
+	return fmt.Sprintf(texts.Text("input.record.ready"), name, virtualKeyName(key))
 }
 
 func virtualKeyName(key uint32) string {
@@ -2505,7 +2856,7 @@ func (app *application) createLaunchControls() error {
 	win32.SetTextLimit(edit, 8192)
 	win32.SetCueBanner(edit, "自定义启动参数（可留空，例如 -force-d3d11）")
 	win32.SetControlFont(edit, app.fontBody)
-	win32.EnableDarkControl(edit)
+	win32.SetControlDarkTheme(edit, app.palette.Dark)
 	aliasEdit, err := win32.CreateControl("EDIT", "", win32.WS_CHILD|win32.WS_BORDER|win32.WS_TABSTOP|win32.ES_AUTOHSCROLL, 0, 0, 100, 32, app.hwnd, 2002, app.instance)
 	if err != nil {
 		return err
@@ -2514,7 +2865,7 @@ func (app *application) createLaunchControls() error {
 	win32.SetTextLimit(aliasEdit, 64)
 	win32.SetCueBanner(aliasEdit, "插件别名（留空恢复原名）")
 	win32.SetControlFont(aliasEdit, app.fontBody)
-	win32.EnableDarkControl(aliasEdit)
+	win32.SetControlDarkTheme(aliasEdit, app.palette.Dark)
 	catalogEdit, err := win32.CreateControl("EDIT", app.settings.Plugins.CatalogURL, win32.WS_CHILD|win32.WS_BORDER|win32.WS_TABSTOP|win32.ES_AUTOHSCROLL, 0, 0, 100, 32, app.hwnd, 2003, app.instance)
 	if err != nil {
 		return err
@@ -2523,7 +2874,7 @@ func (app *application) createLaunchControls() error {
 	win32.SetTextLimit(catalogEdit, 2048)
 	win32.SetCueBanner(catalogEdit, "HTTPS 插件目录 URL（留空则不联网）")
 	win32.SetControlFont(catalogEdit, app.fontBody)
-	win32.EnableDarkControl(catalogEdit)
+	win32.SetControlDarkTheme(catalogEdit, app.palette.Dark)
 	searchEdit, err := win32.CreateControl("EDIT", app.settings.Plugins.Search, win32.WS_CHILD|win32.WS_BORDER|win32.WS_TABSTOP|win32.ES_AUTOHSCROLL, 0, 0, 100, 32, app.hwnd, 2004, app.instance)
 	if err != nil {
 		return err
@@ -2532,7 +2883,7 @@ func (app *application) createLaunchControls() error {
 	win32.SetTextLimit(searchEdit, 128)
 	win32.SetCueBanner(searchEdit, "搜索插件名称、作者、描述或标签")
 	win32.SetControlFont(searchEdit, app.fontBody)
-	win32.EnableDarkControl(searchEdit)
+	win32.SetControlDarkTheme(searchEdit, app.palette.Dark)
 	app.layoutLaunchControls()
 	app.updateLaunchControlVisibility()
 	return nil
@@ -2684,9 +3035,9 @@ func (app *application) serverClick(_, y int) {
 	sy := func(value int32) int { return int(win32.Scale(value, app.dpi)) }
 	state := app.serverState
 	if state.Busy {
-		if y >= sy(270) && y < sy(314) {
+		if !state.Committing && y >= sy(270) && y < sy(314) {
 			app.tasks.Cancel(app.serverTask)
-			state.Status = "正在取消区服任务…"
+			state.Status = app.texts.Text("server.status.canceling")
 			app.serverState = state
 			win32.Invalidate(app.hwnd)
 		}
@@ -2706,7 +3057,7 @@ func (app *application) serverClick(_, y int) {
 		state.Transaction = nil
 		state.Plan = resources.RepairPlan{}
 		state.Confirm = false
-		state.Status = "切换方式已更改，请重新生成变更预览"
+		state.Status = app.texts.Text("server.status.modeChanged")
 		state.Error = ""
 		app.serverState = state
 	case y >= sy(220) && y < sy(264):
@@ -2727,7 +3078,7 @@ func (app *application) serverClick(_, y int) {
 		state.Transaction = nil
 		state.Plan = resources.RepairPlan{}
 		state.Confirm = false
-		state.Status = "目标已切换，请重新生成变更预览"
+		state.Status = app.texts.Text("server.status.targetChanged")
 		state.Error = ""
 		app.serverState = state
 	case y >= sy(270) && y < sy(314):
@@ -2735,12 +3086,12 @@ func (app *application) serverClick(_, y int) {
 		return
 	case y >= sy(320) && y < sy(364):
 		if state.Transaction == nil {
-			state.Error = "请先生成区服变更预览"
+			state.Error = app.texts.Text("server.error.needPreview")
 		} else if len(app.gameState.Running) > 0 {
-			state.Error = "游戏运行时不能切换区服"
+			state.Error = app.texts.Text("server.error.gameRunning")
 		} else if !state.Confirm {
 			state.Confirm = true
-			state.Status = "再次单击确认提交；所有替换和删除均有事务备份"
+			state.Status = app.texts.Text("server.status.confirm")
 			state.Error = ""
 		} else {
 			app.serverState = state
@@ -2754,12 +3105,12 @@ func (app *application) serverClick(_, y int) {
 
 func (app *application) startServerPlan() {
 	if app.gameState.Candidate == nil {
-		app.serverState.Error = "请先在游戏管理页选择有效游戏目录"
+		app.serverState.Error = app.texts.Text("server.error.selectGame")
 		win32.Invalidate(app.hwnd)
 		return
 	}
 	if !app.serverState.Advanced && app.gameState.Candidate.Server == game.ServerGlobal {
-		app.serverState.Error = "官服/B服快速切换仅适用于已识别的国服 YuanShen.exe"
+		app.serverState.Error = app.texts.Text("server.error.quickMainlandOnly")
 		win32.Invalidate(app.hwnd)
 		return
 	}
@@ -2768,13 +3119,14 @@ func (app *application) startServerPlan() {
 	if state.Transaction != nil {
 		_ = state.Transaction.Abort()
 	}
-	state.Busy, state.Confirm, state.Error = true, false, ""
-	state.Status = "正在读取官方渠道 SDK 清单并准备隔离文件…"
+	state.Busy, state.Committing, state.Confirm, state.Error = true, false, false, ""
+	state.Status = app.texts.Text("server.status.readingQuick")
 	if state.Advanced {
-		state.Status = "正在读取目标区服 Sophon 清单并准备完整差异；可能需要较长下载…"
+		state.Status = app.texts.Text("server.status.readingAdvanced")
 	}
 	state.Transaction = nil
 	app.serverState = state
+	texts := app.texts
 	app.serverTask = app.tasks.Run(func(ctx context.Context, id uint64) {
 		transaction, err := resources.NewTransaction(app.layout.Staging, root, fmt.Sprintf("server-%d", time.Now().UTC().UnixNano()))
 		if err == nil {
@@ -2793,13 +3145,13 @@ func (app *application) startServerPlan() {
 				_ = transaction.Abort()
 			}
 			if errors.Is(err, context.Canceled) {
-				state.Status, state.Error = "区服预览已取消；游戏文件未修改", ""
+				state.Status, state.Error = texts.Text("server.status.previewCanceled"), ""
 			} else {
-				state.Status, state.Error = "区服预览失败；游戏文件未修改", err.Error()
+				state.Status, state.Error = texts.Text("server.status.previewFailed"), err.Error()
 			}
 		} else {
 			state.Transaction = transaction
-			state.Status = fmt.Sprintf("预览完成：%d 项计划，确认前不会修改游戏目录", len(state.Plan.Items))
+			state.Status = fmt.Sprintf(texts.Text("server.status.previewComplete"), len(state.Plan.Items))
 		}
 		app.publishServer(id, state, false)
 	})
@@ -2807,16 +3159,17 @@ func (app *application) startServerPlan() {
 
 func (app *application) startServerCommit() {
 	state := app.serverState
-	state.Busy, state.Confirm, state.Error = true, false, ""
-	state.Status = "正在提交区服事务；失败将自动逆序回滚…"
+	state.Busy, state.Committing, state.Confirm, state.Error = true, true, false, ""
+	state.Status = app.texts.Text("server.status.committing")
 	app.serverState = state
+	texts := app.texts
 	app.serverTask = app.tasks.Run(func(_ context.Context, id uint64) {
 		err := state.Transaction.Commit(state.Plan)
-		state.Busy = false
+		state.Busy, state.Committing = false, false
 		if err != nil {
-			state.Status, state.Error = "区服切换失败；原配置和 SDK 已恢复", err.Error()
+			state.Status, state.Error = texts.Text("server.status.commitFailed"), err.Error()
 		} else {
-			state.Status = "区服切换完成"
+			state.Status = texts.Text("server.status.complete")
 			state.Transaction = nil
 			state.Plan = resources.RepairPlan{}
 		}
@@ -2844,27 +3197,31 @@ func (app *application) paintServer(dc win32.HDC, client win32.Rect, left int32)
 		win32.DrawText(dc, text, &rect, win32.DT_LEFT|win32.DT_VCENTER|win32.DT_SINGLELINE|win32.DT_END_ELLIPSIS)
 	}
 	state := app.serverState
-	mode := "官服/B服快速切换"
+	mode := app.texts.Text("server.mode.quick")
 	if state.Advanced {
-		mode = "国服/国际服高级转换"
+		mode = app.texts.Text("server.mode.advanced")
 	}
-	draw("方式："+mode+"    单击切换", row(170, 214, accentBrush), win32.Color(235, 238, 248))
-	target := state.Target.String()
+	draw(fmt.Sprintf(app.texts.Text("server.mode"), mode), row(170, 214, accentBrush), win32.Color(235, 238, 248))
+	target := quickServerText(app.texts, state.Target)
 	if state.Advanced {
-		target = state.AdvancedTarget.String()
+		target = advancedServerText(app.texts, state.AdvancedTarget)
 	}
-	draw("目标："+target+"    单击切换", row(220, 264, accentBrush), win32.Color(235, 238, 248))
-	planText := "生成变更预览"
+	draw(fmt.Sprintf(app.texts.Text("server.target"), target), row(220, 264, accentBrush), win32.Color(235, 238, 248))
+	planText := app.texts.Text("server.plan")
 	if state.Busy {
-		planText = "取消当前区服任务"
+		if state.Committing {
+			planText = app.texts.Text("server.commit.inProgress")
+		} else {
+			planText = app.texts.Text("server.cancel")
+		}
 	}
 	draw(planText, row(270, 314, buttonBrush), win32.Color(225, 229, 242))
-	commit := "提交切换（需要先生成预览）"
+	commit := app.texts.Text("server.commit.needPlan")
 	if state.Transaction != nil {
-		commit = fmt.Sprintf("提交 %d 项变更", len(state.Plan.Items))
+		commit = fmt.Sprintf(app.texts.Text("server.commit.count"), len(state.Plan.Items))
 	}
 	if state.Confirm {
-		commit = "再次单击确认事务提交"
+		commit = app.texts.Text("server.commit.confirm")
 	}
 	draw(commit, row(320, 364, buttonBrush), win32.Color(225, 229, 242))
 	status, color := state.Status, win32.Color(145, 154, 180)
@@ -2885,28 +3242,46 @@ func (app *application) paintServer(dc win32.HDC, client win32.Rect, left int32)
 				continue
 			}
 		}
-		draw(fmt.Sprintf("安装/替换 %d · 改名 %d · 可回滚删除 %d · 下载 %s", installs, moves, deletes, formatBytes(uint64(state.Plan.DownloadBytes))), row(426, 470, cardBrush), win32.Color(190, 197, 216))
+		draw(fmt.Sprintf(app.texts.Text("server.planSummary"), installs, moves, deletes, formatBytes(uint64(state.Plan.DownloadBytes))), row(426, 470, cardBrush), win32.Color(190, 197, 216))
 	}
-	draw("高级转换会先校验并下载目标差异，再统一提交目录/EXE 改名、替换和配置。", row(482, 526, cardBrush), win32.Color(166, 174, 197))
-	draw("不会清空整个 Plugins；任一步失败均按反向日志恢复原区服布局。", row(532, 576, cardBrush), win32.Color(126, 136, 160))
+	draw(app.texts.Text("server.advancedInfo"), row(482, 526, cardBrush), win32.Color(166, 174, 197))
+	draw(app.texts.Text("server.rollbackInfo"), row(532, 576, cardBrush), win32.Color(126, 136, 160))
 }
 
-func (app *application) saveLocalEnhance() bool {
-	if err := config.Save(app.layout.Config, app.settings); err != nil {
-		app.localStatus = "保存设置失败：" + err.Error()
+func quickServerText(texts localization.Catalog, server localenhance.QuickServer) string {
+	if server == localenhance.QuickBilibili {
+		return texts.Text("server.target.bilibili")
+	}
+	return texts.Text("server.target.official")
+}
+
+func advancedServerText(texts localization.Catalog, server localenhance.AdvancedServer) string {
+	if server == localenhance.AdvancedGlobal {
+		return texts.Text("server.target.global")
+	}
+	return texts.Text("server.target.official")
+}
+
+func (app *application) saveLocalEnhance(next config.LocalEnhanceConfig) bool {
+	settings := app.settings
+	settings.LocalEnhance = next
+	if err := config.Save(app.layout.Config, settings); err != nil {
+		app.localStatus = fmt.Sprintf(app.texts.Text("local.status.saveFailed"), err)
 		return false
 	}
+	app.settings = settings
 	return true
 }
 
 func (app *application) localEnhanceClick(_, y int) {
 	sy := func(value int32) int { return int(win32.Scale(value, app.dpi)) }
-	settings := &app.settings.LocalEnhance
+	settings := app.settings.LocalEnhance
 	switch {
 	case y >= sy(170) && y < sy(214):
 		settings.HDR.Enabled = !settings.HDR.Enabled
-		app.localStatus = "HDR 目标状态已更改；单击“应用 HDR”后写入"
-		app.saveLocalEnhance()
+		if app.saveLocalEnhance(settings) {
+			app.localStatus = app.texts.Text("local.status.hdrTargetChanged")
+		}
 	case y >= sy(220) && y < sy(258):
 		presets := []localenhance.HDRConfig{
 			{Enabled: settings.HDR.Enabled, MaxLuminance: 1000, SceneLuminance: 300, UILuminance: 350},
@@ -2921,56 +3296,62 @@ func (app *application) localEnhanceClick(_, y int) {
 			}
 		}
 		settings.HDR = presets[index]
-		app.localStatus = "HDR 亮度预设已更改，尚未写入注册表"
-		app.saveLocalEnhance()
+		if app.saveLocalEnhance(settings) {
+			app.localStatus = app.texts.Text("local.status.hdrPresetChanged")
+		}
 	case y >= sy(264) && y < sy(302):
 		if app.gameState.Candidate == nil || app.gameState.Candidate.Server == game.ServerGlobal {
-			app.localStatus = "HDR 注册表适配仅用于已识别的国服目录"
+			app.localStatus = app.texts.Text("local.status.hdrMainlandOnly")
 			break
 		}
 		backup := app.layout.Data + string(os.PathSeparator) + "hdr-registry-backup.json"
 		if err := localenhance.ApplyHDRWithBackup(localenhance.NativeRegistry{}, settings.HDR, backup); err != nil {
-			app.localStatus = "应用 HDR 失败，旧值已保留或恢复：" + err.Error()
+			app.localStatus = fmt.Sprintf(app.texts.Text("local.status.hdrApplyFailed"), err)
 		} else {
-			app.localStatus = "HDR 已应用；原始注册表值已备份"
+			app.localStatus = app.texts.Text("local.status.hdrApplied")
 		}
 	case y >= sy(308) && y < sy(346):
 		backup := app.layout.Data + string(os.PathSeparator) + "hdr-registry-backup.json"
 		if err := localenhance.RestoreHDRBackup(localenhance.NativeRegistry{}, backup); err != nil {
-			app.localStatus = "恢复 HDR 备份失败：" + err.Error()
+			app.localStatus = fmt.Sprintf(app.texts.Text("local.status.hdrRestoreFailed"), err)
 		} else {
 			if current, _, err := localenhance.ReadHDR(localenhance.NativeRegistry{}); err == nil {
 				settings.HDR = current
-				app.saveLocalEnhance()
+				if !app.saveLocalEnhance(settings) {
+					break
+				}
 			}
-			app.localStatus = "HDR 原始注册表值已恢复"
+			app.localStatus = app.texts.Text("local.status.hdrRestored")
 		}
 	case y >= sy(352) && y < sy(390):
 		initial := ""
 		if settings.StartupSoundPath != "" {
 			initial = filepath.Dir(settings.StartupSoundPath)
 		}
-		path, selected, err := win32.SelectWaveFile(app.hwnd, initial)
+		path, selected, err := win32.SelectWaveFileWithTitle(app.hwnd, initial, app.texts.Text("local.sound.prompt"))
 		if err != nil {
-			app.localStatus = err.Error()
+			app.localStatus = fmt.Sprintf(app.texts.Text("local.status.soundSelectFailed"), err)
 		} else if selected {
 			if err := localenhance.PlayStartupSound(path); err != nil {
-				app.localStatus = "WAV 试听失败：" + err.Error()
+				app.localStatus = fmt.Sprintf(app.texts.Text("local.status.soundPreviewFailed"), err)
 			} else {
 				settings.StartupSoundPath = path
 				settings.StartupSoundEnabled = true
-				app.saveLocalEnhance()
-				app.localStatus = "启动声音已选择并试听"
+				if app.saveLocalEnhance(settings) {
+					app.localStatus = app.texts.Text("local.status.soundSelected")
+				}
 			}
 		}
 	case y >= sy(396) && y < sy(434):
 		settings.StartupSoundEnabled = !settings.StartupSoundEnabled
-		app.saveLocalEnhance()
-		app.localStatus = "启动声音已" + map[bool]string{true: "启用", false: "停用"}[settings.StartupSoundEnabled]
+		if app.saveLocalEnhance(settings) {
+			app.localStatus = fmt.Sprintf(app.texts.Text("local.status.soundEnabled"), onOffText(app.texts.Language(), settings.StartupSoundEnabled))
+		}
 	case y >= sy(440) && y < sy(478):
 		settings.BetterGIEnabled = !settings.BetterGIEnabled
-		app.saveLocalEnhance()
-		app.localStatus = "BetterGI 联动已" + map[bool]string{true: "启用", false: "停用"}[settings.BetterGIEnabled]
+		if app.saveLocalEnhance(settings) {
+			app.localStatus = fmt.Sprintf(app.texts.Text("local.status.betterGIEnabled"), onOffText(app.texts.Language(), settings.BetterGIEnabled))
+		}
 	case y >= sy(484) && y < sy(522):
 		delays := []int{0, 2000, 5000, 10000, 30000, 60000}
 		index := 0
@@ -2981,18 +3362,19 @@ func (app *application) localEnhanceClick(_, y int) {
 			}
 		}
 		settings.BetterGIDelayMS = delays[index]
-		app.saveLocalEnhance()
-		app.localStatus = "BetterGI 延迟已更新"
+		if app.saveLocalEnhance(settings) {
+			app.localStatus = app.texts.Text("local.status.betterGIDelay")
+		}
 	case y >= sy(528) && y < sy(566):
 		info, err := localenhance.AuditBetterGI()
 		if err != nil {
-			app.localStatus = "BetterGI 审计失败：" + err.Error()
+			app.localStatus = fmt.Sprintf(app.texts.Text("local.status.betterGIAuditFailed"), err)
 		} else if !info.Registered {
-			app.localStatus = "未发现 BetterGI URL Scheme；不会影响纯净启动"
+			app.localStatus = app.texts.Text("local.status.betterGINotFound")
 		} else if err := localenhance.StartBetterGI(); err != nil {
-			app.localStatus = "BetterGI 测试启动失败：" + err.Error()
+			app.localStatus = fmt.Sprintf(app.texts.Text("local.status.betterGIStartFailed"), err)
 		} else {
-			app.localStatus = "已向核验后的 BetterGI URL Scheme 发送启动请求"
+			app.localStatus = app.texts.Text("local.status.betterGIStarted")
 		}
 	}
 	win32.Invalidate(app.hwnd)
@@ -3018,19 +3400,19 @@ func (app *application) paintLocalEnhance(dc win32.HDC, client win32.Rect, left 
 		win32.DrawText(dc, text, &rect, win32.DT_LEFT|win32.DT_VCENTER|win32.DT_SINGLELINE|win32.DT_END_ELLIPSIS)
 	}
 	settings := app.settings.LocalEnhance
-	draw("HDR 强制状态："+map[bool]string{true: "开启", false: "关闭"}[settings.HDR.Enabled]+"    单击切换目标", row(170, 214, accentBrush), win32.Color(235, 238, 248))
-	draw(fmt.Sprintf("亮度：峰值 %d · 场景 %d · UI %d    单击切换安全预设", settings.HDR.MaxLuminance, settings.HDR.SceneLuminance, settings.HDR.UILuminance), row(220, 258, buttonBrush), win32.Color(225, 229, 242))
-	draw("应用 HDR（先备份，再写入）", row(264, 302, buttonBrush), win32.Color(225, 229, 242))
-	draw("恢复上一次 HDR 原始注册表值", row(308, 346, buttonBrush), win32.Color(225, 229, 242))
-	sound := valueOrUnknown(settings.StartupSoundPath)
-	draw("选择并试听 WAV："+sound, row(352, 390, buttonBrush), win32.Color(190, 197, 216))
-	draw("启动声音："+map[bool]string{true: "启用", false: "停用"}[settings.StartupSoundEnabled], row(396, 434, buttonBrush), win32.Color(190, 197, 216))
-	draw("BetterGI 协议联动："+map[bool]string{true: "启用", false: "停用"}[settings.BetterGIEnabled], row(440, 478, buttonBrush), win32.Color(190, 197, 216))
-	draw(fmt.Sprintf("BetterGI 启动延迟：%.1f 秒    单击切换", float64(settings.BetterGIDelayMS)/1000), row(484, 522, buttonBrush), win32.Color(190, 197, 216))
-	draw("审计并测试 BetterGI URL Scheme（不会按名称结束进程）", row(528, 566, buttonBrush), win32.Color(190, 197, 216))
+	draw(fmt.Sprintf(app.texts.Text("local.hdrState"), onOffText(app.texts.Language(), settings.HDR.Enabled)), row(170, 214, accentBrush), win32.Color(235, 238, 248))
+	draw(fmt.Sprintf(app.texts.Text("local.brightness"), settings.HDR.MaxLuminance, settings.HDR.SceneLuminance, settings.HDR.UILuminance), row(220, 258, buttonBrush), win32.Color(225, 229, 242))
+	draw(app.texts.Text("local.hdrApply"), row(264, 302, buttonBrush), win32.Color(225, 229, 242))
+	draw(app.texts.Text("local.hdrRestore"), row(308, 346, buttonBrush), win32.Color(225, 229, 242))
+	sound := localizedValueOrUnknown(app.texts, settings.StartupSoundPath)
+	draw(fmt.Sprintf(app.texts.Text("local.sound.select"), sound), row(352, 390, buttonBrush), win32.Color(190, 197, 216))
+	draw(fmt.Sprintf(app.texts.Text("local.sound.enabled"), onOffText(app.texts.Language(), settings.StartupSoundEnabled)), row(396, 434, buttonBrush), win32.Color(190, 197, 216))
+	draw(fmt.Sprintf(app.texts.Text("local.betterGI.enabled"), onOffText(app.texts.Language(), settings.BetterGIEnabled)), row(440, 478, buttonBrush), win32.Color(190, 197, 216))
+	draw(fmt.Sprintf(app.texts.Text("local.betterGI.delay"), float64(settings.BetterGIDelayMS)/1000), row(484, 522, buttonBrush), win32.Color(190, 197, 216))
+	draw(app.texts.Text("local.betterGI.audit"), row(528, 566, buttonBrush), win32.Color(190, 197, 216))
 	status := app.localStatus
 	if status == "" {
-		status = "本页操作失败不会阻止纯净游戏启动"
+		status = app.texts.Text("local.safety")
 	}
 	draw(status, row(572, 610, cardBrush), win32.Color(145, 154, 180))
 }
@@ -3040,7 +3422,7 @@ func (app *application) gameClick(x, y int) {
 	switch {
 	case y >= sy(170) && y < sy(214):
 		if app.gameState.Candidate == nil || app.launchEngine == nil || !app.syncLaunchConfig() {
-			app.launchUIError = "请先选择并完成游戏扫描"
+			app.launchUIError = app.texts.Text("game.status.selectFirst")
 			break
 		}
 		app.launchUIError = ""
@@ -3078,7 +3460,7 @@ func (app *application) gameClick(x, y int) {
 			if app.gameState.Scanning {
 				app.tasks.Cancel(app.gameTask)
 				app.gameState.Scanning = false
-				app.gameState.Status = "扫描已取消"
+				app.gameState.Status = app.texts.Text("game.status.scanCanceled")
 			} else {
 				app.startGameScan("")
 			}
@@ -3104,21 +3486,21 @@ func (app *application) gameClick(x, y int) {
 				app.settings.Game.CustomExecutable = candidate.ExeName
 			}
 			if err := config.Save(app.layout.Config, app.settings); err != nil {
-				app.gameState.Error = "保存游戏路径：" + err.Error()
+				app.gameState.Error = fmt.Sprintf(app.texts.Text("game.status.savePathFailed"), err)
 				win32.Invalidate(app.hwnd)
 				return
 			}
 			app.startGameScan(candidate.Root)
 		case 2:
 			if app.gameState.Candidate == nil || !app.syncLaunchConfig() {
-				app.shortcutStatus = "请先选择游戏"
+				app.shortcutStatus = app.texts.Text("game.status.selectGame")
 				break
 			}
-			path, err := launch.CreateDesktopShortcut("原神 - Genshin Tools", *app.gameState.Candidate, app.settings.Launch)
+			path, err := launch.CreateDesktopShortcut(app.texts.Text("game.shortcut.name"), *app.gameState.Candidate, app.settings.Launch)
 			if err != nil {
-				app.shortcutStatus = "快捷方式失败：" + err.Error()
+				app.shortcutStatus = fmt.Sprintf(app.texts.Text("game.status.shortcutFailed"), err)
 			} else {
-				app.shortcutStatus = "已创建：" + path
+				app.shortcutStatus = fmt.Sprintf(app.texts.Text("game.status.shortcutCreated"), path)
 			}
 		}
 	}
@@ -3129,11 +3511,12 @@ func (app *application) startGameScan(manualRoot string) {
 	if app.gameTask != 0 {
 		app.tasks.Cancel(app.gameTask)
 	}
-	app.gameState = gameViewState{Scanning: true, Status: "正在只读扫描本机游戏…"}
+	app.gameState = gameViewState{Scanning: true, Status: app.texts.Text("game.status.scanning")}
 	win32.Invalidate(app.hwnd)
 	gameSettings := app.settings.Game
+	texts := app.texts
 	taskID := app.tasks.Run(func(ctx context.Context, id uint64) {
-		state := gameViewState{Scanning: true, Status: "正在验证候选路径…"}
+		state := gameViewState{Scanning: true, Status: texts.Text("game.status.validating")}
 		publish := func() {
 			update := gameUpdate{taskID: id, state: state}
 			select {
@@ -3175,15 +3558,15 @@ func (app *application) startGameScan(manualRoot string) {
 			state.Scanning = false
 			state.Error = err.Error()
 			if state.CandidateCount > 1 {
-				state.Status = fmt.Sprintf("发现 %d 个安装，请手动选择游戏 EXE", state.CandidateCount)
+				state.Status = fmt.Sprintf(texts.Text("game.status.multiple"), state.CandidateCount)
 			} else {
-				state.Status = "未找到有效游戏安装"
+				state.Status = texts.Text("game.status.notFound")
 			}
 			publish()
 			return
 		}
 		state.Candidate = &candidate
-		state.Status = "正在计算目录大小（可取消）…"
+		state.Status = texts.Text("game.status.calculating")
 		publish()
 		total, skipped, sizeErr := game.DirectorySize(ctx, candidate.Root, func(progress game.SizeProgress) {
 			state.Size = progress
@@ -3197,7 +3580,7 @@ func (app *application) startGameScan(manualRoot string) {
 		if sizeErr != nil {
 			state.Error = sizeErr.Error()
 		}
-		state.Status = "只读扫描完成"
+		state.Status = texts.Text("game.status.complete")
 		state.Running, _ = game.RunningProcesses(candidate)
 		publish()
 
@@ -3235,34 +3618,34 @@ func (app *application) paintGame(dc win32.HDC, client win32.Rect, left int32) {
 		rect.Right -= win32.Scale(12, app.dpi)
 		win32.DrawText(dc, text, &rect, win32.DT_LEFT|win32.DT_VCENTER|win32.DT_SINGLELINE|win32.DT_END_ELLIPSIS)
 	}
-	launchText := "纯净启动游戏"
+	launchText := app.texts.Text("game.launch.clean")
 	if app.launchSnap.State == launch.StateStarting {
-		launchText = "正在启动…"
+		launchText = app.texts.Text("game.launch.starting")
 	} else if app.launchSnap.State == launch.StateRunning {
-		launchText = fmt.Sprintf("游戏运行中（本次 PID %d）", app.launchSnap.PID)
+		launchText = fmt.Sprintf(app.texts.Text("game.launch.running"), app.launchSnap.PID)
 	}
 	draw(launchText, row(170, 214, accentBrush), win32.Color(235, 238, 248))
-	draw("窗口模式："+app.settings.Launch.WindowMode.String()+"    单击切换", row(220, 258, buttonBrush), win32.Color(225, 229, 242))
-	resolution := "游戏默认"
+	draw(fmt.Sprintf(app.texts.Text("game.windowMode"), gameWindowModeText(app.texts, app.settings.Launch.WindowMode)), row(220, 258, buttonBrush), win32.Color(225, 229, 242))
+	resolution := app.texts.Text("game.window.default")
 	if app.settings.Launch.Width > 0 {
 		resolution = fmt.Sprintf("%d × %d", app.settings.Launch.Width, app.settings.Launch.Height)
 	}
-	draw("分辨率："+resolution+"    单击切换预设", row(264, 302, buttonBrush), win32.Color(225, 229, 242))
+	draw(fmt.Sprintf(app.texts.Text("game.resolution"), resolution), row(264, 302, buttonBrush), win32.Color(225, 229, 242))
 	midpoint := left + (right-left)/2
 	monitorRect := win32.Rect{Left: left, Top: win32.Scale(308, app.dpi), Right: midpoint - win32.Scale(4, app.dpi), Bottom: win32.Scale(346, app.dpi)}
 	postRect := win32.Rect{Left: midpoint + win32.Scale(4, app.dpi), Top: monitorRect.Top, Right: right, Bottom: monitorRect.Bottom}
 	win32.FillRect(dc, &monitorRect, buttonBrush)
 	win32.FillRect(dc, &postRect, buttonBrush)
-	monitor := "默认"
+	monitor := app.texts.Text("game.monitor.default")
 	if app.settings.Launch.Monitor > 0 {
-		monitor = fmt.Sprintf("显示器 %d", app.settings.Launch.Monitor)
+		monitor = fmt.Sprintf(app.texts.Text("game.monitor.number"), app.settings.Launch.Monitor)
 	}
-	postNames := []string{"保持启动器", "最小化到托盘", "启动后退出"}
-	draw("目标："+monitor, monitorRect, win32.Color(225, 229, 242))
-	draw("之后："+postNames[app.settings.Launch.PostBehavior], postRect, win32.Color(225, 229, 242))
+	postNames := []string{app.texts.Text("game.post.keep"), app.texts.Text("game.post.minimize"), app.texts.Text("game.post.exit")}
+	draw(fmt.Sprintf(app.texts.Text("game.target"), monitor), monitorRect, win32.Color(225, 229, 242))
+	draw(fmt.Sprintf(app.texts.Text("game.after"), postNames[app.settings.Launch.PostBehavior]), postRect, win32.Color(225, 229, 242))
 
 	actionWidth := (right - left) / 3
-	actions := []string{"重新扫描/取消", "选择游戏 EXE", "创建桌面快捷方式"}
+	actions := []string{app.texts.Text("game.action.scan"), app.texts.Text("game.action.select"), app.texts.Text("game.action.shortcut")}
 	for index, text := range actions {
 		rect := win32.Rect{Left: left + int32(index)*actionWidth, Top: win32.Scale(396, app.dpi), Right: left + int32(index+1)*actionWidth - win32.Scale(6, app.dpi), Bottom: win32.Scale(434, app.dpi)}
 		win32.FillRect(dc, &rect, buttonBrush)
@@ -3273,13 +3656,13 @@ func (app *application) paintGame(dc win32.HDC, client win32.Rect, left int32) {
 	status := state.Status
 	statusColor := win32.Color(145, 154, 180)
 	if app.launchUIError != "" {
-		status, statusColor = "启动错误："+app.launchUIError, win32.Color(255, 126, 126)
+		status, statusColor = fmt.Sprintf(app.texts.Text("game.error.launch"), app.launchUIError), win32.Color(255, 126, 126)
 	} else if app.shortcutStatus != "" {
 		status = app.shortcutStatus
 	} else if app.launchSnap.State == launch.StateExited {
-		status = fmt.Sprintf("游戏已退出，代码 %d；启动器可再次启动", app.launchSnap.ExitCode)
+		status = fmt.Sprintf(app.texts.Text("game.exited"), app.launchSnap.ExitCode)
 	} else if app.launchSnap.State == launch.StateFailed {
-		status, statusColor = "游戏进程错误："+app.launchSnap.LastError, win32.Color(255, 126, 126)
+		status, statusColor = fmt.Sprintf(app.texts.Text("game.error.process"), app.launchSnap.LastError), win32.Color(255, 126, 126)
 	} else if state.Error != "" {
 		status, statusColor = state.Error, win32.Color(255, 126, 126)
 	}
@@ -3288,17 +3671,45 @@ func (app *application) paintGame(dc win32.HDC, client win32.Rect, left int32) {
 		return
 	}
 	candidate := state.Candidate
-	draw("路径："+candidate.Root, row(482, 518, cardBrush), win32.Color(225, 229, 242))
-	draw(fmt.Sprintf("%s    版本 %s    %s", candidate.ExeName, valueOrUnknown(candidate.Version), candidate.Server.String()), row(524, 560, cardBrush), win32.Color(190, 197, 216))
-	running := "未运行"
+	draw(fmt.Sprintf(app.texts.Text("game.path"), candidate.Root), row(482, 518, cardBrush), win32.Color(225, 229, 242))
+	draw(fmt.Sprintf(app.texts.Text("game.identity"), candidate.ExeName, localizedValueOrUnknown(app.texts, candidate.Version), gameServerText(app.texts, candidate.Server)), row(524, 560, cardBrush), win32.Color(190, 197, 216))
+	running := app.texts.Text("game.running.none")
 	if len(state.Running) > 0 {
 		if state.Running[0].VerifiedPath {
-			running = fmt.Sprintf("运行中 PID %d（路径已核验）", state.Running[0].PID)
+			running = fmt.Sprintf(app.texts.Text("game.running.verified"), state.Running[0].PID)
 		} else {
-			running = fmt.Sprintf("可能运行 PID %d（仅名称匹配）", state.Running[0].PID)
+			running = fmt.Sprintf(app.texts.Text("game.running.possible"), state.Running[0].PID)
 		}
 	}
-	draw(fmt.Sprintf("%s · %d 文件 · 跳过 %d · %s", formatBytes(state.Size.Bytes), state.Size.Files, state.Skipped, running), row(566, 602, cardBrush), win32.Color(166, 174, 197))
+	draw(fmt.Sprintf(app.texts.Text("game.files"), formatBytes(state.Size.Bytes), state.Size.Files, state.Skipped, running), row(566, 602, cardBrush), win32.Color(166, 174, 197))
+}
+
+func gameWindowModeText(texts localization.Catalog, mode launch.WindowMode) string {
+	keys := []string{"game.window.default", "game.window.fullscreen", "game.window.windowed", "game.window.borderless"}
+	if int(mode) < 0 || int(mode) >= len(keys) {
+		return texts.Text("game.window.default")
+	}
+	return texts.Text(keys[mode])
+}
+
+func gameServerText(texts localization.Catalog, server game.Server) string {
+	key := "game.server.unknown"
+	switch server {
+	case game.ServerCNOfficial:
+		key = "game.server.official"
+	case game.ServerCNBilibili:
+		key = "game.server.bilibili"
+	case game.ServerGlobal:
+		key = "game.server.global"
+	}
+	return texts.Text(key)
+}
+
+func localizedValueOrUnknown(texts localization.Catalog, value string) string {
+	if strings.TrimSpace(value) == "" {
+		return texts.Text("common.unknown")
+	}
+	return value
 }
 
 func (app *application) resourceClick(_, y int) {
@@ -3307,7 +3718,7 @@ func (app *application) resourceClick(_, y int) {
 	if state.Busy {
 		if y >= sy(170) && y < sy(214) {
 			app.tasks.Cancel(app.resourceTask)
-			app.resourceState.Status = "正在取消资源任务…"
+			app.resourceState.Status = app.texts.Text("resource.status.canceling")
 			win32.Invalidate(app.hwnd)
 		}
 		return
@@ -3327,27 +3738,27 @@ func (app *application) resourceClick(_, y int) {
 		state.Language = languages[index]
 		state.HasPlan = false
 		state.Confirm = false
-		state.Status = "语音包已切换，请重新检查资源"
+		state.Status = app.texts.Text("resource.status.voiceChanged")
 		state.Error = ""
 		app.resourceState = state
 	case y >= sy(264) && y < sy(302):
 		state.PreDownload = !state.PreDownload
 		state.HasPlan = false
 		state.Confirm = false
-		state.Status = "资源分支已切换，请重新检查"
+		state.Status = app.texts.Text("resource.status.branchChanged")
 		state.Error = ""
 		app.resourceState = state
 	case y >= sy(308) && y < sy(352):
 		if !state.HasPlan {
-			state.Error = "请先生成修复计划"
+			state.Error = app.texts.Text("resource.error.needPlan")
 		} else if len(state.Plan.Changes()) == 0 && state.PreDownload {
-			state.Status = "当前文件均已通过校验，无需修复"
+			state.Status = app.texts.Text("resource.status.noChanges")
 			state.Error = ""
 		} else if len(app.gameState.Running) > 0 {
-			state.Error = "游戏运行时不能替换资源，请先退出游戏"
+			state.Error = app.texts.Text("resource.error.gameRunning")
 		} else if !state.Confirm {
 			state.Confirm = true
-			state.Status = "再次单击以确认下载并事务替换列出的文件"
+			state.Status = app.texts.Text("resource.status.confirm")
 			state.Error = ""
 		} else {
 			app.resourceState = state
@@ -3361,7 +3772,7 @@ func (app *application) resourceClick(_, y int) {
 
 func (app *application) startResourcePlan() {
 	if app.gameState.Candidate == nil {
-		app.resourceState.Error = "请先在游戏管理页选择游戏目录"
+		app.resourceState.Error = app.texts.Text("resource.error.selectGame")
 		win32.Invalidate(app.hwnd)
 		return
 	}
@@ -3369,8 +3780,9 @@ func (app *application) startResourcePlan() {
 	state := app.resourceState
 	state.Busy, state.Confirm, state.HasPlan = true, false, false
 	state.Error = ""
-	state.Status = "正在读取官方资源目录…"
+	state.Status = app.texts.Text("resource.status.reading")
 	app.resourceState = state
+	texts := app.texts
 	publish := func(id uint64, next resourceViewState, refresh bool) {
 		select {
 		case app.resourceUpdates <- resourceUpdate{taskID: id, state: next, refresh: refresh}:
@@ -3390,7 +3802,7 @@ func (app *application) startResourcePlan() {
 			branch := branches.Current
 			if state.PreDownload {
 				if branches.PreDownload == nil {
-					err = errors.New("官方当前没有开放预下载分支")
+					err = errors.New(texts.Text("resource.error.noPreload"))
 				} else {
 					branch = *branches.PreDownload
 				}
@@ -3405,27 +3817,27 @@ func (app *application) startResourcePlan() {
 			catalog, err = provider.FetchCatalog(ctx)
 		}
 		if err == nil {
-			state.Status = "正在校验在线 manifest…"
+			state.Status = texts.Text("resource.status.manifest")
 			publish(id, state, false)
 			state.Manifest, err = provider.LoadManifest(ctx, catalog, "game", state.Language)
 			state.Version = catalog.Version
 		}
 		if err == nil {
-			state.Status = "正在逐文件生成只读修复计划…"
+			state.Status = texts.Text("resource.status.planning")
 			publish(id, state, false)
 			state.Plan, err = resources.BuildRepairPlanContext(ctx, root, state.Manifest)
 		}
 		state.Busy = false
 		if err != nil {
 			if errors.Is(err, context.Canceled) {
-				state.Status, state.Error = "资源检查已取消", ""
+				state.Status, state.Error = texts.Text("resource.status.canceled"), ""
 			} else {
 				state.Error = err.Error()
-				state.Status = "资源检查失败，未修改游戏文件"
+				state.Status = texts.Text("resource.status.failed")
 			}
 		} else {
 			state.HasPlan = true
-			state.Status = fmt.Sprintf("计划完成：%d 个文件需下载或修复", len(state.Plan.Changes()))
+			state.Status = fmt.Sprintf(texts.Text("resource.status.planComplete"), len(state.Plan.Changes()))
 		}
 		publish(id, state, false)
 	})
@@ -3437,8 +3849,9 @@ func (app *application) startResourceApply() {
 	state.Busy = true
 	state.Confirm = false
 	state.Error = ""
-	state.Status = "正在准备隔离事务…"
+	state.Status = app.texts.Text("resource.status.preparing")
 	app.resourceState = state
+	texts := app.texts
 	publish := func(id uint64, next resourceViewState, refresh bool) {
 		select {
 		case app.resourceUpdates <- resourceUpdate{taskID: id, state: next, refresh: refresh}:
@@ -3460,7 +3873,7 @@ func (app *application) startResourceApply() {
 		changes := state.Manifest
 		changes.Files = state.Plan.Changes()
 		if err == nil && len(changes.Files) > 0 {
-			state.Status = "正在下载到 data/staging；正式文件保持不变"
+			state.Status = texts.Text("resource.status.downloading")
 			publish(id, state, false)
 			downloader := resources.NewDownloader()
 			downloader.OnProgress = func(progress resources.Progress) {
@@ -3473,10 +3886,10 @@ func (app *application) startResourceApply() {
 			err = transaction.MarkPreloaded()
 			state.Busy = false
 			if err != nil {
-				state.Status, state.Error = "预下载保存失败；正式文件未修改", err.Error()
+				state.Status, state.Error = texts.Text("resource.status.preloadFailed"), err.Error()
 			} else {
 				state.HasPlan = false
-				state.Status = "预下载已完整校验并保存在 data/staging；正式文件未修改"
+				state.Status = texts.Text("resource.status.preloaded")
 			}
 			publish(id, state, false)
 			return
@@ -3490,23 +3903,23 @@ func (app *application) startResourceApply() {
 			}
 		}
 		if err == nil {
-			state.Status = "下载已完整校验，正在提交事务…"
+			state.Status = texts.Text("resource.status.committing")
 			publish(id, state, false)
 			err = transaction.Commit(state.Plan)
 		}
 		state.Busy = false
 		if err != nil {
 			if errors.Is(err, context.Canceled) {
-				state.Status, state.Error = "资源任务已取消；正式文件未修改", ""
+				state.Status, state.Error = texts.Text("resource.status.taskCanceled"), ""
 			} else {
-				state.Status = "资源事务失败；已保留或恢复原文件"
+				state.Status = texts.Text("resource.status.txFailed")
 				state.Error = err.Error()
 			}
 			publish(id, state, false)
 			return
 		}
 		state.HasPlan = false
-		state.Status = "资源事务完成，全部目标文件已再次校验"
+		state.Status = texts.Text("resource.status.complete")
 		publish(id, state, true)
 	})
 }
@@ -3531,23 +3944,23 @@ func (app *application) paintResources(dc win32.HDC, client win32.Rect, left int
 		win32.DrawText(dc, text, &rect, win32.DT_LEFT|win32.DT_VCENTER|win32.DT_SINGLELINE|win32.DT_END_ELLIPSIS)
 	}
 	state := app.resourceState
-	checkText := "检查在线资源并生成修复计划"
+	checkText := app.texts.Text("resource.check")
 	if state.Busy {
-		checkText = "取消当前资源任务"
+		checkText = app.texts.Text("resource.cancel")
 	}
 	draw(checkText, row(170, 214, accentBrush), win32.Color(235, 238, 248))
-	draw("语音包："+state.Language+"    单击切换", row(220, 258, buttonBrush), win32.Color(225, 229, 242))
-	branch := "当前正式版本"
+	draw(fmt.Sprintf(app.texts.Text("resource.voice"), state.Language), row(220, 258, buttonBrush), win32.Color(225, 229, 242))
+	branch := app.texts.Text("resource.branch.current")
 	if state.PreDownload {
-		branch = "预下载版本（仅官方开放时可用）"
+		branch = app.texts.Text("resource.branch.preload")
 	}
-	draw("资源分支："+branch+"    单击切换", row(264, 302, buttonBrush), win32.Color(225, 229, 242))
-	applyText := "下载并修复（需要先生成计划）"
+	draw(fmt.Sprintf(app.texts.Text("resource.branch"), branch), row(264, 302, buttonBrush), win32.Color(225, 229, 242))
+	applyText := app.texts.Text("resource.apply.needPlan")
 	if state.HasPlan {
-		applyText = fmt.Sprintf("下载并修复 %d 个文件", len(state.Plan.Changes()))
+		applyText = fmt.Sprintf(app.texts.Text("resource.apply.count"), len(state.Plan.Changes()))
 	}
 	if state.Confirm {
-		applyText = "再次单击确认执行；原文件将在事务中备份"
+		applyText = app.texts.Text("resource.apply.confirm")
 	}
 	draw(applyText, row(308, 352, buttonBrush), win32.Color(225, 229, 242))
 	statusColor := win32.Color(166, 174, 197)
@@ -3556,19 +3969,19 @@ func (app *application) paintResources(dc win32.HDC, client win32.Rect, left int
 		status, statusColor = state.Error, win32.Color(255, 126, 126)
 	}
 	draw(status, row(364, 408, cardBrush), statusColor)
-	version := valueOrUnknown(state.Version)
-	draw("在线版本："+version, row(414, 450, cardBrush), win32.Color(190, 197, 216))
+	version := localizedValueOrUnknown(app.texts, state.Version)
+	draw(fmt.Sprintf(app.texts.Text("resource.onlineVersion"), version), row(414, 450, cardBrush), win32.Color(190, 197, 216))
 	if state.HasPlan {
-		draw(fmt.Sprintf("清单 %d 个文件 · 需处理 %d 个 · 下载量 %s", len(state.Manifest.Files), len(state.Plan.Changes()), formatBytes(uint64(state.Plan.DownloadBytes))), row(456, 492, cardBrush), win32.Color(190, 197, 216))
+		draw(fmt.Sprintf(app.texts.Text("resource.planSummary"), len(state.Manifest.Files), len(state.Plan.Changes()), formatBytes(uint64(state.Plan.DownloadBytes))), row(456, 492, cardBrush), win32.Color(190, 197, 216))
 	}
 	if state.Progress.FilesTotal > 0 {
-		eta := "计算中"
+		eta := app.texts.Text("resource.eta.calculating")
 		if state.Progress.ETA > 0 {
 			eta = state.Progress.ETA.Round(time.Second).String()
 		}
-		draw(fmt.Sprintf("%d/%d 文件 · %s/%s · %s/s · 剩余 %s", state.Progress.FilesDone, state.Progress.FilesTotal, formatBytes(uint64(state.Progress.BytesDone)), formatBytes(uint64(state.Progress.BytesTotal)), formatBytes(uint64(state.Progress.Speed)), eta), row(498, 534, cardBrush), win32.Color(145, 154, 180))
+		draw(fmt.Sprintf(app.texts.Text("resource.progress"), state.Progress.FilesDone, state.Progress.FilesTotal, formatBytes(uint64(state.Progress.BytesDone)), formatBytes(uint64(state.Progress.BytesTotal)), formatBytes(uint64(state.Progress.Speed)), eta), row(498, 534, cardBrush), win32.Color(145, 154, 180))
 	}
-	draw("安全边界：下载仅写入 data/staging；完整校验后才进入短暂提交阶段。", row(540, 576, cardBrush), win32.Color(126, 136, 160))
+	draw(app.texts.Text("resource.safety"), row(540, 576, cardBrush), win32.Color(126, 136, 160))
 }
 
 func valueOrUnknown(value string) string {
@@ -3598,10 +4011,27 @@ func formatBytes(value uint64) string {
 
 func (app *application) startBackgroundDiagnostics() {
 	app.tasks.Run(func(ctx context.Context, _ uint64) {
+		cpuSampler := cpumonitor.NewSampler(runtime.NumCPU())
+		var sustained cpumonitor.Sustained
 		ticker := time.NewTicker(2 * time.Second)
 		defer ticker.Stop()
 		for {
-			snapshot := win32.SnapshotResources()
+			now := time.Now()
+			cpuTime, cpuErr := win32.CurrentProcessCPUTime()
+			percent, valid := 0.0, false
+			if cpuErr == nil {
+				percent, valid = cpuSampler.Sample(now, cpuTime)
+			}
+			warning := app.cpuWarning.Load()
+			if warning == nil {
+				warning = &cpuWarningConfig{}
+			}
+			snapshot := diagnosticSnapshot{
+				Resources:  win32.SnapshotResources(),
+				CPUPercent: percent,
+				CPUValid:   valid,
+				CPUAlert:   sustained.Observe(now, percent, valid, warning.Enabled, warning.Threshold, time.Duration(warning.DurationMS)*time.Millisecond),
+			}
 			select {
 			case app.snapshots <- snapshot:
 			default:
