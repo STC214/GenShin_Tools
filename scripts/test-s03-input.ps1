@@ -7,6 +7,9 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 $ProjectRoot = Split-Path -Parent $PSScriptRoot
+. (Join-Path $PSScriptRoot 'environment.ps1')
+$EnvironmentNames = @('GOCACHE', 'GOTMPDIR', 'GENSHINTOOLS_INPUT_CAPTURE', 'GENSHINTOOLS_INPUT_INTERVAL_MS', 'GENSHINTOOLS_INPUT_SOAK_SECONDS')
+$PreviousEnvironment = Save-ProcessEnvironment -Names $EnvironmentNames
 $GoCache = Join-Path $ProjectRoot '.cache\go-build'
 $GoTemp = Join-Path $ProjectRoot '.tmp\go'
 New-Item -ItemType Directory -Force -Path $GoCache, $GoTemp | Out-Null
@@ -48,8 +51,6 @@ try {
     Invoke-GoTest -GoArguments @('./...')
     Write-Host '[S03] PASS'
 } finally {
-    Remove-Item Env:\GENSHINTOOLS_INPUT_CAPTURE -ErrorAction SilentlyContinue
-    Remove-Item Env:\GENSHINTOOLS_INPUT_INTERVAL_MS -ErrorAction SilentlyContinue
-    Remove-Item Env:\GENSHINTOOLS_INPUT_SOAK_SECONDS -ErrorAction SilentlyContinue
     Pop-Location
+    Restore-ProcessEnvironment -Snapshot $PreviousEnvironment -Names $EnvironmentNames
 }

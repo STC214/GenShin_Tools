@@ -121,6 +121,11 @@ if (Test-Path -LiteralPath $DistDir) {
 foreach ($directory in @($DistDir, $BuildDir, $GoCache, $GoTemp)) {
     New-Item -ItemType Directory -Force -Path $directory | Out-Null
 }
+$BuildEnvironmentNames = @('GOCACHE', 'GOTMPDIR', 'GOOS', 'GOARCH', 'CGO_ENABLED')
+$PreviousBuildEnvironment = @{}
+foreach ($Name in $BuildEnvironmentNames) {
+    $PreviousBuildEnvironment[$Name] = [Environment]::GetEnvironmentVariable($Name, 'Process')
+}
 $env:GOCACHE = $GoCache
 $env:GOTMPDIR = $GoTemp
 $env:GOOS = 'windows'
@@ -251,4 +256,7 @@ END
     $BuiltFiles | ForEach-Object { Write-Host "  $_" }
 } finally {
     Pop-Location
+    foreach ($Name in $BuildEnvironmentNames) {
+        [Environment]::SetEnvironmentVariable($Name, $PreviousBuildEnvironment[$Name], 'Process')
+    }
 }

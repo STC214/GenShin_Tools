@@ -7,6 +7,9 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $ProjectRoot = Split-Path -Parent $PSScriptRoot
+. (Join-Path $PSScriptRoot 'environment.ps1')
+$EnvironmentNames = @('GENSHINTOOLS_S02_READY_FILE', 'GENSHINTOOLS_S02_AUTOCLOSE_MS', 'GENSHINTOOLS_S04_GAME_PATH')
+$PreviousEnvironment = Save-ProcessEnvironment -Names $EnvironmentNames
 $Executable = if ($ExecutablePath) {
     (Resolve-Path -LiteralPath $ExecutablePath).Path
 } else {
@@ -73,8 +76,6 @@ try {
     if (-not $Process.HasExited -or $Process.ExitCode -ne 0) { throw "Capture process failed or hung: exit=$($Process.ExitCode)" }
     Write-Output ([IO.Path]::GetFullPath($OutputPath))
 } finally {
-    Remove-Item Env:GENSHINTOOLS_S02_READY_FILE -ErrorAction SilentlyContinue
-    Remove-Item Env:GENSHINTOOLS_S02_AUTOCLOSE_MS -ErrorAction SilentlyContinue
-    Remove-Item Env:GENSHINTOOLS_S04_GAME_PATH -ErrorAction SilentlyContinue
+    Restore-ProcessEnvironment -Snapshot $PreviousEnvironment -Names $EnvironmentNames
     Remove-Item -LiteralPath $ReadyFile -Force -ErrorAction SilentlyContinue
 }

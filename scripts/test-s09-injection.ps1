@@ -5,6 +5,9 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
 $ProjectRoot = Split-Path -Parent $PSScriptRoot
+. (Join-Path $PSScriptRoot 'environment.ps1')
+$EnvironmentNames = @('GOCACHE', 'GOTMPDIR')
+$PreviousEnvironment = Save-ProcessEnvironment -Names $EnvironmentNames
 $env:GOCACHE = Join-Path $ProjectRoot '.cache\go-build'
 $env:GOTMPDIR = Join-Path $ProjectRoot '.tmp\go'
 New-Item -ItemType Directory -Force -Path $env:GOCACHE, $env:GOTMPDIR | Out-Null
@@ -18,4 +21,5 @@ try {
     Write-Host '[S09] PASS manifest/PE audit, helper protocol, owned injection fixture, launch integration and migration'
 } finally {
     Pop-Location
+    Restore-ProcessEnvironment -Snapshot $PreviousEnvironment -Names $EnvironmentNames
 }

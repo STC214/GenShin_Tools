@@ -7,6 +7,9 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
 $ProjectRoot = Split-Path -Parent $PSScriptRoot
+. (Join-Path $PSScriptRoot 'environment.ps1')
+$EnvironmentNames = @('GENSHINTOOLS_S02_READY_FILE', 'GENSHINTOOLS_S02_AUTOCLOSE_MS')
+$PreviousEnvironment = Save-ProcessEnvironment -Names $EnvironmentNames
 $Executable = (Resolve-Path (Join-Path $ProjectRoot 'dist\GenshinTools.exe')).Path
 $ReadyFile = Join-Path $ProjectRoot 'dist\data\capture-ready.tmp'
 if (-not $OutputPath) {
@@ -75,7 +78,6 @@ try {
     [void]$Process.WaitForExit(10000)
     Write-Output ([IO.Path]::GetFullPath($OutputPath))
 } finally {
-    Remove-Item Env:GENSHINTOOLS_S02_READY_FILE -ErrorAction SilentlyContinue
-    Remove-Item Env:GENSHINTOOLS_S02_AUTOCLOSE_MS -ErrorAction SilentlyContinue
+    Restore-ProcessEnvironment -Snapshot $PreviousEnvironment -Names $EnvironmentNames
     Remove-Item -LiteralPath $ReadyFile -Force -ErrorAction SilentlyContinue
 }

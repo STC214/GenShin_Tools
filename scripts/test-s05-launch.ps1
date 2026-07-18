@@ -13,7 +13,11 @@ $AppExe = Join-Path $AppRoot 'GenshinTools.exe'
 $GameExe = Join-Path $GameRoot 'YuanShen.exe'
 $GoCache = Join-Path $ProjectRoot '.cache\go-build'
 $GoTemp = Join-Path $ProjectRoot '.tmp\go'
+. (Join-Path $PSScriptRoot 'environment.ps1')
+$EnvironmentNames = @('GOCACHE', 'GOTMPDIR', 'GENSHINTOOLS_S02_READY_FILE', 'GENSHINTOOLS_S02_AUTOCLOSE_MS', 'GENSHINTOOLS_S05_RESULT', 'GENSHINTOOLS_S05_SLEEP_MS', 'GENSHINTOOLS_S05_EXIT_CODE')
+$PreviousEnvironment = Save-ProcessEnvironment -Names $EnvironmentNames
 
+try {
 New-Item -ItemType Directory -Force -Path $AppRoot, $GameRoot, (Join-Path $AppRoot 'data'), $GoCache, $GoTemp | Out-Null
 Copy-Item -LiteralPath (Join-Path $ProjectRoot 'dist\GenshinTools.exe') -Destination $AppExe -Force
 $env:GOCACHE = $GoCache
@@ -40,7 +44,6 @@ public static class S05LaunchSmoke {
 }
 '@
 
-try {
     Remove-Item -LiteralPath $ResultPath, $ReadyPath -Force -ErrorAction SilentlyContinue
     $env:GENSHINTOOLS_S02_READY_FILE = $ReadyPath
     $env:GENSHINTOOLS_S02_AUTOCLOSE_MS = '3500'
@@ -77,9 +80,5 @@ try {
     if (-not $Process.HasExited -or $Process.ExitCode -ne 0) { throw "launcher smoke failed or hung: exit=$($Process.ExitCode)" }
     Write-Host "[S05] PASS pid=$($Result.pid) cwd=$($Result.workingDirectory) args=$($Result.arguments.Count)"
 } finally {
-    Remove-Item Env:GENSHINTOOLS_S02_READY_FILE -ErrorAction SilentlyContinue
-    Remove-Item Env:GENSHINTOOLS_S02_AUTOCLOSE_MS -ErrorAction SilentlyContinue
-    Remove-Item Env:GENSHINTOOLS_S05_RESULT -ErrorAction SilentlyContinue
-    Remove-Item Env:GENSHINTOOLS_S05_SLEEP_MS -ErrorAction SilentlyContinue
-    Remove-Item Env:GENSHINTOOLS_S05_EXIT_CODE -ErrorAction SilentlyContinue
+    Restore-ProcessEnvironment -Snapshot $PreviousEnvironment -Names $EnvironmentNames
 }

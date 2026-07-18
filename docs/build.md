@@ -31,6 +31,18 @@ Verify the real emitted PE subsystem, icon, VERSIONINFO and portable layout:
 ./scripts/verify-artifact.ps1
 ```
 
+Generate and reopen a deterministic S12-compatible release candidate ZIP with a SHA-256 sidecar:
+
+```powershell
+./scripts/package-candidate.ps1
+```
+
+Run the complete short S13 automated release matrix:
+
+```powershell
+./scripts/test-s13-release.ps1
+```
+
 Run the S02 GUI lifecycle, second-instance, tray, recovery and stress checks:
 
 ```powershell

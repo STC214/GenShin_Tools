@@ -7,6 +7,9 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
 $ProjectRoot = Split-Path -Parent $PSScriptRoot
+. (Join-Path $PSScriptRoot 'environment.ps1')
+$EnvironmentNames = @('GENSHINTOOLS_S02_AUTOCLOSE_MS', 'GENSHINTOOLS_S02_READY_FILE', 'GENSHINTOOLS_S02_ACTIVATED_FILE')
+$PreviousEnvironment = Save-ProcessEnvironment -Names $EnvironmentNames
 $Executable = (Resolve-Path (Join-Path $ProjectRoot 'dist\GenshinTools.exe')).Path
 $DataDirectory = Join-Path $ProjectRoot 'dist\data'
 $ReadyFile = Join-Path $DataDirectory 's02-ready.tmp'
@@ -152,9 +155,7 @@ try {
         CleanSessionMarkers     = 'passed'
     } | Format-List
 } finally {
-    Remove-Item Env:GENSHINTOOLS_S02_AUTOCLOSE_MS -ErrorAction SilentlyContinue
-    Remove-Item Env:GENSHINTOOLS_S02_READY_FILE -ErrorAction SilentlyContinue
-    Remove-Item Env:GENSHINTOOLS_S02_ACTIVATED_FILE -ErrorAction SilentlyContinue
+    Restore-ProcessEnvironment -Snapshot $PreviousEnvironment -Names $EnvironmentNames
     Remove-Item -LiteralPath $ReadyFile -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $ActivatedFile -Force -ErrorAction SilentlyContinue
 }
