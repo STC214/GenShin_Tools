@@ -406,7 +406,7 @@ func Run(layout paths.Layout, build buildinfo.Info) (returnErr error) {
 		logger.Error("corrupt settings quarantined", map[string]any{"path": loaded.RecoveredFrom})
 	}
 	if err := app.applyProcessPriority(); err != nil {
-		app.shellStatus = "Apply process priority failed: " + err.Error()
+		app.shellStatus = fmt.Sprintf(app.texts.Text("settings.status.priorityFailed"), err)
 		logger.Error("apply process priority", map[string]any{"error": err.Error()})
 	}
 	if pluginLoad.RecoveredFrom != "" {
@@ -415,7 +415,7 @@ func Run(layout paths.Layout, build buildinfo.Info) (returnErr error) {
 	}
 	if err := resources.RecoverTransactions(layout.Staging); err != nil {
 		logger.Error("resource transaction recovery", map[string]any{"error": err.Error()})
-		app.resourceState.Error = "检测到未能自动恢复的资源事务，请查看日志"
+		app.resourceState.Error = app.texts.Text("resource.status.recoveryFailed")
 	} else {
 		logger.Info("resource transaction recovery complete", nil)
 	}
@@ -1643,8 +1643,12 @@ func (app *application) startInjectionAudit() {
 }
 
 func (app *application) startInjectionLaunch() {
-	if app.gameState.Candidate == nil || app.launchEngine == nil || !app.syncLaunchConfig() {
+	if app.gameState.Candidate == nil || app.launchEngine == nil {
 		app.injectionStatus = app.texts.Text("injection.status.launchNeedGame")
+		return
+	}
+	if !app.syncLaunchConfig() {
+		app.injectionStatus = fmt.Sprintf(app.texts.Text("injection.status.launchConfigFailed"), app.launchUIError)
 		return
 	}
 	if !app.commitInjectionSettings(app.settings.Injection) {
@@ -1716,8 +1720,10 @@ func (app *application) injectionClick(y int) {
 		app.startInjectionLaunch()
 	case y >= sy(420) && y < sy(464):
 		app.injectionLaunching = false
-		if app.gameState.Candidate == nil || app.launchEngine == nil || !app.syncLaunchConfig() {
+		if app.gameState.Candidate == nil || app.launchEngine == nil {
 			app.injectionStatus = app.texts.Text("injection.status.cleanNeedGame")
+		} else if !app.syncLaunchConfig() {
+			app.injectionStatus = fmt.Sprintf(app.texts.Text("injection.status.launchConfigFailed"), app.launchUIError)
 		} else if err := app.launchEngine.Launch(*app.gameState.Candidate, app.settings.Launch); err != nil {
 			app.injectionStatus = fmt.Sprintf(app.texts.Text("injection.status.cleanFailed"), err)
 		} else {
@@ -2524,7 +2530,7 @@ func (app *application) settingsClick(y int) {
 		if app.saveShellSettings(next) {
 			app.texts = localization.New(localization.Language(app.settings.Shell.Language), win32.UserDefaultLocaleName())
 			win32.SetWindowText(app.hwnd, app.texts.Text("app.title")+" "+app.build.Version)
-			app.refreshPluginCueBanners()
+			app.refreshLocalizedCueBanners()
 			app.addTrayIcon()
 		}
 	case y >= sy(220) && y < sy(264):
@@ -2564,7 +2570,7 @@ func (app *application) settingsClick(y int) {
 		app.settings.Shell.ProcessPriority = next.ProcessPriority
 		if err := app.applyProcessPriority(); err != nil {
 			app.settings.Shell.ProcessPriority = previous
-			app.shellStatus = "Apply process priority failed: " + err.Error()
+			app.shellStatus = fmt.Sprintf(app.texts.Text("settings.status.priorityFailed"), err)
 		} else if !app.saveShellSettings(next) {
 			app.settings.Shell.ProcessPriority = previous
 			_ = app.applyProcessPriority()
@@ -2599,14 +2605,14 @@ func (app *application) paintSettings(dc win32.HDC, client win32.Rect, left int3
 		win32.DrawText(dc, value, &rect, win32.DT_LEFT|win32.DT_VCENTER|win32.DT_SINGLELINE|win32.DT_END_ELLIPSIS)
 	}
 	languageKey := map[string]string{shellconfig.LanguageSystem: "settings.language.system", shellconfig.LanguageZH: "settings.language.zh", shellconfig.LanguageEN: "settings.language.en"}[app.settings.Shell.Language]
-	draw(app.texts.Text("settings.language")+"："+app.texts.Text(languageKey), row(170, 214, accentBrush), win32.Color(235, 238, 248))
-	draw(app.texts.Text("settings.theme")+"："+app.texts.Text("settings.theme."+app.settings.Shell.Theme), row(220, 264, buttonBrush), win32.Color(225, 229, 242))
-	draw(app.texts.Text("settings.tray")+"："+onOffText(app.texts.Language(), app.settings.Shell.MinimizeToTray), row(270, 314, buttonBrush), win32.Color(225, 229, 242))
-	draw(app.texts.Text("settings.rememberWindow")+"："+onOffText(app.texts.Language(), app.settings.Shell.RememberWindowSize), row(320, 364, buttonBrush), win32.Color(225, 229, 242))
-	draw(app.texts.Text("settings.minimumSize")+"："+onOffText(app.texts.Language(), app.settings.Shell.EnforceMinimumSize), row(370, 414, buttonBrush), win32.Color(225, 229, 242))
+	draw(fmt.Sprintf(app.texts.Text("common.label"), app.texts.Text("settings.language"), app.texts.Text(languageKey)), row(170, 214, accentBrush), win32.Color(235, 238, 248))
+	draw(fmt.Sprintf(app.texts.Text("common.label"), app.texts.Text("settings.theme"), app.texts.Text("settings.theme."+app.settings.Shell.Theme)), row(220, 264, buttonBrush), win32.Color(225, 229, 242))
+	draw(fmt.Sprintf(app.texts.Text("common.label"), app.texts.Text("settings.tray"), onOffText(app.texts.Language(), app.settings.Shell.MinimizeToTray)), row(270, 314, buttonBrush), win32.Color(225, 229, 242))
+	draw(fmt.Sprintf(app.texts.Text("common.label"), app.texts.Text("settings.rememberWindow"), onOffText(app.texts.Language(), app.settings.Shell.RememberWindowSize)), row(320, 364, buttonBrush), win32.Color(225, 229, 242))
+	draw(fmt.Sprintf(app.texts.Text("common.label"), app.texts.Text("settings.minimumSize"), onOffText(app.texts.Language(), app.settings.Shell.EnforceMinimumSize)), row(370, 414, buttonBrush), win32.Color(225, 229, 242))
 	priorityKey := map[string]string{shellconfig.PriorityBelowNormal: "settings.priority.below", shellconfig.PriorityNormal: "settings.priority.normal", shellconfig.PriorityAboveNormal: "settings.priority.above"}[app.settings.Shell.ProcessPriority]
-	draw(app.texts.Text("settings.priority")+"："+app.texts.Text(priorityKey), row(420, 464, buttonBrush), win32.Color(225, 229, 242))
-	draw(fmt.Sprintf("%s：%s · %d%% / %.0fs", app.texts.Text("settings.cpuWarning"), onOffText(app.texts.Language(), app.settings.Shell.CPUWarningEnabled), app.settings.Shell.CPUWarningThreshold, float64(app.settings.Shell.CPUWarningDurationMS)/1000), row(470, 514, buttonBrush), win32.Color(225, 229, 242))
+	draw(fmt.Sprintf(app.texts.Text("common.label"), app.texts.Text("settings.priority"), app.texts.Text(priorityKey)), row(420, 464, buttonBrush), win32.Color(225, 229, 242))
+	draw(fmt.Sprintf(app.texts.Text("settings.cpuWarning.summary"), app.texts.Text("settings.cpuWarning"), onOffText(app.texts.Language(), app.settings.Shell.CPUWarningEnabled), app.settings.Shell.CPUWarningThreshold, float64(app.settings.Shell.CPUWarningDurationMS)/1000), row(470, 514, buttonBrush), win32.Color(225, 229, 242))
 	diagnosticText := app.texts.Text("settings.diagnostics")
 	if app.diagnosticBusy {
 		diagnosticText = app.texts.Text("settings.status.exporting")
@@ -2799,7 +2805,7 @@ func (app *application) recordPhysical(event input.PhysicalEvent) {
 	config.Enabled = false
 	app.recording = 0
 	if event.Code == app.settings.Capture.VirtualKey {
-		app.inputUIError = "该物理键已被截图快捷键使用；即使修饰键不同也可能触发输入停止逻辑"
+		app.inputUIError = app.texts.Text("input.error.captureConflict")
 		win32.Invalidate(app.hwnd)
 		return
 	}
@@ -2925,7 +2931,6 @@ func (app *application) createLaunchControls() error {
 	app.customArgumentsEdit = edit
 	app.editBrush = win32.CreateSolidBrush(win32.Color(25, 29, 39))
 	win32.SetTextLimit(edit, 8192)
-	win32.SetCueBanner(edit, "自定义启动参数（可留空，例如 -force-d3d11）")
 	win32.SetControlFont(edit, app.fontBody)
 	win32.SetControlDarkTheme(edit, app.palette.Dark)
 	aliasEdit, err := win32.CreateControl("EDIT", "", win32.WS_CHILD|win32.WS_BORDER|win32.WS_TABSTOP|win32.ES_AUTOHSCROLL, 0, 0, 100, 32, app.hwnd, 2002, app.instance)
@@ -2952,13 +2957,16 @@ func (app *application) createLaunchControls() error {
 	win32.SetTextLimit(searchEdit, 128)
 	win32.SetControlFont(searchEdit, app.fontBody)
 	win32.SetControlDarkTheme(searchEdit, app.palette.Dark)
-	app.refreshPluginCueBanners()
+	app.refreshLocalizedCueBanners()
 	app.layoutLaunchControls()
 	app.updateLaunchControlVisibility()
 	return nil
 }
 
-func (app *application) refreshPluginCueBanners() {
+func (app *application) refreshLocalizedCueBanners() {
+	if app.customArgumentsEdit != 0 {
+		win32.SetCueBanner(app.customArgumentsEdit, app.texts.Text("game.customArgumentsCue"))
+	}
 	if app.pluginAliasEdit != 0 {
 		win32.SetCueBanner(app.pluginAliasEdit, app.texts.Text("plugin.aliasCue"))
 	}
@@ -3030,19 +3038,25 @@ func (app *application) syncPluginAliasEdit() {
 }
 
 func (app *application) syncLaunchConfig() bool {
+	return app.commitLaunchConfig(app.settings.Launch)
+}
+
+func (app *application) commitLaunchConfig(next launch.Config) bool {
 	if app.customArgumentsEdit != 0 {
-		app.settings.Launch.CustomArguments = win32.GetWindowText(app.customArgumentsEdit)
+		next.CustomArguments = win32.GetWindowText(app.customArgumentsEdit)
 	}
-	normalized, err := app.settings.Launch.Normalized()
+	normalized, err := next.Normalized()
 	if err != nil {
-		app.launchUIError = err.Error()
+		app.launchUIError = fmt.Sprintf(app.texts.Text("game.status.launchInvalid"), err)
 		return false
 	}
-	app.settings.Launch = normalized
-	if err := config.Save(app.layout.Config, app.settings); err != nil {
-		app.launchUIError = "保存启动设置：" + err.Error()
+	settings := app.settings
+	settings.Launch = normalized
+	if err := config.Save(app.layout.Config, settings); err != nil {
+		app.launchUIError = fmt.Sprintf(app.texts.Text("game.status.saveLaunchFailed"), err)
 		return false
 	}
+	app.settings = settings
 	app.launchUIError = ""
 	return true
 }
@@ -3502,8 +3516,11 @@ func (app *application) gameClick(x, y int) {
 	sy := func(value int32) int { return int(win32.Scale(value, app.dpi)) }
 	switch {
 	case y >= sy(170) && y < sy(214):
-		if app.gameState.Candidate == nil || app.launchEngine == nil || !app.syncLaunchConfig() {
+		if app.gameState.Candidate == nil || app.launchEngine == nil {
 			app.launchUIError = app.texts.Text("game.status.selectFirst")
+			break
+		}
+		if !app.syncLaunchConfig() {
 			break
 		}
 		app.launchUIError = ""
@@ -3511,8 +3528,9 @@ func (app *application) gameClick(x, y int) {
 			app.launchUIError = err.Error()
 		}
 	case y >= sy(220) && y < sy(258):
-		app.settings.Launch.WindowMode = (app.settings.Launch.WindowMode + 1) % 4
-		app.syncLaunchConfig()
+		next := app.settings.Launch
+		next.WindowMode = (next.WindowMode + 1) % 4
+		app.commitLaunchConfig(next)
 	case y >= sy(264) && y < sy(302):
 		presets := [][2]int{{1280, 720}, {1920, 1080}, {2560, 1440}, {3840, 2160}, {0, 0}}
 		index := 0
@@ -3522,16 +3540,18 @@ func (app *application) gameClick(x, y int) {
 				break
 			}
 		}
-		app.settings.Launch.Width, app.settings.Launch.Height = presets[index][0], presets[index][1]
-		app.syncLaunchConfig()
+		next := app.settings.Launch
+		next.Width, next.Height = presets[index][0], presets[index][1]
+		app.commitLaunchConfig(next)
 	case y >= sy(308) && y < sy(346):
 		midpoint := int(win32.Scale(650, app.dpi))
+		next := app.settings.Launch
 		if x < midpoint {
-			app.settings.Launch.Monitor = (app.settings.Launch.Monitor + 1) % (win32.MonitorCount() + 1)
+			next.Monitor = (next.Monitor + 1) % (win32.MonitorCount() + 1)
 		} else {
-			app.settings.Launch.PostBehavior = (app.settings.Launch.PostBehavior + 1) % 3
+			next.PostBehavior = (next.PostBehavior + 1) % 3
 		}
-		app.syncLaunchConfig()
+		app.commitLaunchConfig(next)
 	case y >= sy(396) && y < sy(434):
 		contentLeft := int(win32.Scale(252, app.dpi))
 		clientRight := int(win32.GetClientRect(app.hwnd).Right - win32.Scale(42, app.dpi))
@@ -3561,16 +3581,18 @@ func (app *application) gameClick(x, y int) {
 				win32.Invalidate(app.hwnd)
 				return
 			}
-			app.settings.Game.Path = candidate.Root
-			app.settings.Game.CustomExecutable = ""
+			settings := app.settings
+			settings.Game.Path = candidate.Root
+			settings.Game.CustomExecutable = ""
 			if !strings.EqualFold(candidate.ExeName, "YuanShen.exe") && !strings.EqualFold(candidate.ExeName, "GenshinImpact.exe") {
-				app.settings.Game.CustomExecutable = candidate.ExeName
+				settings.Game.CustomExecutable = candidate.ExeName
 			}
-			if err := config.Save(app.layout.Config, app.settings); err != nil {
+			if err := config.Save(app.layout.Config, settings); err != nil {
 				app.gameState.Error = fmt.Sprintf(app.texts.Text("game.status.savePathFailed"), err)
 				win32.Invalidate(app.hwnd)
 				return
 			}
+			app.settings = settings
 			app.startGameScan(candidate.Root)
 		case 2:
 			if app.gameState.Candidate == nil || !app.syncLaunchConfig() {
@@ -4063,13 +4085,6 @@ func (app *application) paintResources(dc win32.HDC, client win32.Rect, left int
 		draw(fmt.Sprintf(app.texts.Text("resource.progress"), state.Progress.FilesDone, state.Progress.FilesTotal, formatBytes(uint64(state.Progress.BytesDone)), formatBytes(uint64(state.Progress.BytesTotal)), formatBytes(uint64(state.Progress.Speed)), eta), row(498, 534, cardBrush), win32.Color(145, 154, 180))
 	}
 	draw(app.texts.Text("resource.safety"), row(540, 576, cardBrush), win32.Color(126, 136, 160))
-}
-
-func valueOrUnknown(value string) string {
-	if strings.TrimSpace(value) == "" {
-		return "未知"
-	}
-	return value
 }
 
 func formatBytes(value uint64) string {
