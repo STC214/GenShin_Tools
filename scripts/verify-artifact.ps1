@@ -55,7 +55,7 @@ foreach ($Item in $Expected) {
     Write-Host "Verified $([IO.Path]::GetFileName($Item.Path)): FileVersion=$($Info.FileVersion), ProductVersion=$($Info.ProductVersion), Subsystem=$Subsystem, Icon=ok"
 }
 
-$RequiredDirectories = @('data', 'data\logs', 'data\cache', 'data\staging', 'data\injection', 'data\injection\modules')
+$RequiredDirectories = @('data', 'data\logs', 'data\cache', 'data\staging', 'data\injection', 'data\injection\modules', 'data\plugins', 'data\plugins\versions', 'data\plugins\staging')
 foreach ($Relative in $RequiredDirectories) {
     $Path = Join-Path $DistDirectory $Relative
     if (-not (Test-Path -LiteralPath $Path -PathType Container)) {

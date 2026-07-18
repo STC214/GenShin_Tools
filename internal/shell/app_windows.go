@@ -981,12 +981,45 @@ func (app *application) navigationAt(x, y int) int {
 	if x < 0 || x >= int(win32.Scale(210, app.dpi)) {
 		return -1
 	}
-	start, height := int(win32.Scale(88, app.dpi)), int(win32.Scale(48, app.dpi))
+	startValue, heightValue := app.navigationMetrics()
+	start, height := int(startValue), int(heightValue)
 	index := (y - start) / height
 	if y < start || index < 0 || index >= len(navigation) {
 		return -1
 	}
 	return index
+}
+
+func (app *application) navigationMetrics() (start, itemHeight int32) {
+	start = win32.Scale(88, app.dpi)
+	itemHeight = win32.Scale(48, app.dpi)
+	if app.hwnd == 0 || len(navigation) == 0 {
+		return start, itemHeight
+	}
+	client := win32.GetClientRect(app.hwnd)
+	bottom := client.Bottom - win32.Scale(34, app.dpi)
+	if available := bottom - start; available > 0 && itemHeight*int32(len(navigation)) > available {
+		itemHeight = max(win32.Scale(28, app.dpi), available/int32(len(navigation)))
+	}
+	return start, itemHeight
+}
+
+func (app *application) pluginContentY(logical int32) int32 {
+	if app.hwnd == 0 {
+		return win32.Scale(logical, app.dpi)
+	}
+	client := win32.GetClientRect(app.hwnd)
+	return scalePluginContentY(logical, app.dpi, client.Bottom-win32.Scale(42, app.dpi))
+}
+
+func scalePluginContentY(logical int32, dpi uint32, availableBottom int32) int32 {
+	designTop := win32.Scale(170, dpi)
+	designBottom := win32.Scale(660, dpi)
+	value := win32.Scale(logical, dpi)
+	if availableBottom >= designBottom || availableBottom <= designTop {
+		return value
+	}
+	return designTop + (value-designTop)*(availableBottom-designTop)/(designBottom-designTop)
 }
 
 func (app *application) paint(hwnd win32.HWND) {
@@ -1018,7 +1051,7 @@ func (app *application) paint(hwnd win32.HWND) {
 	win32.SetTextColor(dc, win32.Color(235, 238, 248))
 	logo := win32.Rect{Left: win32.Scale(22, app.dpi), Top: win32.Scale(24, app.dpi), Right: sidebarWidth - win32.Scale(12, app.dpi), Bottom: win32.Scale(66, app.dpi)}
 	win32.DrawText(dc, "GENSHIN TOOLS", &logo, win32.DT_LEFT|win32.DT_VCENTER|win32.DT_SINGLELINE)
-	start, itemHeight := win32.Scale(88, app.dpi), win32.Scale(48, app.dpi)
+	start, itemHeight := app.navigationMetrics()
 	for index, item := range navigation {
 		top := start + int32(index)*itemHeight
 		row := win32.Rect{Left: win32.Scale(10, app.dpi), Top: top, Right: sidebarWidth - win32.Scale(10, app.dpi), Bottom: top + itemHeight - win32.Scale(4, app.dpi)}
@@ -1669,7 +1702,7 @@ func (app *application) selectedPlugin() (plugins.Item, bool) {
 }
 
 func (app *application) pluginClick(x, y int) {
-	sy := func(value int32) int { return int(win32.Scale(value, app.dpi)) }
+	sy := func(value int32) int { return int(app.pluginContentY(value)) }
 	switch {
 	case y >= sy(170) && y < sy(214):
 		app.settings.Plugins.SafeMode = !app.settings.Plugins.SafeMode
@@ -1855,7 +1888,7 @@ func (app *application) applyPluginStoreConfig(next plugins.Config) {
 }
 
 func (app *application) pluginStoreClick(x, y int) {
-	sy := func(value int32) int { return int(win32.Scale(value, app.dpi)) }
+	sy := func(value int32) int { return int(app.pluginContentY(value)) }
 	switch {
 	case y >= sy(270) && y < sy(314):
 		app.savePluginCatalogURL()
@@ -2146,7 +2179,7 @@ func (app *application) paintPlugins(dc win32.HDC, client win32.Rect, left int32
 	defer win32.DeleteObject(uintptr(warningBrush))
 	right := client.Right - win32.Scale(42, app.dpi)
 	row := func(top, bottom int32, brush win32.HBRUSH) win32.Rect {
-		rect := win32.Rect{Left: left, Top: win32.Scale(top, app.dpi), Right: right, Bottom: win32.Scale(bottom, app.dpi)}
+		rect := win32.Rect{Left: left, Top: app.pluginContentY(top), Right: right, Bottom: app.pluginContentY(bottom)}
 		win32.FillRect(dc, &rect, brush)
 		return rect
 	}
@@ -2205,7 +2238,7 @@ func (app *application) paintPluginStore(dc win32.HDC, client win32.Rect, left i
 	defer win32.DeleteObject(uintptr(accentBrush))
 	right := client.Right - win32.Scale(42, app.dpi)
 	row := func(top, bottom int32, brush win32.HBRUSH) win32.Rect {
-		rect := win32.Rect{Left: left, Top: win32.Scale(top, app.dpi), Right: right, Bottom: win32.Scale(bottom, app.dpi)}
+		rect := win32.Rect{Left: left, Top: app.pluginContentY(top), Right: right, Bottom: app.pluginContentY(bottom)}
 		win32.FillRect(dc, &rect, brush)
 		return rect
 	}
@@ -2516,16 +2549,16 @@ func (app *application) layoutLaunchControls() {
 	height := win32.Scale(36, app.dpi)
 	win32.SetWindowPos(app.customArgumentsEdit, win32.Rect{Left: left, Top: top, Right: right, Bottom: top + height}, win32.SWP_NOZORDER)
 	if app.pluginAliasEdit != 0 {
-		aliasTop := win32.Scale(370, app.dpi)
-		win32.SetWindowPos(app.pluginAliasEdit, win32.Rect{Left: left, Top: aliasTop, Right: right, Bottom: aliasTop + height}, win32.SWP_NOZORDER)
+		aliasTop, aliasBottom := app.pluginContentY(370), app.pluginContentY(406)
+		win32.SetWindowPos(app.pluginAliasEdit, win32.Rect{Left: left, Top: aliasTop, Right: right, Bottom: aliasBottom}, win32.SWP_NOZORDER)
 	}
 	if app.pluginCatalogEdit != 0 {
-		catalogTop := win32.Scale(170, app.dpi)
-		win32.SetWindowPos(app.pluginCatalogEdit, win32.Rect{Left: left, Top: catalogTop, Right: right, Bottom: catalogTop + height}, win32.SWP_NOZORDER)
+		catalogTop, catalogBottom := app.pluginContentY(170), app.pluginContentY(206)
+		win32.SetWindowPos(app.pluginCatalogEdit, win32.Rect{Left: left, Top: catalogTop, Right: right, Bottom: catalogBottom}, win32.SWP_NOZORDER)
 	}
 	if app.pluginSearchEdit != 0 {
-		searchTop := win32.Scale(220, app.dpi)
-		win32.SetWindowPos(app.pluginSearchEdit, win32.Rect{Left: left, Top: searchTop, Right: right, Bottom: searchTop + height}, win32.SWP_NOZORDER)
+		searchTop, searchBottom := app.pluginContentY(220), app.pluginContentY(256)
+		win32.SetWindowPos(app.pluginSearchEdit, win32.Rect{Left: left, Top: searchTop, Right: right, Bottom: searchBottom}, win32.SWP_NOZORDER)
 	}
 }
 

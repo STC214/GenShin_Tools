@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 const installTransactionSchema = 1
@@ -271,9 +272,36 @@ func validateJournal(layout Layout, journal installJournal) error {
 	if err != nil || filepath.Dir(stageRoot) != filepath.Clean(layout.Staging) {
 		return errors.New("plugin transaction stage path is invalid")
 	}
+	operation := journal.Operation
+	if operation == "" {
+		operation = "install"
+	}
+	if operation == "uninstall" {
+		if !containsExact([]string{"prepared", "old_moved", "state_committed"}, journal.Phase) || journal.OldVersion != journal.NewVersion {
+			return errors.New("plugin uninstall transaction phase/version is invalid")
+		}
+		backup, err := safeJoin(layout.Root, journal.Backup)
+		expected := filepath.Join(stageRoot, "removed")
+		if err != nil || !strings.EqualFold(filepath.Clean(backup), filepath.Clean(expected)) {
+			return errors.New("plugin uninstall backup path is invalid")
+		}
+		return nil
+	}
+	if !containsExact([]string{"prepared", "old_moved", "new_moved", "state_committed"}, journal.Phase) {
+		return errors.New("plugin install transaction phase is invalid")
+	}
+	if journal.Phase == "old_moved" && journal.Backup == "" || journal.OldVersion != "" && journal.Phase != "prepared" && journal.Backup == "" {
+		return errors.New("plugin install transaction lost its backup")
+	}
 	if journal.Backup != "" {
-		if _, err := safeJoin(layout.Root, journal.Backup); err != nil {
-			return errors.New("plugin transaction backup path is invalid")
+		backup, err := safeJoin(layout.Root, journal.Backup)
+		if err != nil || journal.OldVersion == "" {
+			return errors.New("plugin install backup path is invalid")
+		}
+		versionBackup := filepath.Join(layout.Versions, journal.PluginID, journal.OldVersion)
+		stagingBackup := filepath.Join(stageRoot, "previous")
+		if !strings.EqualFold(filepath.Clean(backup), filepath.Clean(versionBackup)) && !strings.EqualFold(filepath.Clean(backup), filepath.Clean(stagingBackup)) {
+			return errors.New("plugin install backup path is invalid")
 		}
 	}
 	return nil

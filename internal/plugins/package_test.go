@@ -204,6 +204,47 @@ func TestRecoverUninstallRestoresBeforeStateCommit(t *testing.T) {
 	}
 }
 
+func TestRecoverRejectsUninstallBackupOutsideItsStage(t *testing.T) {
+	fixture := newPackageFixture(t)
+	if err := fixture.layout.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	stageName := "fixture-uninstall-tampered"
+	if err := os.MkdirAll(filepath.Join(fixture.layout.Staging, stageName), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	journal := installJournal{SchemaVersion: 1, Operation: "uninstall", Phase: "old_moved", PluginID: "fixture", NewVersion: "1.0.0", OldVersion: "1.0.0", StageName: stageName, Backup: filepath.Join("versions", "fixture", "1.0.0")}
+	if err := saveJournal(fixture.layout.Transaction, journal); err != nil {
+		t.Fatal(err)
+	}
+	state := DefaultState()
+	state.Installed["fixture"] = InstalledState{ActiveVersion: "1.0.0"}
+	if err := RecoverTransaction(fixture.layout, &state); err == nil {
+		t.Fatal("tampered uninstall backup path was accepted")
+	}
+}
+
+func TestRecoverRejectsOperationSpecificPhase(t *testing.T) {
+	fixture := newPackageFixture(t)
+	if err := fixture.layout.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	stageName := "fixture-uninstall-phase"
+	stageRoot := filepath.Join(fixture.layout.Staging, stageName)
+	if err := os.MkdirAll(stageRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	journal := installJournal{SchemaVersion: 1, Operation: "uninstall", Phase: "new_moved", PluginID: "fixture", NewVersion: "1.0.0", OldVersion: "1.0.0", StageName: stageName, Backup: filepath.Join("staging", stageName, "removed")}
+	if err := saveJournal(fixture.layout.Transaction, journal); err != nil {
+		t.Fatal(err)
+	}
+	state := DefaultState()
+	state.Installed["fixture"] = InstalledState{ActiveVersion: "1.0.0"}
+	if err := RecoverTransaction(fixture.layout, &state); err == nil {
+		t.Fatal("uninstall transaction accepted an install-only phase")
+	}
+}
+
 func TestInstallRejectsZipSlipWithoutActiveMutation(t *testing.T) {
 	fixture := newPackageFixture(t)
 	state := DefaultState()
