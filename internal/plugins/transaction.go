@@ -14,6 +14,7 @@ const installTransactionSchema = 1
 
 type installJournal struct {
 	SchemaVersion int    `json:"schemaVersion"`
+	Operation     string `json:"operation,omitempty"`
 	Phase         string `json:"phase"`
 	PluginID      string `json:"pluginId"`
 	NewVersion    string `json:"newVersion"`
@@ -24,7 +25,7 @@ type installJournal struct {
 
 func commitInstall(layout Layout, state *State, manifest Manifest, stageName, candidateDirectory string) (InstallResult, error) {
 	active := filepath.Join(layout.Modules, manifest.ID)
-	journal := installJournal{SchemaVersion: installTransactionSchema, Phase: "prepared", PluginID: manifest.ID, NewVersion: manifest.Version, StageName: stageName}
+	journal := installJournal{SchemaVersion: installTransactionSchema, Operation: "install", Phase: "prepared", PluginID: manifest.ID, NewVersion: manifest.Version, StageName: stageName}
 	result := InstallResult{Manifest: manifest}
 
 	if info, err := os.Lstat(active); err == nil {
@@ -138,6 +139,9 @@ func RecoverTransaction(layout Layout, state *State) error {
 	if err := validateJournal(layout, journal); err != nil {
 		return err
 	}
+	if journal.Operation == "uninstall" {
+		return recoverUninstallTransaction(layout, state, journal)
+	}
 	installed, stateCommitted := state.Installed[journal.PluginID]
 	stateCommitted = stateCommitted && installed.ActiveVersion == journal.NewVersion
 	if journal.Phase == "state_committed" || (journal.Phase == "new_moved" && stateCommitted) {
@@ -174,6 +178,49 @@ func RecoverTransaction(layout Layout, state *State) error {
 func cleanupCommittedTransaction(layout Layout, journal installJournal) error {
 	stageRoot := filepath.Join(layout.Staging, journal.StageName)
 	if err := safeRemoveAll(layout.Staging, stageRoot); err != nil {
+		return err
+	}
+	if err := os.Remove(layout.Transaction); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
+}
+
+func recoverUninstallTransaction(layout Layout, state *State, journal installJournal) error {
+	_, stillInstalled := state.Installed[journal.PluginID]
+	if journal.Phase == "state_committed" || (journal.Phase == "old_moved" && !stillInstalled) {
+		return cleanupUninstallTransaction(layout, journal)
+	}
+	active := filepath.Join(layout.Modules, journal.PluginID)
+	if journal.Phase == "old_moved" {
+		backup, err := safeJoin(layout.Root, journal.Backup)
+		if err != nil {
+			return err
+		}
+		if _, err := os.Lstat(active); !errors.Is(err, os.ErrNotExist) {
+			if err == nil {
+				return errors.New("cannot restore uninstalled plugin over an existing active directory")
+			}
+			return err
+		}
+		if err := os.Rename(backup, active); err != nil {
+			return fmt.Errorf("restore isolated plugin: %w", err)
+		}
+	}
+	stageRoot := filepath.Join(layout.Staging, journal.StageName)
+	if err := safeRemoveAll(layout.Staging, stageRoot); err != nil {
+		return err
+	}
+	return os.Remove(layout.Transaction)
+}
+
+func cleanupUninstallTransaction(layout Layout, journal installJournal) error {
+	stageRoot := filepath.Join(layout.Staging, journal.StageName)
+	if err := safeRemoveAll(layout.Staging, stageRoot); err != nil {
+		return err
+	}
+	versions := filepath.Join(layout.Versions, journal.PluginID)
+	if err := safeRemoveAll(layout.Versions, versions); err != nil {
 		return err
 	}
 	if err := os.Remove(layout.Transaction); err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -235,6 +282,9 @@ func validateJournal(layout Layout, journal installJournal) error {
 func validateJournalShape(journal installJournal) error {
 	if journal.SchemaVersion != installTransactionSchema || !idPattern.MatchString(journal.PluginID) || !versionPattern.MatchString(journal.NewVersion) || !stagePattern.MatchString(journal.StageName) {
 		return errors.New("plugin transaction identity is invalid")
+	}
+	if journal.Operation != "" && journal.Operation != "install" && journal.Operation != "uninstall" {
+		return errors.New("plugin transaction operation is invalid")
 	}
 	if journal.OldVersion != "" && !versionPattern.MatchString(journal.OldVersion) {
 		return errors.New("plugin transaction old version is invalid")

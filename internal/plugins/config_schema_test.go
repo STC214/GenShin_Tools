@@ -46,6 +46,27 @@ func TestConfigSchemaRejectsDuplicatePhysicalField(t *testing.T) {
 	}
 }
 
+func TestReadConfigRecoveringQuarantinesInvalidINI(t *testing.T) {
+	schema := ConfigSchema{SchemaVersion: 1, Fields: []ConfigField{{ID: "target", Section: "FPS", Key: "Target", Name: "Target", Type: "int", Default: "60"}}}
+	path := filepath.Join(t.TempDir(), "config.ini")
+	if err := os.WriteFile(path, []byte("[FPS]\r\nTarget = broken\r\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	values, recovered, err := ReadConfigRecovering(path, schema)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if values["target"] != "60" || recovered == "" {
+		t.Fatalf("values=%v recovered=%q", values, recovered)
+	}
+	if _, err := os.Stat(recovered); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("invalid config remains active: %v", err)
+	}
+}
+
 func containsText(value, target string) bool {
 	for index := 0; index+len(target) <= len(value); index++ {
 		if value[index:index+len(target)] == target {

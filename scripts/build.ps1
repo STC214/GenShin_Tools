@@ -162,7 +162,7 @@ END
     Invoke-Checked -Command 'go' -Arguments @('build', '-trimpath', '-buildvcs=false', '-ldflags', ($HelperLdFlags -join ' '), '-o', $HelperOutput, './cmd/injection-helper')
     $BuiltFiles += $HelperOutput
 
-    foreach ($directory in @('logs', 'cache', 'staging', 'injection', 'injection\modules')) {
+    foreach ($directory in @('logs', 'cache', 'staging', 'injection', 'injection\modules', 'plugins', 'plugins\versions', 'plugins\staging')) {
         New-Item -ItemType Directory -Force -Path (Join-Path $DistDir "data\$directory") | Out-Null
     }
     Copy-Item -LiteralPath (Join-Path $ProjectRoot 'THIRD_PARTY_NOTICES.md') -Destination $DistDir -Force

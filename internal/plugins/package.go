@@ -98,7 +98,7 @@ func DownloadPackage(ctx context.Context, client *http.Client, item CatalogItem,
 		return err
 	}
 	if client == nil {
-		client = &http.Client{}
+		client = &http.Client{Timeout: 5 * time.Minute}
 	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, item.PackageURL, nil)
 	if err != nil {
@@ -111,6 +111,9 @@ func DownloadPackage(ctx context.Context, client *http.Client, item CatalogItem,
 		return err
 	}
 	defer response.Body.Close()
+	if response.Request == nil || response.Request.URL == nil || !strings.EqualFold(response.Request.URL.Scheme, "https") {
+		return errors.New("plugin package redirect left HTTPS")
+	}
 	if response.StatusCode != http.StatusOK {
 		return fmt.Errorf("plugin package HTTP status %d", response.StatusCode)
 	}

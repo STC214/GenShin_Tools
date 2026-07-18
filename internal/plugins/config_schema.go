@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 )
 
 var iniNamePattern = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,64}$`)
@@ -94,6 +95,30 @@ func ReadConfig(configPath string, schema ConfigSchema) (map[string]string, erro
 		}
 	}
 	return values, nil
+}
+
+// ReadConfigRecovering quarantines only a malformed plugin INI. Invalid schema
+// data is returned directly because the schema belongs to the plugin package.
+func ReadConfigRecovering(configPath string, schema ConfigSchema) (values map[string]string, recoveredFrom string, err error) {
+	if err := validateConfigSchema(schema); err != nil {
+		return nil, "", err
+	}
+	values, err = ReadConfig(configPath, schema)
+	if err == nil || errors.Is(err, os.ErrNotExist) {
+		return values, "", err
+	}
+	if _, statErr := os.Stat(configPath); statErr != nil {
+		return nil, "", err
+	}
+	target := configPath + ".corrupt-" + time.Now().UTC().Format("20060102T150405.000000000Z")
+	if renameErr := os.Rename(configPath, target); renameErr != nil {
+		return nil, "", fmt.Errorf("plugin config invalid: %v; quarantine: %w", err, renameErr)
+	}
+	values, defaultErr := ReadConfig(configPath, schema)
+	if defaultErr != nil {
+		return nil, target, defaultErr
+	}
+	return values, target, nil
 }
 
 func UpdateConfig(configPath string, schema ConfigSchema, fieldID, value string) error {

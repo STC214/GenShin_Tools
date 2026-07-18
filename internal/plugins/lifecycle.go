@@ -53,6 +53,83 @@ func Rollback(ctx context.Context, layout Layout, state *State, id, version stri
 	return commitInstall(layout, state, manifest, stageName, candidateDirectory)
 }
 
+// Uninstall removes one audited plugin without deleting its active directory
+// until the new state has been durably committed. Recovery either restores the
+// directory or completes cleanup after an interruption.
+func Uninstall(layout Layout, state *State, id string) (Manifest, error) {
+	if state == nil || !idPattern.MatchString(id) {
+		return Manifest{}, errors.New("invalid plugin uninstall request")
+	}
+	if err := layout.Ensure(); err != nil {
+		return Manifest{}, err
+	}
+	if err := RecoverTransaction(layout, state); err != nil {
+		return Manifest{}, err
+	}
+	active := filepath.Join(layout.Modules, id)
+	if err := rejectReparse(active); err != nil {
+		return Manifest{}, fmt.Errorf("active plugin directory: %w", err)
+	}
+	manifest, err := loadManifest(filepath.Join(active, "plugin.json"), id)
+	if err != nil {
+		return Manifest{}, fmt.Errorf("refuse to uninstall unauditable plugin: %w", err)
+	}
+	installed, tracked := state.Installed[id]
+	if !tracked {
+		return Manifest{}, errors.New("uninstall requires a transactionally installed plugin")
+	}
+	if installed.ActiveVersion != manifest.Version {
+		return Manifest{}, errors.New("plugin state active version does not match the active directory")
+	}
+	stageRoot, err := os.MkdirTemp(layout.Staging, id+"-uninstall-")
+	if err != nil {
+		return Manifest{}, err
+	}
+	stageName := filepath.Base(stageRoot)
+	backup := filepath.Join(stageRoot, "removed")
+	backupRelative, err := filepath.Rel(layout.Root, backup)
+	if err != nil {
+		_ = safeRemoveAll(layout.Staging, stageRoot)
+		return Manifest{}, err
+	}
+	journal := installJournal{SchemaVersion: installTransactionSchema, Operation: "uninstall", Phase: "prepared", PluginID: id, NewVersion: manifest.Version, OldVersion: manifest.Version, StageName: stageName, Backup: backupRelative}
+	if err := saveJournal(layout.Transaction, journal); err != nil {
+		_ = safeRemoveAll(layout.Staging, stageRoot)
+		return Manifest{}, err
+	}
+	failed := true
+	defer func() {
+		if failed {
+			_ = RecoverTransaction(layout, state)
+		}
+	}()
+	if err := os.Rename(active, backup); err != nil {
+		return Manifest{}, fmt.Errorf("isolate active plugin: %w", err)
+	}
+	journal.Phase = "old_moved"
+	if err := saveJournal(layout.Transaction, journal); err != nil {
+		return Manifest{}, err
+	}
+	next := CloneState(*state)
+	next.Enabled = removeString(next.Enabled, id)
+	next.Order = removeString(next.Order, id)
+	delete(next.Aliases, id)
+	delete(next.Installed, id)
+	if err := SaveState(layout.State, next); err != nil {
+		return Manifest{}, fmt.Errorf("commit plugin uninstall state: %w", err)
+	}
+	*state = next
+	journal.Phase = "state_committed"
+	if err := saveJournal(layout.Transaction, journal); err != nil {
+		return Manifest{}, err
+	}
+	failed = false
+	if err := cleanupUninstallTransaction(layout, journal); err != nil {
+		return Manifest{}, err
+	}
+	return manifest, nil
+}
+
 func copyPluginTree(ctx context.Context, source, destination string) error {
 	if err := os.MkdirAll(destination, 0o755); err != nil {
 		return err

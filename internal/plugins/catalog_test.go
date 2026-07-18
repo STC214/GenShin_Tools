@@ -36,6 +36,12 @@ func TestCatalogSyncQueryAndCache(t *testing.T) {
 	if err != nil || len(loaded.Plugins) != 2 {
 		t.Fatalf("loaded=%+v err=%v", loaded, err)
 	}
+	if _, err := LoadCatalogForSource(cache, server.URL+"/configured.json"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadCatalogForSource(cache, "https://different.invalid/catalog.json"); err == nil {
+		t.Fatal("cached catalog from another origin was accepted")
+	}
 }
 
 func TestCatalogRejectsExcludedScopeAndPreservesCache(t *testing.T) {

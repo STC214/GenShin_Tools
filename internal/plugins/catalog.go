@@ -102,6 +102,20 @@ func LoadCatalog(path string) (Catalog, error) {
 	return decodeCatalog(data)
 }
 
+func LoadCatalogForSource(path, catalogURL string) (Catalog, error) {
+	if err := validateHTTPSURL(catalogURL, "catalogUrl"); err != nil {
+		return Catalog{}, err
+	}
+	catalog, err := LoadCatalog(path)
+	if err != nil {
+		return Catalog{}, err
+	}
+	if !sameURLOrigin(catalogURL, catalog.SourceURL) {
+		return Catalog{}, errors.New("cached plugin catalog origin does not match the configured source")
+	}
+	return catalog, nil
+}
+
 func SyncCatalog(ctx context.Context, client *http.Client, catalogURL, destination string) (Catalog, error) {
 	if err := validateHTTPSURL(catalogURL, "catalogUrl"); err != nil {
 		return Catalog{}, err
@@ -120,6 +134,9 @@ func SyncCatalog(ctx context.Context, client *http.Client, catalogURL, destinati
 		return Catalog{}, err
 	}
 	defer response.Body.Close()
+	if response.Request == nil || response.Request.URL == nil || !sameURLOrigin(catalogURL, response.Request.URL.String()) {
+		return Catalog{}, errors.New("plugin catalog redirect changed the configured HTTPS origin")
+	}
 	if response.StatusCode != http.StatusOK {
 		return Catalog{}, fmt.Errorf("plugin catalog HTTP status %d", response.StatusCode)
 	}

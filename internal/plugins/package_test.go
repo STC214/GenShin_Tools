@@ -139,6 +139,71 @@ func TestInspectLocalPackageDerivesVerifiedIdentity(t *testing.T) {
 	}
 }
 
+func TestUninstallRemovesActiveVersionsAndState(t *testing.T) {
+	fixture := newPackageFixture(t)
+	state := DefaultState()
+	firstPath, firstItem := fixture.packageFile(t, "1.0.0", "")
+	if _, err := InstallLocalPackage(t.Context(), firstPath, firstItem, fixture.layout, fixture.candidate, &state); err != nil {
+		t.Fatal(err)
+	}
+	secondPath, secondItem := fixture.packageFile(t, "1.1.0", "")
+	if _, err := InstallLocalPackage(t.Context(), secondPath, secondItem, fixture.layout, fixture.candidate, &state); err != nil {
+		t.Fatal(err)
+	}
+	if err := SetEnabled(&state, "fixture", true); err != nil {
+		t.Fatal(err)
+	}
+	if err := SetAlias(&state, "fixture", "Test Alias"); err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveState(fixture.layout.State, state); err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := Uninstall(fixture.layout, &state, "fixture")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manifest.Version != "1.1.0" || containsExact(state.Enabled, "fixture") || containsExact(state.Order, "fixture") || state.Aliases["fixture"] != "" {
+		t.Fatalf("manifest=%+v state=%+v", manifest, state)
+	}
+	for _, path := range []string{filepath.Join(fixture.layout.Modules, "fixture"), filepath.Join(fixture.layout.Versions, "fixture"), fixture.layout.Transaction} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("uninstall left %s: %v", path, err)
+		}
+	}
+}
+
+func TestRecoverUninstallRestoresBeforeStateCommit(t *testing.T) {
+	fixture := newPackageFixture(t)
+	if err := fixture.layout.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	stageName := "fixture-uninstall-crash"
+	stageRoot := filepath.Join(fixture.layout.Staging, stageName)
+	backup := filepath.Join(stageRoot, "removed")
+	if err := os.MkdirAll(backup, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(backup, "marker.txt"), []byte("old"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	journal := installJournal{SchemaVersion: 1, Operation: "uninstall", Phase: "old_moved", PluginID: "fixture", NewVersion: "1.0.0", OldVersion: "1.0.0", StageName: stageName, Backup: filepath.Join("staging", stageName, "removed")}
+	if err := saveJournal(fixture.layout.Transaction, journal); err != nil {
+		t.Fatal(err)
+	}
+	state := DefaultState()
+	state.Installed["fixture"] = InstalledState{ActiveVersion: "1.0.0"}
+	if err := RecoverTransaction(fixture.layout, &state); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(fixture.layout.Modules, "fixture", "marker.txt")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(fixture.layout.Transaction); !os.IsNotExist(err) {
+		t.Fatalf("transaction journal remains: %v", err)
+	}
+}
+
 func TestInstallRejectsZipSlipWithoutActiveMutation(t *testing.T) {
 	fixture := newPackageFixture(t)
 	state := DefaultState()
