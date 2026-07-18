@@ -18,7 +18,7 @@ Phase 7 实现以下命令；Phase 1 可先实现只读最小版本：
 
 ```powershell
 ./scripts/upstream-check.ps1
-./scripts/upstream-check.ps1 -UpdateBaseline   # 仅在人工审计完成后允许
+./scripts/upstream-check.ps1 -UpdateBaseline -Disposition <reviewed-disposition.json>   # 仅在人工审计完成后允许
 ```
 
 脚本/内部 Go 工具执行：
@@ -30,7 +30,7 @@ Phase 7 实现以下命令；Phase 1 可先实现只读最小版本：
 5. 使用 `docs/upstream-scope-matrix.md` 的规则分为：`in_scope`、`excluded`、`review_required`、`dependency_risk`。
 6. 生成 Markdown 人读报告和 JSON 机器报告。
 7. 若出现 `review_required`、API/schema、注入二进制或下载端点变化，以非零退出码阻止自动抬升基线。
-8. 人工完成行为分析、本项目 issue/实现/测试链接后，才允许 `-UpdateBaseline` 写入新 SHA。
+8. 报告生成 `disposition.template.json`；人工完成行为分析、本项目实现/测试/文档引用及二进制、许可证、API/schema、排除范围复核后，才允许 `-UpdateBaseline -Disposition ...` 写入新 SHA。
 
 ## 3. 报告格式
 

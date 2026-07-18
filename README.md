@@ -28,6 +28,7 @@
 - [S10 插件管理、配置与商店验收记录](docs/s10-verification.md)
 - [S11 程序设置、语言与 UI 收尾设计](docs/s11-design.md)
 - [S11 程序设置、语言与 UI 收尾验收记录](docs/s11-verification.md)
+- [S12 本程序更新与上游自动对照设计](docs/s12-design.md)
 
 ## 当前结论
 
