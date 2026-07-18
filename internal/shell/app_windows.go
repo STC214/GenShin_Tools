@@ -313,6 +313,7 @@ func Run(layout paths.Layout, build buildinfo.Info) (returnErr error) {
 	if err != nil {
 		return err
 	}
+	texts := localization.New(localization.Language(loaded.Settings.Shell.Language), win32.UserDefaultLocaleName())
 	pluginLayout, err := plugins.NewLayout(layout.Data, layout.Modules)
 	if err != nil {
 		return fmt.Errorf("create plugin layout: %w", err)
@@ -337,22 +338,22 @@ func Run(layout paths.Layout, build buildinfo.Info) (returnErr error) {
 	}
 	pluginCatalog := plugins.Catalog{}
 	pluginCatalogPage := plugins.CatalogPage{}
-	pluginStatus := fmt.Sprintf("已发现 %d 个本地插件；目录源默认关闭", len(pluginItems))
+	pluginStatus := fmt.Sprintf(texts.Text("plugin.status.initialDiscovered"), len(pluginItems))
 	if loaded.Settings.Plugins.CatalogURL != "" {
 		cached, cacheErr := plugins.LoadCatalogForSource(pluginLayout.Catalog, loaded.Settings.Plugins.CatalogURL)
 		if cacheErr == nil {
 			if page, queryErr := plugins.QueryCatalog(cached, loaded.Settings.Plugins); queryErr == nil {
 				pluginCatalog, pluginCatalogPage = cached, page
-				pluginStatus = fmt.Sprintf("已载入目录缓存：%d 项；重新扫描可联网同步", page.Total)
+				pluginStatus = fmt.Sprintf(texts.Text("plugin.status.cacheLoaded"), page.Total)
 			}
 		} else if !errors.Is(cacheErr, os.ErrNotExist) {
-			pluginStatus = "插件目录缓存无效，未影响本地插件"
+			pluginStatus = texts.Text("plugin.status.cacheInvalid")
 		}
 	}
 	app := &application{
 		instance:            win32.ModuleHandle(),
 		settings:            loaded.Settings,
-		texts:               localization.New(localization.Language(loaded.Settings.Shell.Language), win32.UserDefaultLocaleName()),
+		texts:               texts,
 		lastBounds:          loaded.Settings.Window,
 		layout:              layout,
 		build:               build,
@@ -386,13 +387,14 @@ func Run(layout paths.Layout, build buildinfo.Info) (returnErr error) {
 		shellStatus:         "",
 		captureStatus:       "",
 		overlayStatus:       "",
-		injectionStatus:     "注入默认关闭；纯净启动始终可用",
+		injectionStatus:     "",
 	}
 	app.shellStatus = app.texts.Text("settings.status.ready")
 	app.resourceState.Status = app.texts.Text("resource.status.ready")
 	app.serverState.Status = app.texts.Text("server.status.ready")
 	app.captureStatus = app.texts.Text("media.status.captureDisabled")
 	app.overlayStatus = app.texts.Text("media.status.overlayDisabled")
+	app.injectionStatus = app.texts.Text("injection.status.ready")
 	app.publishCPUWarningConfig()
 	app.palette = uitheme.Current(app.settings.Shell.Theme)
 	win32.SetColorTransform(app.palette.Map)
@@ -409,7 +411,7 @@ func Run(layout paths.Layout, build buildinfo.Info) (returnErr error) {
 	}
 	if pluginLoad.RecoveredFrom != "" {
 		logger.Error("corrupt plugin state quarantined", map[string]any{"path": pluginLoad.RecoveredFrom})
-		app.pluginStatus = "损坏的插件状态已隔离，已恢复安全默认值"
+		app.pluginStatus = app.texts.Text("plugin.status.stateRecovered")
 	}
 	if err := resources.RecoverTransactions(layout.Staging); err != nil {
 		logger.Error("resource transaction recovery", map[string]any{"error": err.Error()})
@@ -632,7 +634,7 @@ func (app *application) handleMessage(hwnd win32.HWND, message uint32, wParam, l
 			default:
 				if previous != launch.StateRunning && app.launchSnap.State == launch.StateRunning {
 					if app.injectionLaunching {
-						app.injectionStatus = fmt.Sprintf("注入启动成功：PID %d；模块已由 helper 核验", app.launchSnap.PID)
+						app.injectionStatus = fmt.Sprintf(app.texts.Text("injection.status.launchSuccess"), app.launchSnap.PID)
 						app.injectionLaunching = false
 					}
 					app.applyPostLaunch(app.launchSnap.PostBehavior)
@@ -732,11 +734,14 @@ func (app *application) handleMessage(hwnd win32.HWND, message uint32, wParam, l
 							selected = selected || module.Manifest.ID == app.settings.Injection.ModuleID
 						}
 						if !selected {
-							app.settings.Injection.ModuleID = ""
+							next := app.settings.Injection
+							next.ModuleID = ""
 							if len(update.modules) > 0 {
-								app.settings.Injection.ModuleID = update.modules[0].Manifest.ID
+								next.ModuleID = update.modules[0].Manifest.ID
 							}
-							app.saveInjectionSettings()
+							if !app.commitInjectionSettings(next) {
+								update.status = ""
+							}
 						}
 					}
 					if update.err != "" {
@@ -1580,17 +1585,19 @@ func metricValue(value float64, valid bool) string {
 	return fmt.Sprintf("%.1f", value)
 }
 
-func (app *application) saveInjectionSettings() bool {
-	normalized, err := app.settings.Injection.Normalized()
+func (app *application) commitInjectionSettings(next injection.Config) bool {
+	normalized, err := next.Normalized()
 	if err != nil {
-		app.injectionStatus = "注入设置无效：" + err.Error()
+		app.injectionStatus = fmt.Sprintf(app.texts.Text("injection.status.invalid"), err)
 		return false
 	}
-	app.settings.Injection = normalized
-	if err := config.Save(app.layout.Config, app.settings); err != nil {
-		app.injectionStatus = "保存注入设置失败：" + err.Error()
+	settings := app.settings
+	settings.Injection = normalized
+	if err := config.Save(app.layout.Config, settings); err != nil {
+		app.injectionStatus = fmt.Sprintf(app.texts.Text("injection.status.saveFailed"), err)
 		return false
 	}
+	app.settings = settings
 	return true
 }
 
@@ -1613,12 +1620,13 @@ func (app *application) publishInjection(update injectionUpdate) {
 
 func (app *application) startInjectionAudit() {
 	if app.gameState.Candidate == nil {
-		app.injectionStatus = "请先在游戏管理页完成游戏路径与版本扫描"
+		app.injectionStatus = app.texts.Text("injection.status.auditNeedGame")
 		return
 	}
 	app.tasks.Cancel(app.injectionAuditTask)
 	candidate := *app.gameState.Candidate
-	app.injectionStatus = "正在后台核验模块 manifest、PE、版本与 SHA-256…"
+	app.injectionStatus = app.texts.Text("injection.status.auditing")
+	texts := app.texts
 	app.injectionAuditTask = app.tasks.Run(func(ctx context.Context, id uint64) {
 		modules, warnings, err := injection.DiscoverCompatible(app.layout.Modules, candidate)
 		if ctx.Err() != nil {
@@ -1626,9 +1634,9 @@ func (app *application) startInjectionAudit() {
 		}
 		update := injectionUpdate{taskID: id, kind: 0, modules: modules, warnings: warnings}
 		if err != nil {
-			update.err = "模块审计失败：" + err.Error()
+			update.err = fmt.Sprintf(texts.Text("injection.status.auditFailed"), err)
 		} else {
-			update.status = fmt.Sprintf("审计完成：%d 个兼容模块，%d 个拒绝/警告", len(modules), len(warnings))
+			update.status = fmt.Sprintf(texts.Text("injection.status.auditComplete"), len(modules), len(warnings))
 		}
 		app.publishInjection(update)
 	})
@@ -1636,10 +1644,10 @@ func (app *application) startInjectionAudit() {
 
 func (app *application) startInjectionLaunch() {
 	if app.gameState.Candidate == nil || app.launchEngine == nil || !app.syncLaunchConfig() {
-		app.injectionStatus = "请先完成游戏扫描和启动设置校验"
+		app.injectionStatus = app.texts.Text("injection.status.launchNeedGame")
 		return
 	}
-	if !app.saveInjectionSettings() {
+	if !app.commitInjectionSettings(app.settings.Injection) {
 		return
 	}
 	settings := app.settings.Injection
@@ -1650,24 +1658,25 @@ func (app *application) startInjectionLaunch() {
 	}
 	moduleIDs := plugins.EnabledInOrder(app.pluginState, available)
 	if len(moduleIDs) > 0 && app.settings.Plugins.SafeMode {
-		app.injectionStatus = "注入启动被插件安全模式阻止；请在插件页明确关闭安全模式"
+		app.injectionStatus = app.texts.Text("injection.status.safeModeBlocked")
 		return
 	}
 	if !settings.Enabled || !settings.RiskAcknowledged || (settings.ModuleID == "" && len(moduleIDs) == 0) {
-		app.injectionStatus = "注入启动被拒绝：请启用注入、确认风险并选择兼容模块"
+		app.injectionStatus = app.texts.Text("injection.status.rejected")
 		return
 	}
 	app.tasks.Cancel(app.injectionLaunchTask)
 	candidate := *app.gameState.Candidate
-	app.injectionStatus = "正在独立 helper 中重复预检并启动…"
+	app.injectionStatus = app.texts.Text("injection.status.starting")
 	app.injectionLaunching = true
+	texts := app.texts
 	app.injectionLaunchTask = app.tasks.Run(func(ctx context.Context, id uint64) {
 		starter := injection.Starter{Context: ctx, HelperPath: filepath.Join(app.layout.Root, "GenshinTools-injector.exe"), ModulesRoot: app.layout.Modules, StagingRoot: app.layout.Staging, Config: settings, ModuleIDs: moduleIDs}
 		err := app.launchEngine.LaunchWithStarter(candidate, launchSettings, starter)
-		update := injectionUpdate{taskID: id, kind: 1, status: "helper 已完成，正在接管游戏进程观察"}
+		update := injectionUpdate{taskID: id, kind: 1, status: texts.Text("injection.status.helperDone")}
 		if err != nil {
 			update.status = ""
-			update.err = "注入启动失败：" + err.Error() + "；可立即使用纯净启动"
+			update.err = fmt.Sprintf(texts.Text("injection.status.launchFailed"), err)
 		}
 		app.publishInjection(update)
 	})
@@ -1677,11 +1686,13 @@ func (app *application) injectionClick(y int) {
 	sy := func(value int32) int { return int(win32.Scale(value, app.dpi)) }
 	switch {
 	case y >= sy(170) && y < sy(214):
-		app.settings.Injection.Enabled = !app.settings.Injection.Enabled
-		app.saveInjectionSettings()
+		next := app.settings.Injection
+		next.Enabled = !next.Enabled
+		app.commitInjectionSettings(next)
 	case y >= sy(220) && y < sy(264):
-		app.settings.Injection.RiskAcknowledged = !app.settings.Injection.RiskAcknowledged
-		app.saveInjectionSettings()
+		next := app.settings.Injection
+		next.RiskAcknowledged = !next.RiskAcknowledged
+		app.commitInjectionSettings(next)
 	case y >= sy(270) && y < sy(314):
 		if len(app.injectionModules) == 0 {
 			app.startInjectionAudit()
@@ -1694,9 +1705,11 @@ func (app *application) injectionClick(y int) {
 				break
 			}
 		}
-		app.settings.Injection.ModuleID = app.injectionModules[index].Manifest.ID
-		app.injectionStatus = "已选择模块：" + app.injectionModules[index].Manifest.Name
-		app.saveInjectionSettings()
+		next := app.settings.Injection
+		next.ModuleID = app.injectionModules[index].Manifest.ID
+		if app.commitInjectionSettings(next) {
+			app.injectionStatus = fmt.Sprintf(app.texts.Text("injection.status.moduleSelected"), app.injectionModules[index].Manifest.Name)
+		}
 	case y >= sy(320) && y < sy(364):
 		app.startInjectionAudit()
 	case y >= sy(370) && y < sy(414):
@@ -1704,11 +1717,11 @@ func (app *application) injectionClick(y int) {
 	case y >= sy(420) && y < sy(464):
 		app.injectionLaunching = false
 		if app.gameState.Candidate == nil || app.launchEngine == nil || !app.syncLaunchConfig() {
-			app.injectionStatus = "请先完成游戏扫描"
+			app.injectionStatus = app.texts.Text("injection.status.cleanNeedGame")
 		} else if err := app.launchEngine.Launch(*app.gameState.Candidate, app.settings.Launch); err != nil {
-			app.injectionStatus = "纯净启动失败：" + err.Error()
+			app.injectionStatus = fmt.Sprintf(app.texts.Text("injection.status.cleanFailed"), err)
 		} else {
-			app.injectionStatus = "已使用 S05 纯净启动路径"
+			app.injectionStatus = app.texts.Text("injection.status.cleanStarted")
 		}
 	case y >= sy(470) && y < sy(514):
 		presets := [][2]int{{15000, 5000}, {30000, 10000}, {60000, 20000}}
@@ -1719,8 +1732,11 @@ func (app *application) injectionClick(y int) {
 				break
 			}
 		}
-		app.settings.Injection.HelperTimeoutMS, app.settings.Injection.RemoteTimeoutMS = presets[index][0], presets[index][1]
-		app.saveInjectionSettings()
+		next := app.settings.Injection
+		next.HelperTimeoutMS, next.RemoteTimeoutMS = presets[index][0], presets[index][1]
+		if app.commitInjectionSettings(next) {
+			app.injectionStatus = app.texts.Text("injection.status.timeoutChanged")
+		}
 	}
 	win32.Invalidate(app.hwnd)
 }
@@ -1747,22 +1763,29 @@ func (app *application) paintInjection(dc win32.HDC, client win32.Rect, left int
 		win32.DrawText(dc, text, &rect, win32.DT_LEFT|win32.DT_VCENTER|win32.DT_SINGLELINE|win32.DT_END_ELLIPSIS)
 	}
 	settings := app.settings.Injection
-	draw("注入适配："+map[bool]string{true: "启用", false: "关闭"}[settings.Enabled]+"    默认关闭，单击切换", row(170, 214, accentBrush), win32.Color(235, 238, 248))
-	draw("风险确认："+map[bool]string{true: "已确认", false: "未确认"}[settings.RiskAcknowledged]+"    可能触发反作弊、崩溃或账号风险", row(220, 264, warningBrush), win32.Color(255, 205, 150))
-	module := "无兼容模块"
+	draw(fmt.Sprintf(app.texts.Text("injection.enabled"), onOffText(app.texts.Language(), settings.Enabled)), row(170, 214, accentBrush), win32.Color(235, 238, 248))
+	risk := app.texts.Text("injection.risk.unconfirmed")
+	if settings.RiskAcknowledged {
+		risk = app.texts.Text("injection.risk.confirmed")
+	}
+	draw(fmt.Sprintf(app.texts.Text("injection.risk"), risk), row(220, 264, warningBrush), win32.Color(255, 205, 150))
+	module := app.texts.Text("injection.module.none")
 	for _, audit := range app.injectionModules {
 		if audit.Manifest.ID == settings.ModuleID {
 			module = audit.Manifest.Name + " · " + audit.SHA256[:12]
 			break
 		}
 	}
-	draw("模块："+module+"    单击切换", row(270, 314, buttonBrush), win32.Color(225, 229, 242))
-	draw("重新审计 data\\injection\\modules（不会联网下载）", row(320, 364, buttonBrush), win32.Color(190, 197, 216))
-	helperMode := map[bool]string{true: "管理员", false: "当前用户"}[settings.ElevatedHelper]
-	draw("使用独立 "+helperMode+" helper 注入启动", row(370, 414, warningBrush), win32.Color(255, 205, 150))
-	draw("立即纯净启动（与 S05 完全相同）", row(420, 464, accentBrush), win32.Color(235, 238, 248))
-	draw(fmt.Sprintf("超时：helper %.0f 秒 · 远程加载 %.0f 秒    单击切换", float64(settings.HelperTimeoutMS)/1000, float64(settings.RemoteTimeoutMS)/1000), row(470, 514, buttonBrush), win32.Color(190, 197, 216))
-	warning := "无模块审计警告"
+	draw(fmt.Sprintf(app.texts.Text("injection.module"), module), row(270, 314, buttonBrush), win32.Color(225, 229, 242))
+	draw(app.texts.Text("injection.audit"), row(320, 364, buttonBrush), win32.Color(190, 197, 216))
+	helperMode := app.texts.Text("injection.helper.current")
+	if settings.ElevatedHelper {
+		helperMode = app.texts.Text("injection.helper.admin")
+	}
+	draw(fmt.Sprintf(app.texts.Text("injection.launch"), helperMode), row(370, 414, warningBrush), win32.Color(255, 205, 150))
+	draw(app.texts.Text("injection.cleanLaunch"), row(420, 464, accentBrush), win32.Color(235, 238, 248))
+	draw(fmt.Sprintf(app.texts.Text("injection.timeout"), float64(settings.HelperTimeoutMS)/1000, float64(settings.RemoteTimeoutMS)/1000), row(470, 514, buttonBrush), win32.Color(190, 197, 216))
+	warning := app.texts.Text("injection.warning.none")
 	if len(app.injectionWarnings) > 0 {
 		warning = app.injectionWarnings[0]
 	}
@@ -1770,24 +1793,26 @@ func (app *application) paintInjection(dc win32.HDC, client win32.Rect, left int
 	draw(app.injectionStatus, row(572, 612, cardBrush), win32.Color(145, 154, 180))
 }
 
-func (app *application) savePluginSettings() bool {
-	normalized, err := app.settings.Plugins.Normalized()
+func (app *application) commitPluginSettings(next plugins.Config) bool {
+	normalized, err := next.Normalized()
 	if err != nil {
-		app.pluginStatus = "插件设置无效：" + err.Error()
+		app.pluginStatus = fmt.Sprintf(app.texts.Text("plugin.status.invalid"), err)
 		return false
 	}
-	app.settings.Plugins = normalized
-	if err := config.Save(app.layout.Config, app.settings); err != nil {
-		app.pluginStatus = "保存插件设置失败：" + err.Error()
+	settings := app.settings
+	settings.Plugins = normalized
+	if err := config.Save(app.layout.Config, settings); err != nil {
+		app.pluginStatus = fmt.Sprintf(app.texts.Text("plugin.status.saveFailed"), err)
 		return false
 	}
+	app.settings = settings
 	return true
 }
 
 func (app *application) refreshPlugins() bool {
 	items, warnings, err := plugins.Discover(app.layout.Modules, app.pluginState)
 	if err != nil {
-		app.pluginStatus = "发现插件失败：" + err.Error()
+		app.pluginStatus = fmt.Sprintf(app.texts.Text("plugin.status.discoverFailed"), err)
 		return false
 	}
 	app.pluginItems, app.pluginWarnings = items, warnings
@@ -1801,7 +1826,7 @@ func (app *application) refreshPlugins() bool {
 			app.pluginSelected = items[0].Manifest.ID
 		}
 	}
-	app.pluginStatus = fmt.Sprintf("已发现 %d 个插件，%d 条警告", len(items), len(warnings))
+	app.pluginStatus = fmt.Sprintf(app.texts.Text("plugin.status.discovered"), len(items), len(warnings))
 	return true
 }
 
@@ -1818,9 +1843,14 @@ func (app *application) pluginClick(x, y int) {
 	sy := func(value int32) int { return int(app.pluginContentY(value)) }
 	switch {
 	case y >= sy(170) && y < sy(214):
-		app.settings.Plugins.SafeMode = !app.settings.Plugins.SafeMode
-		if app.savePluginSettings() {
-			app.pluginStatus = map[bool]string{true: "安全模式已开启：插件不会注入", false: "安全模式已关闭：仅启用插件会按顺序注入"}[app.settings.Plugins.SafeMode]
+		next := app.settings.Plugins
+		next.SafeMode = !next.SafeMode
+		if app.commitPluginSettings(next) {
+			if next.SafeMode {
+				app.pluginStatus = app.texts.Text("plugin.status.safeOn")
+			} else {
+				app.pluginStatus = app.texts.Text("plugin.status.safeOff")
+			}
 		}
 	case y >= sy(220) && y < sy(264):
 		app.refreshPlugins()
@@ -1829,7 +1859,7 @@ func (app *application) pluginClick(x, y int) {
 		}
 	case y >= sy(270) && y < sy(314):
 		if len(app.pluginItems) == 0 {
-			app.pluginStatus = "没有已安装插件"
+			app.pluginStatus = app.texts.Text("plugin.status.noneInstalled")
 			break
 		}
 		index := 0
@@ -1842,18 +1872,18 @@ func (app *application) pluginClick(x, y int) {
 		app.pluginSelected = app.pluginItems[index].Manifest.ID
 		app.pluginDeleteConfirm = ""
 		app.syncPluginAliasEdit()
-		app.pluginStatus = "已选择：" + app.pluginItems[index].DisplayName()
+		app.pluginStatus = fmt.Sprintf(app.texts.Text("plugin.status.selected"), app.pluginItems[index].DisplayName())
 	case y >= sy(320) && y < sy(364):
 		item, ok := app.selectedPlugin()
 		if !ok {
-			app.pluginStatus = "请先选择插件"
+			app.pluginStatus = app.texts.Text("plugin.status.selectFirst")
 			break
 		}
 		next := plugins.CloneState(app.pluginState)
 		if err := plugins.SetEnabled(&next, item.Manifest.ID, !item.Enabled); err != nil {
-			app.pluginStatus = "切换插件失败：" + err.Error()
+			app.pluginStatus = fmt.Sprintf(app.texts.Text("plugin.status.toggleFailed"), err)
 		} else if err := plugins.SaveState(app.pluginLayout.State, next); err != nil {
-			app.pluginStatus = "保存插件状态失败：" + err.Error()
+			app.pluginStatus = fmt.Sprintf(app.texts.Text("plugin.status.stateSaveFailed"), err)
 		} else {
 			app.pluginState = next
 			app.refreshPlugins()
@@ -1894,52 +1924,60 @@ func (app *application) pluginClick(x, y int) {
 func (app *application) savePluginAlias() {
 	item, ok := app.selectedPlugin()
 	if !ok {
-		app.pluginStatus = "请先选择插件"
+		app.pluginStatus = app.texts.Text("plugin.status.selectFirst")
 		return
 	}
 	alias := win32.GetWindowText(app.pluginAliasEdit)
 	next := plugins.CloneState(app.pluginState)
 	if err := plugins.SetAlias(&next, item.Manifest.ID, alias); err != nil {
-		app.pluginStatus = "插件别名无效：" + err.Error()
+		app.pluginStatus = fmt.Sprintf(app.texts.Text("plugin.status.aliasInvalid"), err)
 		return
 	}
 	if err := plugins.SaveState(app.pluginLayout.State, next); err != nil {
-		app.pluginStatus = "保存插件别名失败：" + err.Error()
+		app.pluginStatus = fmt.Sprintf(app.texts.Text("plugin.status.aliasSaveFailed"), err)
 		return
 	}
 	app.pluginState = next
 	app.refreshPlugins()
-	app.pluginStatus = "插件别名已保存"
+	app.pluginStatus = app.texts.Text("plugin.status.aliasSaved")
 }
 
-func (app *application) savePluginCatalogURL() {
+func (app *application) savePluginCatalogURL() bool {
 	if app.pluginCatalogEdit == 0 {
-		return
+		return false
+	}
+	if app.pluginBusy {
+		app.pluginStatus = app.texts.Text("plugin.status.taskBusy")
+		win32.SetWindowText(app.pluginCatalogEdit, app.settings.Plugins.CatalogURL)
+		return false
 	}
 	next := app.settings.Plugins
 	next.CatalogURL = strings.TrimSpace(win32.GetWindowText(app.pluginCatalogEdit))
 	normalized, err := next.Normalized()
 	if err != nil {
-		app.pluginStatus = "插件目录 URL 无效：" + err.Error()
+		app.pluginStatus = fmt.Sprintf(app.texts.Text("plugin.store.status.urlInvalid"), err)
 		win32.SetWindowText(app.pluginCatalogEdit, app.settings.Plugins.CatalogURL)
-		return
+		return false
 	}
 	settings := app.settings
 	settings.Plugins = normalized
 	if err := config.Save(app.layout.Config, settings); err != nil {
-		app.pluginStatus = "保存插件目录 URL 失败：" + err.Error()
+		app.pluginStatus = fmt.Sprintf(app.texts.Text("plugin.store.status.urlSaveFailed"), err)
 		win32.SetWindowText(app.pluginCatalogEdit, app.settings.Plugins.CatalogURL)
-		return
+		return false
 	}
+	changed := normalized.CatalogURL != app.settings.Plugins.CatalogURL
 	app.settings = settings
-	app.publishCPUWarningConfig()
-	if normalized.CatalogURL == "" {
+	if changed || normalized.CatalogURL == "" {
 		app.pluginCatalog = plugins.Catalog{}
 		app.pluginCatalogPage = plugins.CatalogPage{}
-		app.pluginStatus = "插件目录已关闭；不会发起目录网络请求"
-	} else {
-		app.pluginStatus = "插件目录 URL 已保存；单击重新扫描以同步"
 	}
+	if normalized.CatalogURL == "" {
+		app.pluginStatus = app.texts.Text("plugin.store.status.disabled")
+	} else {
+		app.pluginStatus = app.texts.Text("plugin.store.status.urlSaved")
+	}
+	return true
 }
 
 func (app *application) startPluginCatalogSync() {
@@ -1950,67 +1988,85 @@ func (app *application) startPluginCatalogSync() {
 	configCopy := app.settings.Plugins
 	destination := app.pluginLayout.Catalog
 	app.pluginBusy = true
-	app.pluginStatus = "正在同步并校验插件目录"
+	app.pluginStatus = app.texts.Text("plugin.store.status.syncing")
+	texts := app.texts
 	app.pluginTask = app.tasks.Run(func(ctx context.Context, id uint64) {
 		catalog, err := plugins.SyncCatalog(ctx, nil, url, destination)
 		if err != nil {
-			app.publishPlugin(pluginUpdate{taskID: id, err: "插件目录同步失败，保留原缓存：" + err.Error()})
+			app.publishPlugin(pluginUpdate{taskID: id, err: fmt.Sprintf(texts.Text("plugin.store.status.syncFailed"), err)})
 			return
 		}
 		page, err := plugins.QueryCatalog(catalog, configCopy)
 		if err != nil {
-			app.publishPlugin(pluginUpdate{taskID: id, err: "插件目录查询失败：" + err.Error()})
+			app.publishPlugin(pluginUpdate{taskID: id, err: fmt.Sprintf(texts.Text("plugin.store.status.queryFailed"), err)})
 			return
 		}
-		app.publishPlugin(pluginUpdate{taskID: id, catalog: &catalog, page: page, status: fmt.Sprintf("目录同步完成：共 %d 项，当前第 %d/%d 页", page.Total, page.Page, page.TotalPages)})
+		app.publishPlugin(pluginUpdate{taskID: id, catalog: &catalog, page: page, status: fmt.Sprintf(texts.Text("plugin.store.status.synced"), page.Total, page.Page, page.TotalPages)})
 	})
 }
 
-func (app *application) savePluginSearch() {
+func (app *application) savePluginSearch() bool {
 	if app.pluginSearchEdit == 0 {
-		return
+		return false
+	}
+	if app.pluginBusy {
+		app.pluginStatus = app.texts.Text("plugin.status.taskBusy")
+		win32.SetWindowText(app.pluginSearchEdit, app.settings.Plugins.Search)
+		return false
 	}
 	next := app.settings.Plugins
 	next.Search = strings.TrimSpace(win32.GetWindowText(app.pluginSearchEdit))
 	next.Page = 1
-	app.applyPluginStoreConfig(next)
+	return app.applyPluginStoreConfig(next)
 }
 
-func (app *application) applyPluginStoreConfig(next plugins.Config) {
+func (app *application) applyPluginStoreConfig(next plugins.Config) bool {
+	if app.pluginBusy {
+		app.pluginStatus = app.texts.Text("plugin.status.taskBusy")
+		return false
+	}
 	normalized, err := next.Normalized()
 	if err != nil {
-		app.pluginStatus = "插件商店筛选无效：" + err.Error()
-		return
+		app.pluginStatus = fmt.Sprintf(app.texts.Text("plugin.store.status.filterInvalid"), err)
+		return false
 	}
+	page := app.pluginCatalogPage
 	if app.pluginCatalog.SchemaVersion != 0 {
-		page, err := plugins.QueryCatalog(app.pluginCatalog, normalized)
+		page, err = plugins.QueryCatalog(app.pluginCatalog, normalized)
 		if err != nil {
-			app.pluginStatus = "筛选插件目录失败：" + err.Error()
-			return
+			app.pluginStatus = fmt.Sprintf(app.texts.Text("plugin.store.status.filterFailed"), err)
+			return false
 		}
-		app.pluginCatalogPage = page
 		normalized.Page = page.Page
 	}
 	settings := app.settings
 	settings.Plugins = normalized
 	if err := config.Save(app.layout.Config, settings); err != nil {
-		app.pluginStatus = "保存插件商店设置失败：" + err.Error()
-		return
+		app.pluginStatus = fmt.Sprintf(app.texts.Text("plugin.store.status.saveFailed"), err)
+		return false
 	}
 	app.settings = settings
-	app.pluginStatus = fmt.Sprintf("商店筛选已更新：%d 项", app.pluginCatalogPage.Total)
+	app.pluginCatalogPage = page
+	app.pluginStatus = fmt.Sprintf(app.texts.Text("plugin.store.status.filterUpdated"), page.Total)
+	return true
 }
 
 func (app *application) pluginStoreClick(x, y int) {
+	if app.pluginBusy {
+		app.pluginStatus = app.texts.Text("plugin.status.taskBusy")
+		win32.Invalidate(app.hwnd)
+		return
+	}
 	sy := func(value int32) int { return int(app.pluginContentY(value)) }
 	switch {
 	case y >= sy(270) && y < sy(314):
-		app.savePluginCatalogURL()
-		app.savePluginSearch()
+		if !app.savePluginCatalogURL() || !app.savePluginSearch() {
+			break
+		}
 		app.startPluginCatalogSync()
 	case y >= sy(320) && y < sy(364):
 		if len(app.pluginCatalogPage.Items) == 0 {
-			app.pluginStatus = "当前筛选没有商店插件"
+			app.pluginStatus = app.texts.Text("plugin.store.status.empty")
 			break
 		}
 		index := 0
@@ -2021,7 +2077,7 @@ func (app *application) pluginStoreClick(x, y int) {
 			}
 		}
 		app.pluginSelected = app.pluginCatalogPage.Items[index].ID
-		app.pluginStatus = "商店已选择：" + app.pluginCatalogPage.Items[index].Name
+		app.pluginStatus = fmt.Sprintf(app.texts.Text("plugin.store.status.selected"), app.pluginCatalogPage.Items[index].Name)
 	case y >= sy(370) && y < sy(414):
 		values := []string{"", "utility", "gameplay", "visuals", "other"}
 		index := 0
@@ -2076,23 +2132,24 @@ func (app *application) selectedCatalogPlugin() (plugins.CatalogItem, bool) {
 
 func (app *application) startCatalogPluginInstall() {
 	if app.pluginBusy || app.gameState.Candidate == nil {
-		app.pluginStatus = "请等待当前任务结束并先完成游戏扫描"
+		app.pluginStatus = app.texts.Text("plugin.store.status.busyNeedGame")
 		return
 	}
 	item, ok := app.selectedCatalogPlugin()
 	if !ok {
-		app.pluginStatus = "请先同步并选择商店插件"
+		app.pluginStatus = app.texts.Text("plugin.store.status.selectFirst")
 		return
 	}
 	state := plugins.CloneState(app.pluginState)
 	candidate := *app.gameState.Candidate
 	layout := app.pluginLayout
 	app.pluginBusy = true
-	app.pluginStatus = "正在下载、校验并隔离安装 " + item.Name
+	app.pluginStatus = fmt.Sprintf(app.texts.Text("plugin.store.status.downloading"), item.Name)
+	texts := app.texts
 	app.pluginTask = app.tasks.Run(func(ctx context.Context, id uint64) {
 		temporary, err := os.CreateTemp(layout.Staging, item.ID+"-download-*.zip")
 		if err != nil {
-			app.publishPlugin(pluginUpdate{taskID: id, err: "创建插件下载暂存文件失败：" + err.Error()})
+			app.publishPlugin(pluginUpdate{taskID: id, err: fmt.Sprintf(texts.Text("plugin.store.status.stagingFailed"), err)})
 			return
 		}
 		packagePath := temporary.Name()
@@ -2100,15 +2157,15 @@ func (app *application) startCatalogPluginInstall() {
 		_ = os.Remove(packagePath)
 		defer os.Remove(packagePath)
 		if err := plugins.DownloadPackage(ctx, nil, item, packagePath); err != nil {
-			app.publishPlugin(pluginUpdate{taskID: id, err: "下载插件失败：" + err.Error()})
+			app.publishPlugin(pluginUpdate{taskID: id, err: fmt.Sprintf(texts.Text("plugin.store.status.downloadFailed"), err)})
 			return
 		}
 		result, err := plugins.InstallLocalPackage(ctx, packagePath, item, layout, candidate, &state)
 		if err != nil {
-			app.publishPlugin(pluginUpdate{taskID: id, err: "安装商店插件失败：" + err.Error()})
+			app.publishPlugin(pluginUpdate{taskID: id, err: fmt.Sprintf(texts.Text("plugin.store.status.installFailed"), err)})
 			return
 		}
-		app.publishPlugin(pluginUpdate{taskID: id, state: &state, status: "商店插件已安装：" + result.Manifest.Name + " " + result.Manifest.Version})
+		app.publishPlugin(pluginUpdate{taskID: id, state: &state, status: fmt.Sprintf(texts.Text("plugin.store.status.installed"), result.Manifest.Name, result.Manifest.Version)})
 	})
 }
 
@@ -2122,16 +2179,16 @@ func (app *application) publishPlugin(update pluginUpdate) {
 
 func (app *application) startLocalPluginInstall() {
 	if app.pluginBusy {
-		app.pluginStatus = "已有插件任务正在执行"
+		app.pluginStatus = app.texts.Text("plugin.status.taskBusy")
 		return
 	}
 	if app.gameState.Candidate == nil {
-		app.pluginStatus = "请先在游戏管理页完成游戏路径和版本扫描"
+		app.pluginStatus = app.texts.Text("plugin.status.needGame")
 		return
 	}
-	packagePath, selected, err := win32.SelectPluginPackage(app.hwnd, app.layout.Root)
+	packagePath, selected, err := win32.SelectPluginPackageWithTitle(app.hwnd, app.layout.Root, app.texts.Text("plugin.package.prompt"))
 	if err != nil {
-		app.pluginStatus = "选择插件包失败：" + err.Error()
+		app.pluginStatus = fmt.Sprintf(app.texts.Text("plugin.status.packageSelectFailed"), err)
 		return
 	}
 	if !selected {
@@ -2141,21 +2198,22 @@ func (app *application) startLocalPluginInstall() {
 	candidate := *app.gameState.Candidate
 	layout := app.pluginLayout
 	app.pluginBusy = true
-	app.pluginStatus = "正在隔离区审计本地插件包；完成前不会修改活动插件"
+	app.pluginStatus = app.texts.Text("plugin.status.auditingPackage")
+	texts := app.texts
 	app.pluginTask = app.tasks.Run(func(ctx context.Context, id uint64) {
 		item, inspectErr := plugins.InspectLocalPackage(packagePath)
 		if inspectErr != nil {
-			app.publishPlugin(pluginUpdate{taskID: id, err: "读取插件包失败：" + inspectErr.Error()})
+			app.publishPlugin(pluginUpdate{taskID: id, err: fmt.Sprintf(texts.Text("plugin.status.packageReadFailed"), inspectErr)})
 			return
 		}
 		result, installErr := plugins.InstallLocalPackage(ctx, packagePath, item, layout, candidate, &state)
 		if installErr != nil {
-			app.publishPlugin(pluginUpdate{taskID: id, err: "安装插件失败：" + installErr.Error()})
+			app.publishPlugin(pluginUpdate{taskID: id, err: fmt.Sprintf(texts.Text("plugin.status.installFailed"), installErr)})
 			return
 		}
-		status := "插件已安装：" + result.Manifest.Name + " " + result.Manifest.Version
+		status := fmt.Sprintf(texts.Text("plugin.status.installed"), result.Manifest.Name, result.Manifest.Version)
 		if result.RollbackReady {
-			status += "；上一版本已保留用于回滚"
+			status += texts.Text("plugin.status.rollbackRetained")
 		}
 		app.publishPlugin(pluginUpdate{taskID: id, state: &state, status: status})
 	})
@@ -2163,17 +2221,17 @@ func (app *application) startLocalPluginInstall() {
 
 func (app *application) startPluginRollback() {
 	if app.pluginBusy {
-		app.pluginStatus = "已有插件任务正在执行"
+		app.pluginStatus = app.texts.Text("plugin.status.taskBusy")
 		return
 	}
 	item, ok := app.selectedPlugin()
 	if !ok || app.gameState.Candidate == nil {
-		app.pluginStatus = "请先选择插件并完成游戏扫描"
+		app.pluginStatus = app.texts.Text("plugin.status.rollbackNeedPlugin")
 		return
 	}
 	installed, ok := app.pluginState.Installed[item.Manifest.ID]
 	if !ok || len(installed.RollbackVersions) == 0 {
-		app.pluginStatus = "当前插件没有可回滚版本"
+		app.pluginStatus = app.texts.Text("plugin.status.noRollback")
 		return
 	}
 	version := installed.RollbackVersions[len(installed.RollbackVersions)-1]
@@ -2181,56 +2239,58 @@ func (app *application) startPluginRollback() {
 	candidate := *app.gameState.Candidate
 	layout := app.pluginLayout
 	app.pluginBusy = true
-	app.pluginStatus = "正在重新审计并回滚到 " + version
+	app.pluginStatus = fmt.Sprintf(app.texts.Text("plugin.status.rollingBack"), version)
+	texts := app.texts
 	app.pluginTask = app.tasks.Run(func(ctx context.Context, id uint64) {
 		result, err := plugins.Rollback(ctx, layout, &state, item.Manifest.ID, version, candidate)
 		if err != nil {
-			app.publishPlugin(pluginUpdate{taskID: id, err: "插件回滚失败：" + err.Error()})
+			app.publishPlugin(pluginUpdate{taskID: id, err: fmt.Sprintf(texts.Text("plugin.status.rollbackFailed"), err)})
 			return
 		}
-		app.publishPlugin(pluginUpdate{taskID: id, state: &state, status: "插件已回滚到 " + result.Manifest.Version})
+		app.publishPlugin(pluginUpdate{taskID: id, state: &state, status: fmt.Sprintf(texts.Text("plugin.status.rolledBack"), result.Manifest.Version)})
 	})
 }
 
 func (app *application) startPluginUninstall() {
 	if app.pluginBusy {
-		app.pluginStatus = "已有插件任务正在执行"
+		app.pluginStatus = app.texts.Text("plugin.status.taskBusy")
 		return
 	}
 	item, ok := app.selectedPlugin()
 	if !ok {
-		app.pluginStatus = "请先选择插件"
+		app.pluginStatus = app.texts.Text("plugin.status.selectFirst")
 		return
 	}
 	if app.pluginDeleteConfirm != item.Manifest.ID {
 		app.pluginDeleteConfirm = item.Manifest.ID
-		app.pluginStatus = "再次单击卸载以确认删除该插件及其回滚版本"
+		app.pluginStatus = app.texts.Text("plugin.status.uninstallConfirm")
 		return
 	}
 	app.pluginDeleteConfirm = ""
 	state := plugins.CloneState(app.pluginState)
 	layout := app.pluginLayout
 	app.pluginBusy = true
-	app.pluginStatus = "正在事务化卸载插件"
+	app.pluginStatus = app.texts.Text("plugin.status.uninstalling")
+	texts := app.texts
 	app.pluginTask = app.tasks.Run(func(_ context.Context, id uint64) {
 		manifest, err := plugins.Uninstall(layout, &state, item.Manifest.ID)
 		if err != nil {
-			app.publishPlugin(pluginUpdate{taskID: id, err: "卸载插件失败：" + err.Error()})
+			app.publishPlugin(pluginUpdate{taskID: id, err: fmt.Sprintf(texts.Text("plugin.status.uninstallFailed"), err)})
 			return
 		}
-		app.publishPlugin(pluginUpdate{taskID: id, state: &state, status: "插件已安全卸载：" + manifest.Name})
+		app.publishPlugin(pluginUpdate{taskID: id, state: &state, status: fmt.Sprintf(texts.Text("plugin.status.uninstalled"), manifest.Name)})
 	})
 }
 
 func (app *application) applyNextPluginPreset() {
 	item, ok := app.selectedPlugin()
 	if !ok || item.SchemaPath == "" || item.ConfigPath == "" {
-		app.pluginStatus = "当前插件没有声明式配置和预设"
+		app.pluginStatus = app.texts.Text("plugin.status.noPreset")
 		return
 	}
 	schema, err := plugins.LoadConfigSchema(item.SchemaPath)
 	if err != nil || len(schema.Presets) == 0 {
-		app.pluginStatus = "插件配置预设不可用"
+		app.pluginStatus = app.texts.Text("plugin.status.presetUnavailable")
 		if err != nil {
 			app.pluginStatus += "：" + err.Error()
 		}
@@ -2238,7 +2298,7 @@ func (app *application) applyNextPluginPreset() {
 	}
 	values, recovered, err := plugins.ReadConfigRecovering(item.ConfigPath, schema)
 	if err != nil {
-		app.pluginStatus = "读取插件配置失败：" + err.Error()
+		app.pluginStatus = fmt.Sprintf(app.texts.Text("plugin.status.configReadFailed"), err)
 		return
 	}
 	next := 0
@@ -2254,28 +2314,28 @@ func (app *application) applyNextPluginPreset() {
 	}
 	preset := schema.Presets[next]
 	if err := plugins.ApplyPreset(item.ConfigPath, schema, preset.ID); err != nil {
-		app.pluginStatus = "应用插件预设失败：" + err.Error()
+		app.pluginStatus = fmt.Sprintf(app.texts.Text("plugin.status.presetFailed"), err)
 		return
 	}
-	app.pluginStatus = "已应用配置预设：" + preset.Name
+	app.pluginStatus = fmt.Sprintf(app.texts.Text("plugin.status.presetApplied"), preset.Name)
 	if recovered != "" {
-		app.pluginStatus += "；损坏配置已隔离"
+		app.pluginStatus += app.texts.Text("plugin.status.configRecovered")
 	}
 }
 
 func (app *application) movePlugin(delta int) {
 	item, ok := app.selectedPlugin()
 	if !ok {
-		app.pluginStatus = "请先选择插件"
+		app.pluginStatus = app.texts.Text("plugin.status.selectFirst")
 		return
 	}
 	next := plugins.CloneState(app.pluginState)
 	if err := plugins.Move(&next, item.Manifest.ID, delta); err != nil {
-		app.pluginStatus = "无法调整顺序：" + err.Error()
+		app.pluginStatus = fmt.Sprintf(app.texts.Text("plugin.status.moveFailed"), err)
 		return
 	}
 	if err := plugins.SaveState(app.pluginLayout.State, next); err != nil {
-		app.pluginStatus = "保存插件顺序失败：" + err.Error()
+		app.pluginStatus = fmt.Sprintf(app.texts.Text("plugin.status.orderSaveFailed"), err)
 		return
 	}
 	app.pluginState = next
@@ -2307,37 +2367,40 @@ func (app *application) paintPlugins(dc win32.HDC, client win32.Rect, left int32
 		rect.Right -= win32.Scale(12, app.dpi)
 		win32.DrawText(dc, value, &rect, win32.DT_LEFT|win32.DT_VCENTER|win32.DT_SINGLELINE|win32.DT_END_ELLIPSIS)
 	}
-	safe := map[bool]string{true: "开启（禁止插件注入）", false: "关闭（允许启用项注入）"}[app.settings.Plugins.SafeMode]
-	draw("插件安全模式："+safe+"    单击切换", row(170, 214, warningBrush), win32.Color(255, 205, 150))
-	draw("重新扫描本地插件（不联网）", row(220, 264, buttonBrush), win32.Color(225, 229, 242))
-	selected := "无已安装插件"
+	safe := app.texts.Text("plugin.safe.off")
+	if app.settings.Plugins.SafeMode {
+		safe = app.texts.Text("plugin.safe.on")
+	}
+	draw(fmt.Sprintf(app.texts.Text("plugin.safe"), safe), row(170, 214, warningBrush), win32.Color(255, 205, 150))
+	draw(app.texts.Text("plugin.rescan"), row(220, 264, buttonBrush), win32.Color(225, 229, 242))
+	selected := app.texts.Text("plugin.noneInstalled")
 	enabled := false
 	if item, ok := app.selectedPlugin(); ok {
 		selected = fmt.Sprintf("%s · %s · %s", item.DisplayName(), item.Manifest.Version, item.Manifest.Developer)
 		enabled = item.Enabled
 	}
-	draw("当前插件："+selected+"    单击切换", row(270, 314, buttonBrush), win32.Color(225, 229, 242))
-	draw("启用状态："+map[bool]string{true: "启用", false: "停用"}[enabled]+"    单击切换", row(320, 364, accentBrush), win32.Color(235, 238, 248))
-	draw("在上方输入插件别名（留空恢复原名）", row(370, 414, cardBrush), win32.Color(145, 154, 180))
+	draw(fmt.Sprintf(app.texts.Text("plugin.current"), selected), row(270, 314, buttonBrush), win32.Color(225, 229, 242))
+	draw(fmt.Sprintf(app.texts.Text("plugin.enabled"), onOffText(app.texts.Language(), enabled)), row(320, 364, accentBrush), win32.Color(235, 238, 248))
+	draw(app.texts.Text("plugin.aliasHint"), row(370, 414, cardBrush), win32.Color(145, 154, 180))
 	actions := row(420, 464, buttonBrush)
-	draw("保存别名", cell(actions, 0, 3), win32.Color(225, 229, 242))
-	draw("顺序向前", cell(actions, 1, 3), win32.Color(190, 197, 216))
-	draw("顺序向后", cell(actions, 2, 3), win32.Color(190, 197, 216))
-	installText := "从本地 ZIP 安装或更新插件"
+	draw(app.texts.Text("plugin.aliasSave"), cell(actions, 0, 3), win32.Color(225, 229, 242))
+	draw(app.texts.Text("plugin.moveUp"), cell(actions, 1, 3), win32.Color(190, 197, 216))
+	draw(app.texts.Text("plugin.moveDown"), cell(actions, 2, 3), win32.Color(190, 197, 216))
+	installText := app.texts.Text("plugin.installLocal")
 	if app.pluginBusy {
-		installText = "插件审计/安装进行中…"
+		installText = app.texts.Text("plugin.busy")
 	}
 	draw(installText, row(470, 514, buttonBrush), win32.Color(190, 197, 216))
 	lifecycle := row(520, 564, warningBrush)
-	draw("回滚上一版本", cell(lifecycle, 0, 3), win32.Color(255, 205, 150))
-	draw("卸载（二次确认）", cell(lifecycle, 1, 3), win32.Color(255, 170, 150))
-	draw("下一个配置预设", cell(lifecycle, 2, 3), win32.Color(255, 205, 150))
+	draw(app.texts.Text("plugin.rollback"), cell(lifecycle, 0, 3), win32.Color(255, 205, 150))
+	draw(app.texts.Text("plugin.uninstall"), cell(lifecycle, 1, 3), win32.Color(255, 170, 150))
+	draw(app.texts.Text("plugin.nextPreset"), cell(lifecycle, 2, 3), win32.Color(255, 205, 150))
 	statusText := app.pluginStatus
 	if len(app.pluginWarnings) > 0 {
 		statusText += " | " + app.pluginWarnings[0]
 	}
 	if app.pluginCatalogPage.Total > 0 {
-		statusText += fmt.Sprintf(" | 商店 %d 项", app.pluginCatalogPage.Total)
+		statusText += " | " + fmt.Sprintf(app.texts.Text("plugin.storeCount"), app.pluginCatalogPage.Total)
 	}
 	draw(statusText, row(570, 614, cardBrush), win32.Color(145, 154, 180))
 	draw("", row(620, 660, cardBrush), win32.Color(145, 154, 180))
@@ -2368,37 +2431,44 @@ func (app *application) paintPluginStore(dc win32.HDC, client win32.Rect, left i
 	}
 	draw("", row(170, 214, cardBrush), win32.Color(225, 229, 242))
 	draw("", row(220, 264, cardBrush), win32.Color(225, 229, 242))
-	syncText := "保存筛选并同步 HTTPS 插件目录"
+	syncText := app.texts.Text("plugin.store.sync")
 	if app.pluginBusy {
-		syncText = "插件目录或安装任务进行中…"
+		syncText = app.texts.Text("plugin.store.busy")
 	}
 	draw(syncText, row(270, 314, accentBrush), win32.Color(235, 238, 248))
-	selected := "当前页没有插件"
-	installAction := "下载、复核并事务安装所选插件"
+	selected := app.texts.Text("plugin.store.none")
+	installAction := app.texts.Text("plugin.store.install")
 	if item, ok := app.selectedCatalogPlugin(); ok {
 		selected = fmt.Sprintf("%s · %s · %s", item.Name, item.Version, item.Developer)
 		if installed, exists := app.pluginState.Installed[item.ID]; exists {
 			if installed.ActiveVersion == item.Version {
-				selected += " · 已安装"
-				installAction = "重新下载、复核并修复所选插件"
+				selected += " · " + app.texts.Text("plugin.store.installed")
+				installAction = app.texts.Text("plugin.store.repair")
 			} else {
-				selected += " · 已安装 " + installed.ActiveVersion + "，目录版本 " + item.Version
-				installAction = "下载、复核并更新所选插件"
+				selected += " · " + fmt.Sprintf(app.texts.Text("plugin.store.versionDiff"), installed.ActiveVersion, item.Version)
+				installAction = app.texts.Text("plugin.store.update")
 			}
 		}
 	}
-	draw("商店插件："+selected+"    单击切换", row(320, 364, buttonBrush), win32.Color(225, 229, 242))
-	category := app.settings.Plugins.Category
-	if category == "" {
-		category = "全部"
-	}
-	draw("分类："+category+"    单击切换", row(370, 414, buttonBrush), win32.Color(190, 197, 216))
-	draw("排序："+app.settings.Plugins.Sort+"    单击切换", row(420, 464, buttonBrush), win32.Color(190, 197, 216))
+	draw(fmt.Sprintf(app.texts.Text("plugin.store.selected"), selected), row(320, 364, buttonBrush), win32.Color(225, 229, 242))
+	draw(fmt.Sprintf(app.texts.Text("plugin.store.category"), pluginCategoryText(app.texts, app.settings.Plugins.Category)), row(370, 414, buttonBrush), win32.Color(190, 197, 216))
+	draw(fmt.Sprintf(app.texts.Text("plugin.store.sort"), pluginSortText(app.texts, app.settings.Plugins.Sort)), row(420, 464, buttonBrush), win32.Color(190, 197, 216))
 	pages := row(470, 514, buttonBrush)
-	draw("上一页", cell(pages, 0, 2), win32.Color(190, 197, 216))
-	draw(fmt.Sprintf("下一页    %d/%d", app.pluginCatalogPage.Page, app.pluginCatalogPage.TotalPages), cell(pages, 1, 2), win32.Color(190, 197, 216))
+	draw(app.texts.Text("plugin.store.previous"), cell(pages, 0, 2), win32.Color(190, 197, 216))
+	draw(fmt.Sprintf(app.texts.Text("plugin.store.next"), app.pluginCatalogPage.Page, app.pluginCatalogPage.TotalPages), cell(pages, 1, 2), win32.Color(190, 197, 216))
 	draw(installAction, row(520, 564, accentBrush), win32.Color(235, 238, 248))
 	draw(app.pluginStatus, row(570, 614, cardBrush), win32.Color(145, 154, 180))
+}
+
+func pluginCategoryText(texts localization.Catalog, category string) string {
+	if category == "" {
+		category = "all"
+	}
+	return texts.Text("plugin.store.category." + category)
+}
+
+func pluginSortText(texts localization.Catalog, sortMode string) string {
+	return texts.Text("plugin.store.sort." + sortMode)
 }
 
 func (app *application) saveShellSettings(next shellconfig.Config) bool {
@@ -2454,6 +2524,7 @@ func (app *application) settingsClick(y int) {
 		if app.saveShellSettings(next) {
 			app.texts = localization.New(localization.Language(app.settings.Shell.Language), win32.UserDefaultLocaleName())
 			win32.SetWindowText(app.hwnd, app.texts.Text("app.title")+" "+app.build.Version)
+			app.refreshPluginCueBanners()
 			app.addTrayIcon()
 		}
 	case y >= sy(220) && y < sy(264):
@@ -2863,7 +2934,6 @@ func (app *application) createLaunchControls() error {
 	}
 	app.pluginAliasEdit = aliasEdit
 	win32.SetTextLimit(aliasEdit, 64)
-	win32.SetCueBanner(aliasEdit, "插件别名（留空恢复原名）")
 	win32.SetControlFont(aliasEdit, app.fontBody)
 	win32.SetControlDarkTheme(aliasEdit, app.palette.Dark)
 	catalogEdit, err := win32.CreateControl("EDIT", app.settings.Plugins.CatalogURL, win32.WS_CHILD|win32.WS_BORDER|win32.WS_TABSTOP|win32.ES_AUTOHSCROLL, 0, 0, 100, 32, app.hwnd, 2003, app.instance)
@@ -2872,7 +2942,6 @@ func (app *application) createLaunchControls() error {
 	}
 	app.pluginCatalogEdit = catalogEdit
 	win32.SetTextLimit(catalogEdit, 2048)
-	win32.SetCueBanner(catalogEdit, "HTTPS 插件目录 URL（留空则不联网）")
 	win32.SetControlFont(catalogEdit, app.fontBody)
 	win32.SetControlDarkTheme(catalogEdit, app.palette.Dark)
 	searchEdit, err := win32.CreateControl("EDIT", app.settings.Plugins.Search, win32.WS_CHILD|win32.WS_BORDER|win32.WS_TABSTOP|win32.ES_AUTOHSCROLL, 0, 0, 100, 32, app.hwnd, 2004, app.instance)
@@ -2881,12 +2950,24 @@ func (app *application) createLaunchControls() error {
 	}
 	app.pluginSearchEdit = searchEdit
 	win32.SetTextLimit(searchEdit, 128)
-	win32.SetCueBanner(searchEdit, "搜索插件名称、作者、描述或标签")
 	win32.SetControlFont(searchEdit, app.fontBody)
 	win32.SetControlDarkTheme(searchEdit, app.palette.Dark)
+	app.refreshPluginCueBanners()
 	app.layoutLaunchControls()
 	app.updateLaunchControlVisibility()
 	return nil
+}
+
+func (app *application) refreshPluginCueBanners() {
+	if app.pluginAliasEdit != 0 {
+		win32.SetCueBanner(app.pluginAliasEdit, app.texts.Text("plugin.aliasCue"))
+	}
+	if app.pluginCatalogEdit != 0 {
+		win32.SetCueBanner(app.pluginCatalogEdit, app.texts.Text("plugin.store.catalogCue"))
+	}
+	if app.pluginSearchEdit != 0 {
+		win32.SetCueBanner(app.pluginSearchEdit, app.texts.Text("plugin.store.searchCue"))
+	}
 }
 
 func (app *application) layoutLaunchControls() {

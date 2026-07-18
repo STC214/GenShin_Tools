@@ -374,7 +374,11 @@ func SelectExecutable(owner HWND, initialDirectory string) (path string, selecte
 }
 
 func SelectPluginPackage(owner HWND, initialDirectory string) (path string, selected bool, err error) {
-	return selectFile(owner, initialDirectory, "Genshin Tools plugin packages (*.zip)", "*.zip", "选择本地插件包", "zip")
+	return SelectPluginPackageWithTitle(owner, initialDirectory, "选择本地插件包")
+}
+
+func SelectPluginPackageWithTitle(owner HWND, initialDirectory, prompt string) (path string, selected bool, err error) {
+	return selectFile(owner, initialDirectory, "Genshin Tools plugin packages (*.zip)", "*.zip", prompt, "zip")
 }
 
 func SelectWaveFile(owner HWND, initialDirectory string) (path string, selected bool, err error) {
