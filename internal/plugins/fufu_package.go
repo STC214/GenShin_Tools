@@ -63,6 +63,130 @@ func DownloadFufuPackage(ctx context.Context, client *http.Client, item CatalogI
 	return downloadFufuPackage(ctx, client, item, downloadToken, destination, FufuStoreBaseURL)
 }
 
+// DownloadFufuMainPackage downloads the public main-plugin bundle from the
+// same GitHub path currently declared by FufuLauncher. Unlike store packages,
+// this endpoint has no token or signed metadata, so installation must still
+// validate the ZIP structure and PE before activation.
+func DownloadFufuMainPackage(ctx context.Context, client *http.Client, destination string) (string, int64, error) {
+	return downloadFufuMainPackage(ctx, client, destination, FufuMainOfficialURL, map[string]bool{
+		"github.com": true, "raw.githubusercontent.com": true,
+	})
+}
+
+func downloadFufuMainPackage(ctx context.Context, client *http.Client, destination, endpoint string, allowedHosts map[string]bool) (string, int64, error) {
+	parsed, err := url.Parse(endpoint)
+	if err != nil || !strings.EqualFold(parsed.Scheme, "https") || !allowedHosts[strings.ToLower(parsed.Hostname())] {
+		return "", 0, errors.New("Fufu main package endpoint is not an allowed HTTPS GitHub host")
+	}
+	if client == nil {
+		client = &http.Client{Timeout: 5 * time.Minute}
+	}
+	clientCopy := *client
+	originalRedirectCheck := clientCopy.CheckRedirect
+	clientCopy.CheckRedirect = func(request *http.Request, via []*http.Request) error {
+		if request.URL == nil || !strings.EqualFold(request.URL.Scheme, "https") || !allowedHosts[strings.ToLower(request.URL.Hostname())] {
+			return errors.New("Fufu main package redirect left the allowed GitHub hosts")
+		}
+		if len(via) >= 5 {
+			return errors.New("Fufu main package redirect limit exceeded")
+		}
+		if originalRedirectCheck != nil {
+			return originalRedirectCheck(request, via)
+		}
+		return nil
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return "", 0, err
+	}
+	request.Header.Set("Accept", "application/zip, application/octet-stream")
+	request.Header.Set("User-Agent", "GenshinTools-FufuMainAdapter/1")
+	response, err := clientCopy.Do(request)
+	if err != nil {
+		return "", 0, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return "", 0, fmt.Errorf("Fufu main package HTTP status %d", response.StatusCode)
+	}
+	if response.Request == nil || response.Request.URL == nil || !allowedHosts[strings.ToLower(response.Request.URL.Hostname())] {
+		return "", 0, errors.New("Fufu main package final response host is not allowed")
+	}
+	const maximum = int64(64 << 20)
+	if response.ContentLength > maximum {
+		return "", 0, errors.New("Fufu main package exceeds 64 MiB")
+	}
+	if err := os.MkdirAll(filepath.Dir(destination), 0o755); err != nil {
+		return "", 0, err
+	}
+	temporary, err := os.CreateTemp(filepath.Dir(destination), ".fufu-main-*.tmp")
+	if err != nil {
+		return "", 0, err
+	}
+	temporaryPath := temporary.Name()
+	committed := false
+	defer func() {
+		_ = temporary.Close()
+		if !committed {
+			_ = os.Remove(temporaryPath)
+		}
+	}()
+	hash := sha256.New()
+	written, err := io.Copy(io.MultiWriter(temporary, hash), io.LimitReader(response.Body, maximum+1))
+	if err != nil {
+		return "", 0, err
+	}
+	if written == 0 || written > maximum {
+		return "", 0, errors.New("Fufu main package size is outside 1..64 MiB")
+	}
+	if err := temporary.Sync(); err != nil {
+		return "", 0, err
+	}
+	if err := temporary.Close(); err != nil {
+		return "", 0, err
+	}
+	if err := replaceFile(temporaryPath, destination); err != nil {
+		return "", 0, err
+	}
+	committed = true
+	return hex.EncodeToString(hash.Sum(nil)), written, nil
+}
+
+func InstallFufuMainPackage(ctx context.Context, packagePath string, layout Layout, candidate game.Candidate, state *State) (InstallResult, error) {
+	if state == nil {
+		return InstallResult{}, errors.New("plugin state is required")
+	}
+	if err := layout.Ensure(); err != nil {
+		return InstallResult{}, err
+	}
+	if err := RecoverTransaction(layout, state); err != nil {
+		return InstallResult{}, err
+	}
+	stageRoot, err := os.MkdirTemp(layout.Staging, FufuMainTargetID+"-")
+	if err != nil {
+		return InstallResult{}, err
+	}
+	stageName := filepath.Base(stageRoot)
+	candidateRoot := filepath.Join(stageRoot, "candidate")
+	candidateDirectory := filepath.Join(candidateRoot, FufuMainTargetID)
+	if err := os.MkdirAll(candidateDirectory, 0o755); err != nil {
+		_ = safeRemoveAll(layout.Staging, stageRoot)
+		return InstallResult{}, err
+	}
+	item := CatalogItem{ID: FufuMainTargetID, Category: "gameplay", Tags: []string{"fufu", "injection"}, SourceURL: FufuMainPackageSource, License: "UNSPECIFIED-FUFU-BUNDLE"}
+	manifest, err := extractAndAdaptFufuPackage(ctx, packagePath, item, candidateRoot, candidateDirectory, candidate)
+	if err != nil {
+		_ = safeRemoveAll(layout.Staging, stageRoot)
+		return InstallResult{}, err
+	}
+	result, err := commitInstall(layout, state, manifest, stageName, candidateDirectory)
+	if err != nil {
+		_ = safeRemoveAll(layout.Staging, stageRoot)
+		return InstallResult{}, err
+	}
+	return result, nil
+}
+
 func downloadFufuPackage(ctx context.Context, client *http.Client, item CatalogItem, downloadToken, destination, trustedOrigin string) error {
 	if err := validateFufuCatalogItem(item, trustedOrigin); err != nil {
 		return err
@@ -290,9 +414,28 @@ func extractAndAdaptFufuPackage(ctx context.Context, packagePath string, item Ca
 	if prefix == "" {
 		configRelative = configName
 	}
-	dllName, err := parseFufuConfigFile(filepath.Join(candidateDirectory, filepath.FromSlash(configRelative)))
+	configPath := filepath.Join(candidateDirectory, filepath.FromSlash(configRelative))
+	dllName, err := parseFufuConfigFile(configPath)
 	if err != nil {
 		return Manifest{}, err
+	}
+	if item.Name == "" || item.Developer == "" || item.Description == "" || item.Version == "" {
+		target, targetErr := LoadFufuTargetConfig(configPath)
+		if targetErr != nil {
+			return Manifest{}, targetErr
+		}
+		if item.Name == "" {
+			item.Name = target.Name
+		}
+		if item.Developer == "" {
+			item.Developer = target.Developer
+		}
+		if item.Description == "" {
+			item.Description = target.Description
+		}
+		if item.Version == "" {
+			item.Version = target.Version
+		}
 	}
 	if path.Base(dllName) != dllName || !strings.EqualFold(path.Ext(dllName), ".dll") {
 		return Manifest{}, errors.New("Fufu config File must be one root DLL file name")

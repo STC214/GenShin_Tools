@@ -140,6 +140,7 @@ type application struct {
 	pluginWarnings          []string
 	pluginStatus            string
 	pluginSelected          string
+	storeSelected           string
 	pluginUpdates           chan pluginUpdate
 	pluginTask              uint64
 	pluginBusy              bool
@@ -150,6 +151,17 @@ type application struct {
 	pluginAliasEdit         win32.HWND
 	pluginTokenEdit         win32.HWND
 	pluginSearchEdit        win32.HWND
+	listScrollbar           win32.HWND
+	fufuTarget              plugins.FufuTargetConfig
+	fufuTargetInstalled     bool
+	fufuTargetEnabled       bool
+	fufuEdits               map[string]win32.HWND
+	fufuEditFields          map[uint16]string
+	fufuValues              map[string]string
+	fufuScroll              int
+	pluginListScroll        int
+	storeListScroll         int
+	pluginTargetMode        bool
 	shellStatus             string
 	diagnosticUpdates       chan diagnosticUpdate
 	diagnosticBusy          bool
@@ -243,6 +255,7 @@ type pluginUpdate struct {
 	page    plugins.CatalogPage
 	status  string
 	err     string
+	target  bool
 }
 
 type updateCheckUpdate struct {
@@ -402,7 +415,10 @@ func Run(layout paths.Layout, build buildinfo.Info) (returnErr error) {
 		captureStatus:       "",
 		overlayStatus:       "",
 		injectionStatus:     "",
+		pluginTargetMode:    true,
 	}
+	app.syncStoreSelection()
+	app.refreshFufuTarget()
 	app.shellStatus = app.texts.Text("settings.status.ready")
 	app.resourceState.Status = app.texts.Text("resource.status.ready")
 	app.serverState.Status = app.texts.Text("server.status.ready")
@@ -498,7 +514,7 @@ func (app *application) createWindow() error {
 	className := win32.UTF16(windowClass)
 	app.icon = win32.LoadIcon(app.instance, 1)
 	class := win32.WndClassEx{
-		Style:     win32.CS_HREDRAW | win32.CS_VREDRAW | 0x0008,
+		Style:     0x0008,
 		WndProc:   win32.NewCallback(windowProcedure),
 		Instance:  app.instance,
 		Icon:      app.icon,
@@ -778,6 +794,7 @@ func (app *application) handleMessage(hwnd win32.HWND, message uint32, wParam, l
 					app.pluginBusy = false
 					if update.err != "" {
 						app.pluginStatus = update.err
+						app.logger.Error("plugin task failed", map[string]any{"error": update.err})
 					} else {
 						if update.state != nil {
 							app.pluginState = *update.state
@@ -785,9 +802,18 @@ func (app *application) handleMessage(hwnd win32.HWND, message uint32, wParam, l
 						if update.catalog != nil {
 							app.pluginCatalog = *update.catalog
 							app.pluginCatalogPage = update.page
+							app.storeListScroll = 0
+							app.syncStoreSelection()
 						}
 						app.refreshPlugins()
 						app.pluginStatus = update.status
+						if update.status != "" {
+							app.logger.Info("plugin task completed", map[string]any{"status": update.status})
+						}
+					}
+					if update.target {
+						app.refreshFufuTarget()
+						app.injectionStatus = app.pluginStatus
 					}
 				}
 			default:
@@ -874,7 +900,7 @@ func (app *application) handleMessage(hwnd win32.HWND, message uint32, wParam, l
 		} else if app.selected == 6 && x >= int(win32.Scale(210, app.dpi)) {
 			app.inputClick(x, y)
 		} else if app.selected == 7 && x >= int(win32.Scale(210, app.dpi)) {
-			app.injectionClick(y)
+			app.injectionClick(x, y)
 		} else if app.selected == 8 && x >= int(win32.Scale(210, app.dpi)) {
 			app.pluginClick(x, y)
 		} else if app.selected == 9 && x >= int(win32.Scale(210, app.dpi)) {
@@ -883,6 +909,23 @@ func (app *application) handleMessage(hwnd win32.HWND, message uint32, wParam, l
 			app.settingsClick(y)
 		}
 		return 0
+	case win32.WM_MOUSEWHEEL:
+		if app.selected == 8 || app.selected == 9 {
+			delta := int16((wParam >> 16) & 0xffff)
+			if delta != 0 {
+				step := 3
+				if delta > 0 {
+					step = -3
+				}
+				app.scrollActiveList(step)
+			}
+			return 0
+		}
+	case win32.WM_VSCROLL:
+		if win32.HWND(lParam) == app.listScrollbar {
+			app.handleListScroll(uint16(wParam & 0xffff))
+			return 0
+		}
 	case win32.WM_HOTKEY:
 		if int32(wParam) == captureHotkeyID && app.captureManager != nil {
 			if app.captureManager.Request() {
@@ -914,6 +957,10 @@ func (app *application) handleMessage(hwnd win32.HWND, message uint32, wParam, l
 		notification := uint16((wParam >> 16) & 0xffff)
 		if controlID == 2004 && notification == 0x0200 {
 			app.savePluginSearch()
+			win32.Invalidate(hwnd)
+		}
+		if fieldID, ok := app.fufuEditFields[controlID]; ok && notification == 0x0200 {
+			app.saveFufuField(fieldID)
 			win32.Invalidate(hwnd)
 		}
 		return 0
@@ -1155,9 +1202,28 @@ func scalePluginContentY(logical int32, dpi uint32, availableBottom int32) int32
 
 func (app *application) paint(hwnd win32.HWND) {
 	var paint win32.PaintStruct
-	dc := win32.BeginPaint(hwnd, &paint)
+	windowDC := win32.BeginPaint(hwnd, &paint)
 	defer win32.EndPaint(hwnd, &paint)
 	client := win32.GetClientRect(hwnd)
+	dc := windowDC
+	if width, height := client.Right-client.Left, client.Bottom-client.Top; width > 0 && height > 0 {
+		memoryDC := win32.CreateCompatibleDC(windowDC)
+		if memoryDC != 0 {
+			bitmap := win32.CreateCompatibleBitmap(windowDC, width, height)
+			if bitmap != 0 {
+				oldBitmap := win32.SelectObject(memoryDC, bitmap)
+				dc = memoryDC
+				defer func() {
+					win32.BitBlt(windowDC, 0, 0, width, height, memoryDC, 0, 0)
+					win32.SelectObject(memoryDC, oldBitmap)
+					win32.DeleteObject(bitmap)
+					win32.DeleteDC(memoryDC)
+				}()
+			} else {
+				win32.DeleteDC(memoryDC)
+			}
+		}
+	}
 	background := win32.CreateSolidBrush(win32.Color(15, 17, 23))
 	defer win32.DeleteObject(uintptr(background))
 	sidebar := win32.CreateSolidBrush(win32.Color(24, 27, 36))
@@ -1628,6 +1694,292 @@ func metricValue(value float64, valid bool) string {
 	return fmt.Sprintf("%.1f", value)
 }
 
+func (app *application) fufuTargetDirectory() string {
+	return filepath.Join(app.pluginLayout.Modules, plugins.FufuMainTargetID)
+}
+
+func (app *application) refreshFufuTarget() {
+	directory := app.fufuTargetDirectory()
+	target, err := plugins.LoadFufuTargetConfig(filepath.Join(directory, "config.ini"))
+	if err != nil {
+		app.fufuTarget = plugins.FufuTargetConfig{}
+		app.fufuTargetInstalled = false
+		app.fufuTargetEnabled = false
+		app.fufuScroll = 0
+		app.rebuildFufuControls()
+		return
+	}
+	enabled, installed, stateErr := plugins.FufuTargetEnabled(directory, target.DLL)
+	app.fufuTarget = target
+	app.fufuTargetInstalled = installed
+	app.fufuTargetEnabled = enabled
+	if stateErr != nil {
+		app.pluginStatus = stateErr.Error()
+	}
+	app.fufuScroll = min(app.fufuScroll, max(0, len(target.Settings)-fufuVisibleRows))
+	app.rebuildFufuControls()
+}
+
+const (
+	fufuVisibleRows   = 6
+	pluginVisibleRows = 3
+	storeVisibleRows  = 3
+)
+
+func (app *application) rebuildFufuControls() {
+	old := app.fufuEdits
+	app.fufuEdits = map[string]win32.HWND{}
+	app.fufuEditFields = map[uint16]string{}
+	app.fufuValues = map[string]string{}
+	for _, control := range old {
+		win32.DestroyWindow(control)
+	}
+	if app.hwnd == 0 || !app.fufuTargetInstalled || len(app.fufuTarget.Settings) == 0 {
+		return
+	}
+	values, err := plugins.ReadConfig(filepath.Join(app.fufuTargetDirectory(), "config.ini"), app.fufuTarget.Schema)
+	if err != nil {
+		app.pluginStatus = fmt.Sprintf(app.texts.Text("fufu.status.configReadFailed"), err)
+		return
+	}
+	app.fufuValues = values
+	for index, setting := range app.fufuTarget.Settings {
+		if setting.Field.Type == "bool" {
+			continue
+		}
+		controlID := uint16(3000 + index)
+		edit, createErr := win32.CreateControl("EDIT", values[setting.Field.ID], win32.WS_CHILD|win32.WS_BORDER|win32.WS_TABSTOP|win32.ES_AUTOHSCROLL, 0, 0, 100, 32, app.hwnd, uintptr(controlID), app.instance)
+		if createErr != nil {
+			app.pluginStatus = fmt.Sprintf(app.texts.Text("fufu.status.controlFailed"), setting.Field.Name, createErr)
+			continue
+		}
+		app.fufuEdits[setting.Field.ID] = edit
+		app.fufuEditFields[controlID] = setting.Field.ID
+		win32.SetTextLimit(edit, 4096)
+		win32.SetControlFont(edit, app.fontBody)
+		win32.SetControlDarkTheme(edit, app.palette.Dark)
+		win32.SetCueBanner(edit, setting.Field.Name)
+	}
+	app.layoutFufuControls()
+}
+
+func (app *application) fufuSetting(fieldID string) (plugins.FufuSetting, bool) {
+	for _, setting := range app.fufuTarget.Settings {
+		if setting.Field.ID == fieldID {
+			return setting, true
+		}
+	}
+	return plugins.FufuSetting{}, false
+}
+
+func (app *application) saveFufuField(fieldID string) {
+	setting, ok := app.fufuSetting(fieldID)
+	control := app.fufuEdits[fieldID]
+	if !ok || control == 0 {
+		return
+	}
+	value := win32.GetWindowText(control)
+	if err := plugins.UpdateConfig(filepath.Join(app.fufuTargetDirectory(), "config.ini"), app.fufuTarget.Schema, setting.Field.ID, value); err != nil {
+		app.pluginStatus = fmt.Sprintf(app.texts.Text("fufu.status.saveFailed"), err)
+		app.logger.Error("save Fufu target setting", map[string]any{"field": setting.Field.ID, "error": err.Error()})
+		win32.SetWindowText(control, app.fufuValues[fieldID])
+		return
+	}
+	app.fufuValues[fieldID] = value
+	app.pluginStatus = fmt.Sprintf(app.texts.Text("fufu.status.saved"), setting.Field.Name)
+}
+
+func (app *application) toggleFufuBool(setting plugins.FufuSetting) {
+	current := strings.ToLower(strings.TrimSpace(app.fufuValues[setting.Field.ID]))
+	value := "1"
+	if current == "1" || current == "true" {
+		value = "0"
+	}
+	if err := plugins.UpdateConfig(filepath.Join(app.fufuTargetDirectory(), "config.ini"), app.fufuTarget.Schema, setting.Field.ID, value); err != nil {
+		app.pluginStatus = fmt.Sprintf(app.texts.Text("fufu.status.saveFailed"), err)
+		return
+	}
+	app.fufuValues[setting.Field.ID] = value
+	app.pluginStatus = fmt.Sprintf(app.texts.Text("fufu.status.saved"), setting.Field.Name)
+}
+
+func (app *application) scrollFufuSettings(delta int) {
+	app.fufuScroll = clampFufuScroll(app.fufuScroll, delta, len(app.fufuTarget.Settings))
+	app.layoutFufuControls()
+	win32.Invalidate(app.hwnd)
+}
+
+func clampFufuScroll(current, delta, total int) int {
+	maximum := max(0, total-fufuVisibleRows)
+	return max(0, min(maximum, current+delta))
+}
+
+func (app *application) activeListState() (position *int, total, visible int, ok bool) {
+	switch {
+	case app.selected == 8 && app.pluginTargetMode && app.fufuTargetInstalled:
+		return &app.fufuScroll, len(app.fufuTarget.Settings), fufuVisibleRows, true
+	case app.selected == 8 && !app.pluginTargetMode:
+		return &app.pluginListScroll, len(app.pluginItems), pluginVisibleRows, true
+	case app.selected == 9:
+		return &app.storeListScroll, len(app.pluginCatalogPage.Items), storeVisibleRows, true
+	default:
+		return nil, 0, 0, false
+	}
+}
+
+func (app *application) scrollActiveList(delta int) {
+	position, total, visible, ok := app.activeListState()
+	if !ok {
+		return
+	}
+	maximum := max(0, total-visible)
+	*position = max(0, min(maximum, *position+delta))
+	app.layoutFufuControls()
+	app.syncListScrollbar()
+	win32.Invalidate(app.hwnd)
+}
+
+func (app *application) handleListScroll(command uint16) {
+	position, total, visible, ok := app.activeListState()
+	if !ok {
+		return
+	}
+	next := *position
+	switch command {
+	case win32.SB_LINEUP:
+		next--
+	case win32.SB_LINEDOWN:
+		next++
+	case win32.SB_PAGEUP:
+		next -= visible
+	case win32.SB_PAGEDOWN:
+		next += visible
+	case win32.SB_TOP:
+		next = 0
+	case win32.SB_BOTTOM:
+		next = total
+	case win32.SB_THUMBPOSITION, win32.SB_THUMBTRACK:
+		info := win32.ScrollInfo{Mask: win32.SIF_TRACKPOS}
+		if win32.GetScrollInfo(app.listScrollbar, &info) {
+			next = int(info.TrackPos)
+		}
+	}
+	maximum := max(0, total-visible)
+	*position = max(0, min(maximum, next))
+	app.layoutFufuControls()
+	app.syncListScrollbar()
+	win32.Invalidate(app.hwnd)
+}
+
+func (app *application) syncListScrollbar() {
+	if app.listScrollbar == 0 || app.hwnd == 0 {
+		return
+	}
+	position, total, visible, ok := app.activeListState()
+	if !ok || total <= visible {
+		win32.ShowWindow(app.listScrollbar, win32.SW_HIDE)
+		return
+	}
+	client := win32.GetClientRect(app.hwnd)
+	right := client.Right - win32.Scale(42, app.dpi)
+	top, bottom := int32(0), int32(0)
+	switch {
+	case app.selected == 8 && app.pluginTargetMode:
+		top, bottom = app.pluginContentY(235), app.pluginContentY(529)
+	case app.selected == 8:
+		top, bottom = app.pluginContentY(270), app.pluginContentY(412)
+	case app.selected == 9:
+		top, bottom = app.pluginContentY(320), app.pluginContentY(462)
+	}
+	width := win32.Scale(16, app.dpi)
+	win32.SetWindowPos(app.listScrollbar, win32.Rect{Left: right - width, Top: top, Right: right, Bottom: bottom}, win32.SWP_NOZORDER)
+	info := win32.ScrollInfo{Mask: win32.SIF_RANGE | win32.SIF_PAGE | win32.SIF_POS, Min: 0, Max: int32(total - 1), Page: uint32(visible), Position: int32(*position)}
+	win32.SetScrollInfo(app.listScrollbar, &info, true)
+	win32.ShowWindow(app.listScrollbar, win32.SW_SHOWNORMAL)
+}
+
+func (app *application) startFufuMainRepair() {
+	if app.pluginBusy {
+		app.injectionStatus = app.texts.Text("plugin.status.taskBusy")
+		return
+	}
+	if app.gameState.Candidate == nil {
+		app.injectionStatus = app.texts.Text("plugin.store.status.needGame")
+		return
+	}
+	state := plugins.CloneState(app.pluginState)
+	layout := app.pluginLayout
+	candidate := *app.gameState.Candidate
+	texts := app.texts
+	app.pluginBusy = true
+	app.injectionStatus = app.texts.Text("fufu.status.downloading")
+	app.pluginTask = app.tasks.Run(func(ctx context.Context, id uint64) {
+		temporary, err := os.CreateTemp(layout.Staging, "fufu-main-*.zip")
+		if err != nil {
+			app.publishPlugin(pluginUpdate{taskID: id, target: true, err: fmt.Sprintf(texts.Text("fufu.status.repairFailed"), err)})
+			return
+		}
+		packagePath := temporary.Name()
+		_ = temporary.Close()
+		_ = os.Remove(packagePath)
+		defer os.Remove(packagePath)
+		hash, _, err := plugins.DownloadFufuMainPackage(ctx, nil, packagePath)
+		if err != nil {
+			app.publishPlugin(pluginUpdate{taskID: id, target: true, err: fmt.Sprintf(texts.Text("fufu.status.repairFailed"), err)})
+			return
+		}
+		result, err := plugins.InstallFufuMainPackage(ctx, packagePath, layout, candidate, &state)
+		if err != nil {
+			app.publishPlugin(pluginUpdate{taskID: id, target: true, err: fmt.Sprintf(texts.Text("fufu.status.repairFailed"), err)})
+			return
+		}
+		if err := plugins.SetEnabled(&state, plugins.FufuMainTargetID, true); err != nil {
+			app.publishPlugin(pluginUpdate{taskID: id, target: true, err: fmt.Sprintf(texts.Text("fufu.status.repairFailed"), err)})
+			return
+		}
+		if err := plugins.SaveState(layout.State, state); err != nil {
+			app.publishPlugin(pluginUpdate{taskID: id, target: true, err: fmt.Sprintf(texts.Text("fufu.status.repairFailed"), err)})
+			return
+		}
+		app.publishPlugin(pluginUpdate{taskID: id, target: true, state: &state, status: fmt.Sprintf(texts.Text("fufu.status.repaired"), result.Manifest.Version, hash[:12])})
+	})
+}
+
+func (app *application) setFufuInjectionEnabled(enable bool) {
+	if !app.fufuTargetInstalled {
+		app.injectionStatus = app.texts.Text("fufu.status.notInstalled")
+		return
+	}
+	directory := app.fufuTargetDirectory()
+	if err := plugins.SetFufuTargetEnabled(directory, app.fufuTarget.DLL, enable); err != nil {
+		app.injectionStatus = fmt.Sprintf(app.texts.Text("fufu.status.toggleFailed"), err)
+		return
+	}
+	previous := plugins.CloneState(app.pluginState)
+	nextState := plugins.CloneState(app.pluginState)
+	if err := plugins.SetEnabled(&nextState, plugins.FufuMainTargetID, enable); err != nil {
+		_ = plugins.SetFufuTargetEnabled(directory, app.fufuTarget.DLL, !enable)
+		app.injectionStatus = fmt.Sprintf(app.texts.Text("fufu.status.toggleFailed"), err)
+		return
+	}
+	if err := plugins.SaveState(app.pluginLayout.State, nextState); err != nil {
+		_ = plugins.SetFufuTargetEnabled(directory, app.fufuTarget.DLL, !enable)
+		app.injectionStatus = fmt.Sprintf(app.texts.Text("fufu.status.toggleFailed"), err)
+		return
+	}
+	next := app.settings.Injection
+	next.Enabled = enable
+	if !app.commitInjectionSettings(next) {
+		_ = plugins.SaveState(app.pluginLayout.State, previous)
+		_ = plugins.SetFufuTargetEnabled(directory, app.fufuTarget.DLL, !enable)
+		return
+	}
+	app.pluginState = nextState
+	app.refreshFufuTarget()
+	app.refreshPlugins()
+	app.injectionStatus = fmt.Sprintf(app.texts.Text("fufu.status.toggled"), onOffText(app.texts.Language(), enable))
+}
+
 func (app *application) commitInjectionSettings(next injection.Config) bool {
 	normalized, err := next.Normalized()
 	if err != nil {
@@ -1729,18 +2081,22 @@ func (app *application) startInjectionLaunch() {
 	})
 }
 
-func (app *application) injectionClick(y int) {
+func (app *application) injectionClick(x, y int) {
 	sy := func(value int32) int { return int(win32.Scale(value, app.dpi)) }
 	switch {
-	case y >= sy(170) && y < sy(214):
-		next := app.settings.Injection
-		next.Enabled = !next.Enabled
-		app.commitInjectionSettings(next)
-	case y >= sy(220) && y < sy(264):
+	case y >= sy(170) && y < sy(230):
+		client := win32.GetClientRect(app.hwnd)
+		right := int(client.Right - win32.Scale(42, app.dpi))
+		if x >= right-sy(170) {
+			app.setFufuInjectionEnabled(!(app.fufuTargetEnabled && app.settings.Injection.Enabled))
+		} else if x >= right-sy(360) {
+			app.startFufuMainRepair()
+		}
+	case y >= sy(240) && y < sy(284):
 		next := app.settings.Injection
 		next.RiskAcknowledged = !next.RiskAcknowledged
 		app.commitInjectionSettings(next)
-	case y >= sy(270) && y < sy(314):
+	case y >= sy(290) && y < sy(334):
 		if len(app.injectionModules) == 0 {
 			app.startInjectionAudit()
 			break
@@ -1757,11 +2113,11 @@ func (app *application) injectionClick(y int) {
 		if app.commitInjectionSettings(next) {
 			app.injectionStatus = fmt.Sprintf(app.texts.Text("injection.status.moduleSelected"), app.injectionModules[index].Manifest.Name)
 		}
-	case y >= sy(320) && y < sy(364):
+	case y >= sy(340) && y < sy(384):
 		app.startInjectionAudit()
-	case y >= sy(370) && y < sy(414):
+	case y >= sy(390) && y < sy(434):
 		app.startInjectionLaunch()
-	case y >= sy(420) && y < sy(464):
+	case y >= sy(440) && y < sy(484):
 		app.injectionLaunching = false
 		if app.gameState.Candidate == nil || app.launchEngine == nil {
 			app.injectionStatus = app.texts.Text("injection.status.cleanNeedGame")
@@ -1772,7 +2128,7 @@ func (app *application) injectionClick(y int) {
 		} else {
 			app.injectionStatus = app.texts.Text("injection.status.cleanStarted")
 		}
-	case y >= sy(470) && y < sy(514):
+	case y >= sy(490) && y < sy(534):
 		presets := [][2]int{{15000, 5000}, {30000, 10000}, {60000, 20000}}
 		index := 0
 		for i, preset := range presets {
@@ -1812,12 +2168,22 @@ func (app *application) paintInjection(dc win32.HDC, client win32.Rect, left int
 		win32.DrawText(dc, text, &rect, win32.DT_LEFT|win32.DT_VCENTER|win32.DT_SINGLELINE|win32.DT_END_ELLIPSIS)
 	}
 	settings := app.settings.Injection
-	draw(fmt.Sprintf(app.texts.Text("injection.enabled"), onOffText(app.texts.Language(), settings.Enabled)), row(170, 214, accentBrush), win32.Color(235, 238, 248))
+	header := row(170, 230, cardBrush)
+	actionLeft := header.Right - win32.Scale(360, app.dpi)
+	toggleLeft := header.Right - win32.Scale(170, app.dpi)
+	metadata := app.texts.Text("fufu.target.notInstalled")
+	if app.fufuTargetInstalled {
+		metadata = fmt.Sprintf("%s  |  %s  |  %s", app.fufuTarget.Name, app.fufuTarget.Version, app.fufuTarget.Developer)
+	}
+	draw(fmt.Sprintf(app.texts.Text("fufu.target.label"), metadata), win32.Rect{Left: header.Left, Top: header.Top, Right: actionLeft, Bottom: header.Bottom}, win32.Color(225, 229, 242))
+	draw(app.texts.Text("fufu.target.repair"), win32.Rect{Left: actionLeft, Top: header.Top, Right: toggleLeft, Bottom: header.Bottom}, win32.Color(190, 197, 216))
+	toggleText := onOffText(app.texts.Language(), app.fufuTargetEnabled && settings.Enabled)
+	draw(fmt.Sprintf(app.texts.Text("fufu.target.injection"), toggleText), win32.Rect{Left: toggleLeft, Top: header.Top, Right: header.Right, Bottom: header.Bottom}, win32.Color(235, 238, 248))
 	risk := app.texts.Text("injection.risk.unconfirmed")
 	if settings.RiskAcknowledged {
 		risk = app.texts.Text("injection.risk.confirmed")
 	}
-	draw(fmt.Sprintf(app.texts.Text("injection.risk"), risk), row(220, 264, warningBrush), win32.Color(255, 205, 150))
+	draw(fmt.Sprintf(app.texts.Text("injection.risk"), risk), row(240, 284, warningBrush), win32.Color(255, 205, 150))
 	module := app.texts.Text("injection.module.none")
 	for _, audit := range app.injectionModules {
 		if audit.Manifest.ID == settings.ModuleID {
@@ -1825,21 +2191,21 @@ func (app *application) paintInjection(dc win32.HDC, client win32.Rect, left int
 			break
 		}
 	}
-	draw(fmt.Sprintf(app.texts.Text("injection.module"), module), row(270, 314, buttonBrush), win32.Color(225, 229, 242))
-	draw(app.texts.Text("injection.audit"), row(320, 364, buttonBrush), win32.Color(190, 197, 216))
+	draw(fmt.Sprintf(app.texts.Text("injection.module"), module), row(290, 334, buttonBrush), win32.Color(225, 229, 242))
+	draw(app.texts.Text("injection.audit"), row(340, 384, buttonBrush), win32.Color(190, 197, 216))
 	helperMode := app.texts.Text("injection.helper.current")
 	if settings.ElevatedHelper {
 		helperMode = app.texts.Text("injection.helper.admin")
 	}
-	draw(fmt.Sprintf(app.texts.Text("injection.launch"), helperMode), row(370, 414, warningBrush), win32.Color(255, 205, 150))
-	draw(app.texts.Text("injection.cleanLaunch"), row(420, 464, accentBrush), win32.Color(235, 238, 248))
-	draw(fmt.Sprintf(app.texts.Text("injection.timeout"), float64(settings.HelperTimeoutMS)/1000, float64(settings.RemoteTimeoutMS)/1000), row(470, 514, buttonBrush), win32.Color(190, 197, 216))
+	draw(fmt.Sprintf(app.texts.Text("injection.launch"), helperMode), row(390, 434, warningBrush), win32.Color(255, 205, 150))
+	draw(app.texts.Text("injection.cleanLaunch"), row(440, 484, accentBrush), win32.Color(235, 238, 248))
+	draw(fmt.Sprintf(app.texts.Text("injection.timeout"), float64(settings.HelperTimeoutMS)/1000, float64(settings.RemoteTimeoutMS)/1000), row(490, 534, buttonBrush), win32.Color(190, 197, 216))
 	warning := app.texts.Text("injection.warning.none")
 	if len(app.injectionWarnings) > 0 {
 		warning = app.injectionWarnings[0]
 	}
-	draw(warning, row(526, 566, cardBrush), win32.Color(166, 174, 197))
-	draw(app.injectionStatus, row(572, 612, cardBrush), win32.Color(145, 154, 180))
+	draw(warning, row(540, 574, cardBrush), win32.Color(166, 174, 197))
+	draw(app.injectionStatus, row(580, 614, cardBrush), win32.Color(145, 154, 180))
 }
 
 func (app *application) commitPluginSettings(next plugins.Config) bool {
@@ -1865,6 +2231,7 @@ func (app *application) refreshPlugins() bool {
 		return false
 	}
 	app.pluginItems, app.pluginWarnings = items, warnings
+	app.pluginListScroll = min(app.pluginListScroll, max(0, len(items)-pluginVisibleRows))
 	found := false
 	for _, item := range items {
 		found = found || item.Manifest.ID == app.pluginSelected
@@ -1876,6 +2243,7 @@ func (app *application) refreshPlugins() bool {
 		}
 	}
 	app.pluginStatus = fmt.Sprintf(app.texts.Text("plugin.status.discovered"), len(items), len(warnings))
+	app.syncListScrollbar()
 	return true
 }
 
@@ -1889,9 +2257,20 @@ func (app *application) selectedPlugin() (plugins.Item, bool) {
 }
 
 func (app *application) pluginClick(x, y int) {
+	if app.pluginTargetMode {
+		app.fufuConfigClick(x, y)
+		win32.Invalidate(app.hwnd)
+		return
+	}
 	sy := func(value int32) int { return int(app.pluginContentY(value)) }
 	switch {
 	case y >= sy(170) && y < sy(214):
+		client := win32.GetClientRect(app.hwnd)
+		if x >= int(client.Right-win32.Scale(230, app.dpi)) {
+			app.pluginTargetMode = true
+			app.updateLaunchControlVisibility()
+			break
+		}
 		next := app.settings.Plugins
 		next.SafeMode = !next.SafeMode
 		if app.commitPluginSettings(next) {
@@ -1902,25 +2281,30 @@ func (app *application) pluginClick(x, y int) {
 			}
 		}
 	case y >= sy(220) && y < sy(264):
-		app.refreshPlugins()
-		app.startPluginCatalogSync()
-	case y >= sy(270) && y < sy(314):
-		if len(app.pluginItems) == 0 {
-			app.pluginStatus = app.texts.Text("plugin.status.noneInstalled")
-			break
+		client := win32.GetClientRect(app.hwnd)
+		middle := int(win32.Scale(252, app.dpi)) + (int(client.Right)-int(win32.Scale(294, app.dpi)))/2
+		if x < middle {
+			app.refreshPlugins()
+			app.startPluginCatalogSync()
+		} else {
+			app.startLocalPluginInstall()
 		}
-		index := 0
-		for i, item := range app.pluginItems {
-			if item.Manifest.ID == app.pluginSelected {
-				index = (i + 1) % len(app.pluginItems)
+	case y >= sy(270) && y < sy(412):
+		for visible := 0; visible < pluginVisibleRows; visible++ {
+			index := app.pluginListScroll + visible
+			if index >= len(app.pluginItems) {
+				break
+			}
+			top := int32(270 + visible*50)
+			if y >= sy(top) && y < sy(top+42) {
+				app.pluginSelected = app.pluginItems[index].Manifest.ID
+				app.pluginDeleteConfirm = ""
+				app.syncPluginAliasEdit()
+				app.pluginStatus = fmt.Sprintf(app.texts.Text("plugin.status.selected"), app.pluginItems[index].DisplayName())
 				break
 			}
 		}
-		app.pluginSelected = app.pluginItems[index].Manifest.ID
-		app.pluginDeleteConfirm = ""
-		app.syncPluginAliasEdit()
-		app.pluginStatus = fmt.Sprintf(app.texts.Text("plugin.status.selected"), app.pluginItems[index].DisplayName())
-	case y >= sy(320) && y < sy(364):
+	case y >= sy(420) && y < sy(464):
 		item, ok := app.selectedPlugin()
 		if !ok {
 			app.pluginStatus = app.texts.Text("plugin.status.selectFirst")
@@ -1935,9 +2319,9 @@ func (app *application) pluginClick(x, y int) {
 			app.pluginState = next
 			app.refreshPlugins()
 		}
-	case y >= sy(370) && y < sy(414):
+	case y >= sy(470) && y < sy(514):
 		// The child edit control owns this row.
-	case y >= sy(420) && y < sy(464):
+	case y >= sy(520) && y < sy(564):
 		client := win32.GetClientRect(app.hwnd)
 		left := int(win32.Scale(252, app.dpi))
 		width := int(client.Right) - left - int(win32.Scale(42, app.dpi))
@@ -1950,9 +2334,7 @@ func (app *application) pluginClick(x, y int) {
 		default:
 			app.movePlugin(1)
 		}
-	case y >= sy(470) && y < sy(514):
-		app.startLocalPluginInstall()
-	case y >= sy(520) && y < sy(564):
+	case y >= sy(570) && y < sy(614):
 		client := win32.GetClientRect(app.hwnd)
 		left := int(win32.Scale(252, app.dpi))
 		width := int(client.Right) - left - int(win32.Scale(42, app.dpi))
@@ -1966,6 +2348,35 @@ func (app *application) pluginClick(x, y int) {
 		}
 	}
 	win32.Invalidate(app.hwnd)
+}
+
+func (app *application) fufuConfigClick(x, y int) {
+	sy := func(value int32) int { return int(app.pluginContentY(value)) }
+	switch {
+	case y >= sy(170) && y < sy(224):
+		client := win32.GetClientRect(app.hwnd)
+		right := int(client.Right - win32.Scale(42, app.dpi))
+		if x >= right-sy(170) {
+			app.setFufuInjectionEnabled(!(app.fufuTargetEnabled && app.settings.Injection.Enabled))
+		} else if x >= right-sy(360) {
+			app.startFufuMainRepair()
+		}
+	case y >= sy(235) && y < sy(535):
+		for visible := 0; visible < fufuVisibleRows; visible++ {
+			index := app.fufuScroll + visible
+			if index >= len(app.fufuTarget.Settings) {
+				break
+			}
+			top := int32(235 + visible*50)
+			if y >= sy(top) && y < sy(top+42) && app.fufuTarget.Settings[index].Field.Type == "bool" {
+				app.toggleFufuBool(app.fufuTarget.Settings[index])
+				break
+			}
+		}
+	case y >= sy(540) && y < sy(584):
+		app.pluginTargetMode = false
+		app.updateLaunchControlVisibility()
+	}
 }
 
 func (app *application) savePluginAlias() {
@@ -2055,8 +2466,23 @@ func (app *application) applyPluginStoreConfig(next plugins.Config) bool {
 	}
 	app.settings = settings
 	app.pluginCatalogPage = page
+	app.storeListScroll = 0
+	app.syncStoreSelection()
 	app.pluginStatus = fmt.Sprintf(app.texts.Text("plugin.store.status.filterUpdated"), page.Total)
+	app.syncListScrollbar()
 	return true
+}
+
+func (app *application) syncStoreSelection() {
+	for _, item := range app.pluginCatalogPage.Items {
+		if item.ID == app.storeSelected {
+			return
+		}
+	}
+	app.storeSelected = ""
+	if len(app.pluginCatalogPage.Items) > 0 {
+		app.storeSelected = app.pluginCatalogPage.Items[0].ID
+	}
 }
 
 func (app *application) pluginStoreClick(x, y int) {
@@ -2068,48 +2494,51 @@ func (app *application) pluginStoreClick(x, y int) {
 	sy := func(value int32) int { return int(app.pluginContentY(value)) }
 	switch {
 	case y >= sy(270) && y < sy(314):
-		if !app.savePluginSearch() {
-			break
+		client := win32.GetClientRect(app.hwnd)
+		left := int(win32.Scale(252, app.dpi))
+		third := max(1, (int(client.Right)-left-int(win32.Scale(42, app.dpi)))/3)
+		if x < left+third {
+			if app.savePluginSearch() {
+				app.startPluginCatalogSync()
+			}
+		} else if x < left+2*third {
+			values := []string{"", "utility", "gameplay", "visuals", "other"}
+			index := 0
+			for i, value := range values {
+				if value == app.settings.Plugins.Category {
+					index = (i + 1) % len(values)
+					break
+				}
+			}
+			next := app.settings.Plugins
+			next.Category, next.Page = values[index], 1
+			app.applyPluginStoreConfig(next)
+		} else {
+			values := []string{"popular", "newest", "rating", "name"}
+			index := 0
+			for i, value := range values {
+				if value == app.settings.Plugins.Sort {
+					index = (i + 1) % len(values)
+					break
+				}
+			}
+			next := app.settings.Plugins
+			next.Sort, next.Page = values[index], 1
+			app.applyPluginStoreConfig(next)
 		}
-		app.startPluginCatalogSync()
-	case y >= sy(320) && y < sy(364):
-		if len(app.pluginCatalogPage.Items) == 0 {
-			app.pluginStatus = app.texts.Text("plugin.store.status.empty")
-			break
-		}
-		index := 0
-		for i, item := range app.pluginCatalogPage.Items {
-			if item.ID == app.pluginSelected {
-				index = (i + 1) % len(app.pluginCatalogPage.Items)
+	case y >= sy(320) && y < sy(462):
+		for visible := 0; visible < storeVisibleRows; visible++ {
+			index := app.storeListScroll + visible
+			if index >= len(app.pluginCatalogPage.Items) {
+				break
+			}
+			top := int32(320 + visible*50)
+			if y >= sy(top) && y < sy(top+42) {
+				app.storeSelected = app.pluginCatalogPage.Items[index].ID
+				app.pluginStatus = fmt.Sprintf(app.texts.Text("plugin.store.status.selected"), app.pluginCatalogPage.Items[index].Name)
 				break
 			}
 		}
-		app.pluginSelected = app.pluginCatalogPage.Items[index].ID
-		app.pluginStatus = fmt.Sprintf(app.texts.Text("plugin.store.status.selected"), app.pluginCatalogPage.Items[index].Name)
-	case y >= sy(370) && y < sy(414):
-		values := []string{"", "utility", "gameplay", "visuals", "other"}
-		index := 0
-		for i, value := range values {
-			if value == app.settings.Plugins.Category {
-				index = (i + 1) % len(values)
-				break
-			}
-		}
-		next := app.settings.Plugins
-		next.Category, next.Page = values[index], 1
-		app.applyPluginStoreConfig(next)
-	case y >= sy(420) && y < sy(464):
-		values := []string{"popular", "newest", "rating", "name"}
-		index := 0
-		for i, value := range values {
-			if value == app.settings.Plugins.Sort {
-				index = (i + 1) % len(values)
-				break
-			}
-		}
-		next := app.settings.Plugins
-		next.Sort, next.Page = values[index], 1
-		app.applyPluginStoreConfig(next)
 	case y >= sy(470) && y < sy(514):
 		client := win32.GetClientRect(app.hwnd)
 		middle := int(win32.Scale(252, app.dpi)) + (int(client.Right)-int(win32.Scale(294, app.dpi)))/2
@@ -2128,7 +2557,7 @@ func (app *application) pluginStoreClick(x, y int) {
 
 func (app *application) selectedCatalogPlugin() (plugins.CatalogItem, bool) {
 	for _, item := range app.pluginCatalogPage.Items {
-		if item.ID == app.pluginSelected {
+		if item.ID == app.storeSelected {
 			return item, true
 		}
 	}
@@ -2378,6 +2807,10 @@ func (app *application) movePlugin(delta int) {
 }
 
 func (app *application) paintPlugins(dc win32.HDC, client win32.Rect, left int32) {
+	if app.pluginTargetMode {
+		app.paintFufuConfig(dc, client, left)
+		return
+	}
 	cardBrush := win32.CreateSolidBrush(win32.Color(25, 29, 39))
 	defer win32.DeleteObject(uintptr(cardBrush))
 	buttonBrush := win32.CreateSolidBrush(win32.Color(35, 40, 54))
@@ -2406,39 +2839,112 @@ func (app *application) paintPlugins(dc win32.HDC, client win32.Rect, left int32
 	if app.settings.Plugins.SafeMode {
 		safe = app.texts.Text("plugin.safe.on")
 	}
-	draw(fmt.Sprintf(app.texts.Text("plugin.safe"), safe), row(170, 214, warningBrush), win32.Color(255, 205, 150))
-	draw(app.texts.Text("plugin.rescan"), row(220, 264, buttonBrush), win32.Color(225, 229, 242))
-	selected := app.texts.Text("plugin.noneInstalled")
-	enabled := false
-	if item, ok := app.selectedPlugin(); ok {
-		selected = fmt.Sprintf("%s · %s · %s", item.DisplayName(), item.Manifest.Version, item.Manifest.Developer)
-		enabled = item.Enabled
-	}
-	draw(fmt.Sprintf(app.texts.Text("plugin.current"), selected), row(270, 314, buttonBrush), win32.Color(225, 229, 242))
-	draw(fmt.Sprintf(app.texts.Text("plugin.enabled"), onOffText(app.texts.Language(), enabled)), row(320, 364, accentBrush), win32.Color(235, 238, 248))
-	draw(app.texts.Text("plugin.aliasHint"), row(370, 414, cardBrush), win32.Color(145, 154, 180))
-	actions := row(420, 464, buttonBrush)
-	draw(app.texts.Text("plugin.aliasSave"), cell(actions, 0, 3), win32.Color(225, 229, 242))
-	draw(app.texts.Text("plugin.moveUp"), cell(actions, 1, 3), win32.Color(190, 197, 216))
-	draw(app.texts.Text("plugin.moveDown"), cell(actions, 2, 3), win32.Color(190, 197, 216))
+	safeRow := row(170, 214, warningBrush)
+	draw(fmt.Sprintf(app.texts.Text("plugin.safe"), safe), safeRow, win32.Color(255, 205, 150))
+	targetCell := safeRow
+	targetCell.Left = targetCell.Right - win32.Scale(230, app.dpi)
+	draw(app.texts.Text("fufu.target.openConfig"), targetCell, win32.Color(235, 238, 248))
+	toolsRow := row(220, 264, buttonBrush)
+	draw(app.texts.Text("plugin.rescan"), cell(toolsRow, 0, 2), win32.Color(225, 229, 242))
 	installText := app.texts.Text("plugin.installLocal")
 	if app.pluginBusy {
 		installText = app.texts.Text("plugin.busy")
 	}
-	draw(installText, row(470, 514, buttonBrush), win32.Color(190, 197, 216))
-	lifecycle := row(520, 564, warningBrush)
+	draw(installText, cell(toolsRow, 1, 2), win32.Color(190, 197, 216))
+	enabled := false
+	if item, ok := app.selectedPlugin(); ok {
+		enabled = item.Enabled
+	}
+	if len(app.pluginItems) == 0 {
+		draw(app.texts.Text("plugin.noneInstalled"), row(270, 412, cardBrush), win32.Color(145, 154, 180))
+	} else {
+		for visible := 0; visible < pluginVisibleRows; visible++ {
+			index := app.pluginListScroll + visible
+			if index >= len(app.pluginItems) {
+				break
+			}
+			item := app.pluginItems[index]
+			brush := cardBrush
+			if item.Manifest.ID == app.pluginSelected {
+				brush = accentBrush
+			} else if visible%2 == 1 {
+				brush = buttonBrush
+			}
+			value := fmt.Sprintf("%s  |  %s  |  %s  |  %s", item.DisplayName(), item.Manifest.Version, item.Manifest.Developer, onOffText(app.texts.Language(), item.Enabled))
+			itemRow := row(int32(270+visible*50), int32(312+visible*50), brush)
+			itemRow.Right -= win32.Scale(20, app.dpi)
+			draw(value, itemRow, win32.Color(225, 229, 242))
+		}
+	}
+	draw(fmt.Sprintf(app.texts.Text("plugin.enabled"), onOffText(app.texts.Language(), enabled)), row(420, 464, accentBrush), win32.Color(235, 238, 248))
+	draw(app.texts.Text("plugin.aliasHint"), row(470, 514, cardBrush), win32.Color(145, 154, 180))
+	actions := row(520, 564, buttonBrush)
+	draw(app.texts.Text("plugin.aliasSave"), cell(actions, 0, 3), win32.Color(225, 229, 242))
+	draw(app.texts.Text("plugin.moveUp"), cell(actions, 1, 3), win32.Color(190, 197, 216))
+	draw(app.texts.Text("plugin.moveDown"), cell(actions, 2, 3), win32.Color(190, 197, 216))
+	lifecycle := row(570, 614, warningBrush)
 	draw(app.texts.Text("plugin.rollback"), cell(lifecycle, 0, 3), win32.Color(255, 205, 150))
 	draw(app.texts.Text("plugin.uninstall"), cell(lifecycle, 1, 3), win32.Color(255, 170, 150))
 	draw(app.texts.Text("plugin.nextPreset"), cell(lifecycle, 2, 3), win32.Color(255, 205, 150))
-	statusText := app.pluginStatus
-	if len(app.pluginWarnings) > 0 {
-		statusText += " | " + app.pluginWarnings[0]
+}
+
+func (app *application) paintFufuConfig(dc win32.HDC, client win32.Rect, left int32) {
+	cardBrush := win32.CreateSolidBrush(win32.Color(25, 29, 39))
+	defer win32.DeleteObject(uintptr(cardBrush))
+	buttonBrush := win32.CreateSolidBrush(win32.Color(35, 40, 54))
+	defer win32.DeleteObject(uintptr(buttonBrush))
+	accentBrush := win32.CreateSolidBrush(win32.Color(52, 66, 112))
+	defer win32.DeleteObject(uintptr(accentBrush))
+	warningBrush := win32.CreateSolidBrush(win32.Color(74, 48, 35))
+	defer win32.DeleteObject(uintptr(warningBrush))
+	right := client.Right - win32.Scale(42, app.dpi)
+	row := func(top, bottom int32, brush win32.HBRUSH) win32.Rect {
+		rect := win32.Rect{Left: left, Top: app.pluginContentY(top), Right: right, Bottom: app.pluginContentY(bottom)}
+		win32.FillRect(dc, &rect, brush)
+		return rect
 	}
-	if app.pluginCatalogPage.Total > 0 {
-		statusText += " | " + fmt.Sprintf(app.texts.Text("plugin.storeCount"), app.pluginCatalogPage.Total)
+	draw := func(value string, rect win32.Rect, color uint32) {
+		win32.SetTextColor(dc, color)
+		rect.Left += win32.Scale(18, app.dpi)
+		rect.Right -= win32.Scale(12, app.dpi)
+		win32.DrawText(dc, value, &rect, win32.DT_LEFT|win32.DT_VCENTER|win32.DT_SINGLELINE|win32.DT_END_ELLIPSIS)
 	}
-	draw(statusText, row(570, 614, cardBrush), win32.Color(145, 154, 180))
-	draw("", row(620, 660, cardBrush), win32.Color(145, 154, 180))
+	targetName := app.texts.Text("fufu.target.notInstalled")
+	if app.fufuTargetInstalled {
+		targetName = fmt.Sprintf("%s  |  %s  |  %s", app.fufuTarget.Name, app.fufuTarget.Version, app.fufuTarget.Developer)
+	}
+	header := row(170, 224, accentBrush)
+	actionLeft := header.Right - win32.Scale(360, app.dpi)
+	toggleLeft := header.Right - win32.Scale(170, app.dpi)
+	draw(fmt.Sprintf(app.texts.Text("fufu.target.selector"), targetName), win32.Rect{Left: header.Left, Top: header.Top, Right: actionLeft, Bottom: header.Bottom}, win32.Color(235, 238, 248))
+	draw(app.texts.Text("fufu.target.repair"), win32.Rect{Left: actionLeft, Top: header.Top, Right: toggleLeft, Bottom: header.Bottom}, win32.Color(225, 229, 242))
+	draw(fmt.Sprintf(app.texts.Text("fufu.target.injection"), onOffText(app.texts.Language(), app.fufuTargetEnabled && app.settings.Injection.Enabled)), win32.Rect{Left: toggleLeft, Top: header.Top, Right: header.Right, Bottom: header.Bottom}, win32.Color(255, 205, 150))
+	for visible := 0; visible < fufuVisibleRows; visible++ {
+		index := app.fufuScroll + visible
+		if index >= len(app.fufuTarget.Settings) {
+			break
+		}
+		setting := app.fufuTarget.Settings[index]
+		brush := cardBrush
+		if visible%2 == 1 {
+			brush = buttonBrush
+		}
+		settingRow := row(int32(235+visible*50), int32(277+visible*50), brush)
+		settingRow.Right -= win32.Scale(20, app.dpi)
+		labelRect := settingRow
+		labelRect.Right -= win32.Scale(280, app.dpi)
+		draw(fmt.Sprintf("%s  (%s)", setting.Field.Name, setting.Field.Type), labelRect, win32.Color(225, 229, 242))
+		if setting.Field.Type == "bool" {
+			value := strings.ToLower(strings.TrimSpace(app.fufuValues[setting.Field.ID]))
+			on := value == "1" || value == "true"
+			valueRect := settingRow
+			valueRect.Left = valueRect.Right - win32.Scale(250, app.dpi)
+			draw(onOffText(app.texts.Language(), on), valueRect, win32.Color(235, 238, 248))
+		}
+	}
+	footer := row(540, 584, warningBrush)
+	footerText := fmt.Sprintf(app.texts.Text("fufu.setting.scroll"), min(len(app.fufuTarget.Settings), app.fufuScroll+1), min(len(app.fufuTarget.Settings), app.fufuScroll+fufuVisibleRows), len(app.fufuTarget.Settings))
+	draw(app.texts.Text("fufu.target.openGeneric")+"  |  "+footerText, footer, win32.Color(190, 197, 216))
 }
 
 func (app *application) paintPluginStore(dc win32.HDC, client win32.Rect, left int32) {
@@ -2470,24 +2976,45 @@ func (app *application) paintPluginStore(dc win32.HDC, client win32.Rect, left i
 	if app.pluginBusy {
 		syncText = app.texts.Text("plugin.store.busy")
 	}
-	draw(syncText, row(270, 314, accentBrush), win32.Color(235, 238, 248))
-	selected := app.texts.Text("plugin.store.none")
+	toolsRow := row(270, 314, accentBrush)
+	draw(syncText, cell(toolsRow, 0, 3), win32.Color(235, 238, 248))
+	draw(fmt.Sprintf(app.texts.Text("plugin.store.category"), pluginCategoryText(app.texts, app.settings.Plugins.Category)), cell(toolsRow, 1, 3), win32.Color(225, 229, 242))
+	draw(fmt.Sprintf(app.texts.Text("plugin.store.sort"), pluginSortText(app.texts, app.settings.Plugins.Sort)), cell(toolsRow, 2, 3), win32.Color(225, 229, 242))
 	installAction := app.texts.Text("plugin.store.install")
 	if item, ok := app.selectedCatalogPlugin(); ok {
-		selected = fmt.Sprintf("%s · %s · %s", item.Name, item.Version, item.Developer)
 		if installed, exists := app.pluginState.Installed[strings.ToLower(item.ID)]; exists {
 			if installed.ActiveVersion == item.Version {
-				selected += " · " + app.texts.Text("plugin.store.installed")
 				installAction = app.texts.Text("plugin.store.repair")
 			} else {
-				selected += " · " + fmt.Sprintf(app.texts.Text("plugin.store.versionDiff"), installed.ActiveVersion, item.Version)
 				installAction = app.texts.Text("plugin.store.update")
 			}
 		}
 	}
-	draw(fmt.Sprintf(app.texts.Text("plugin.store.selected"), selected), row(320, 364, buttonBrush), win32.Color(225, 229, 242))
-	draw(fmt.Sprintf(app.texts.Text("plugin.store.category"), pluginCategoryText(app.texts, app.settings.Plugins.Category)), row(370, 414, buttonBrush), win32.Color(190, 197, 216))
-	draw(fmt.Sprintf(app.texts.Text("plugin.store.sort"), pluginSortText(app.texts, app.settings.Plugins.Sort)), row(420, 464, buttonBrush), win32.Color(190, 197, 216))
+	if len(app.pluginCatalogPage.Items) == 0 {
+		draw(app.texts.Text("plugin.store.none"), row(320, 462, cardBrush), win32.Color(145, 154, 180))
+	} else {
+		for visible := 0; visible < storeVisibleRows; visible++ {
+			index := app.storeListScroll + visible
+			if index >= len(app.pluginCatalogPage.Items) {
+				break
+			}
+			item := app.pluginCatalogPage.Items[index]
+			brush := cardBrush
+			if item.ID == app.storeSelected {
+				brush = accentBrush
+			} else if visible%2 == 1 {
+				brush = buttonBrush
+			}
+			state := ""
+			if installed, exists := app.pluginState.Installed[strings.ToLower(item.ID)]; exists {
+				state = "  |  " + installed.ActiveVersion
+			}
+			value := fmt.Sprintf("%s  |  %s  |  %s%s", item.Name, item.Version, item.Developer, state)
+			itemRow := row(int32(320+visible*50), int32(362+visible*50), brush)
+			itemRow.Right -= win32.Scale(20, app.dpi)
+			draw(value, itemRow, win32.Color(225, 229, 242))
+		}
+	}
 	pages := row(470, 514, buttonBrush)
 	draw(app.texts.Text("plugin.store.previous"), cell(pages, 0, 2), win32.Color(190, 197, 216))
 	draw(fmt.Sprintf(app.texts.Text("plugin.store.next"), app.pluginCatalogPage.Page, app.pluginCatalogPage.TotalPages), cell(pages, 1, 2), win32.Color(190, 197, 216))
@@ -2730,11 +3257,15 @@ func (app *application) refreshTheme() {
 		win32.DeleteObject(uintptr(app.editBrush))
 	}
 	app.editBrush = win32.CreateSolidBrush(win32.Color(25, 29, 39))
-	for _, control := range []win32.HWND{app.customArgumentsEdit, app.pluginAliasEdit, app.pluginTokenEdit, app.pluginSearchEdit} {
+	for _, control := range []win32.HWND{app.customArgumentsEdit, app.pluginAliasEdit, app.pluginTokenEdit, app.pluginSearchEdit, app.listScrollbar} {
 		if control != 0 {
 			win32.SetControlDarkTheme(control, app.palette.Dark)
 			win32.Invalidate(control)
 		}
+	}
+	for _, control := range app.fufuEdits {
+		win32.SetControlDarkTheme(control, app.palette.Dark)
+		win32.Invalidate(control)
 	}
 	if app.hwnd != 0 {
 		win32.SetDarkTitleBar(app.hwnd, app.palette.Dark)
@@ -3050,6 +3581,13 @@ func (app *application) createLaunchControls() error {
 	win32.SetTextLimit(searchEdit, 128)
 	win32.SetControlFont(searchEdit, app.fontBody)
 	win32.SetControlDarkTheme(searchEdit, app.palette.Dark)
+	scrollbar, err := win32.CreateControl("SCROLLBAR", "", win32.WS_CHILD|win32.SBS_VERT, 0, 0, 16, 100, app.hwnd, 2005, app.instance)
+	if err != nil {
+		return err
+	}
+	app.listScrollbar = scrollbar
+	win32.SetControlDarkTheme(scrollbar, app.palette.Dark)
+	app.rebuildFufuControls()
 	app.refreshLocalizedCueBanners()
 	app.layoutLaunchControls()
 	app.updateLaunchControlVisibility()
@@ -3082,7 +3620,7 @@ func (app *application) layoutLaunchControls() {
 	height := win32.Scale(36, app.dpi)
 	win32.SetWindowPos(app.customArgumentsEdit, win32.Rect{Left: left, Top: top, Right: right, Bottom: top + height}, win32.SWP_NOZORDER)
 	if app.pluginAliasEdit != 0 {
-		aliasTop, aliasBottom := app.pluginContentY(370), app.pluginContentY(406)
+		aliasTop, aliasBottom := app.pluginContentY(470), app.pluginContentY(506)
 		win32.SetWindowPos(app.pluginAliasEdit, win32.Rect{Left: left, Top: aliasTop, Right: right, Bottom: aliasBottom}, win32.SWP_NOZORDER)
 	}
 	if app.pluginTokenEdit != 0 {
@@ -3093,6 +3631,33 @@ func (app *application) layoutLaunchControls() {
 		searchTop, searchBottom := app.pluginContentY(220), app.pluginContentY(256)
 		win32.SetWindowPos(app.pluginSearchEdit, win32.Rect{Left: left, Top: searchTop, Right: right, Bottom: searchBottom}, win32.SWP_NOZORDER)
 	}
+	app.layoutFufuControls()
+	app.syncListScrollbar()
+}
+
+func (app *application) layoutFufuControls() {
+	if app.hwnd == 0 {
+		return
+	}
+	client := win32.GetClientRect(app.hwnd)
+	right := client.Right - win32.Scale(60, app.dpi)
+	left := max(win32.Scale(500, app.dpi), right-win32.Scale(250, app.dpi))
+	visiblePage := app.selected == 8 && app.pluginTargetMode && app.fufuTargetInstalled
+	for index, setting := range app.fufuTarget.Settings {
+		control := app.fufuEdits[setting.Field.ID]
+		if control == 0 {
+			continue
+		}
+		visible := index - app.fufuScroll
+		if visiblePage && visible >= 0 && visible < fufuVisibleRows {
+			top := app.pluginContentY(int32(241 + visible*50))
+			bottom := app.pluginContentY(int32(273 + visible*50))
+			win32.SetWindowPos(control, win32.Rect{Left: left, Top: top, Right: right, Bottom: bottom}, win32.SWP_NOZORDER)
+			win32.ShowWindow(control, win32.SW_SHOWNORMAL)
+		} else {
+			win32.ShowWindow(control, win32.SW_HIDE)
+		}
+	}
 }
 
 func (app *application) updateLaunchControlVisibility() {
@@ -3101,7 +3666,7 @@ func (app *application) updateLaunchControlVisibility() {
 	} else if app.customArgumentsEdit != 0 {
 		win32.ShowWindow(app.customArgumentsEdit, win32.SW_HIDE)
 	}
-	if app.pluginAliasEdit != 0 && app.selected == 8 {
+	if app.pluginAliasEdit != 0 && app.selected == 8 && !app.pluginTargetMode {
 		app.syncPluginAliasEdit()
 		win32.ShowWindow(app.pluginAliasEdit, win32.SW_SHOWNORMAL)
 	} else if app.pluginAliasEdit != 0 {
@@ -3117,6 +3682,8 @@ func (app *application) updateLaunchControlVisibility() {
 	} else if app.pluginSearchEdit != 0 {
 		win32.ShowWindow(app.pluginSearchEdit, win32.SW_HIDE)
 	}
+	app.layoutFufuControls()
+	app.syncListScrollbar()
 }
 
 func (app *application) syncPluginAliasEdit() {

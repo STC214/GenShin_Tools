@@ -58,6 +58,16 @@ type PaintStruct struct {
 	Reserved  [32]byte
 }
 
+type ScrollInfo struct {
+	Size     uint32
+	Mask     uint32
+	Min      int32
+	Max      int32
+	Page     uint32
+	Position int32
+	TrackPos int32
+}
+
 type MinMaxInfo struct {
 	Reserved     Point
 	MaxSize      Point
@@ -163,6 +173,7 @@ const (
 	WS_CHILD            = 0x40000000
 	WS_VISIBLE          = 0x10000000
 	WS_TABSTOP          = 0x00010000
+	SBS_VERT            = 0x0001
 	WS_BORDER           = 0x00800000
 	ES_AUTOHSCROLL      = 0x0080
 	ES_PASSWORD         = 0x0020
@@ -186,12 +197,14 @@ const (
 	WM_SYSCOLORCHANGE   = 0x0015
 	WM_SETTINGCHANGE    = 0x001A
 	WM_COMMAND          = 0x0111
+	WM_VSCROLL          = 0x0115
 	WM_CTLCOLOREDIT     = 0x0133
 	WM_SYSCOMMAND       = 0x0112
 	WM_MOUSEMOVE        = 0x0200
 	WM_LBUTTONDOWN      = 0x0201
 	WM_LBUTTONDBLCLK    = 0x0203
 	WM_RBUTTONUP        = 0x0205
+	WM_MOUSEWHEEL       = 0x020A
 	WM_KEYDOWN          = 0x0100
 	WM_KEYUP            = 0x0101
 	WM_HOTKEY           = 0x0312
@@ -202,7 +215,21 @@ const (
 	WM_APP              = 0x8000
 
 	SIZE_MINIMIZED = 1
-	SC_MINIMIZE    = 0xF020
+
+	SB_LINEUP        = 0
+	SB_LINEDOWN      = 1
+	SB_PAGEUP        = 2
+	SB_PAGEDOWN      = 3
+	SB_THUMBPOSITION = 4
+	SB_THUMBTRACK    = 5
+	SB_TOP           = 6
+	SB_BOTTOM        = 7
+
+	SIF_RANGE    = 0x0001
+	SIF_PAGE     = 0x0002
+	SIF_POS      = 0x0004
+	SIF_TRACKPOS = 0x0010
+	SC_MINIMIZE  = 0xF020
 
 	VK_UP           = 0x26
 	VK_DOWN         = 0x28
@@ -310,6 +337,8 @@ var (
 	procSendMessageW                  = user32.NewProc("SendMessageW")
 	procGetSystemMetrics              = user32.NewProc("GetSystemMetrics")
 	procInvalidateRect                = user32.NewProc("InvalidateRect")
+	procSetScrollInfo                 = user32.NewProc("SetScrollInfo")
+	procGetScrollInfo                 = user32.NewProc("GetScrollInfo")
 	procMonitorFromRect               = user32.NewProc("MonitorFromRect")
 	procGetMonitorInfoW               = user32.NewProc("GetMonitorInfoW")
 	procGetDpiForWindow               = user32.NewProc("GetDpiForWindow")
@@ -327,13 +356,17 @@ var (
 	procGetSysColor                   = user32.NewProc("GetSysColor")
 	procSystemParametersInfoW         = user32.NewProc("SystemParametersInfoW")
 
-	procCreateSolidBrush = gdi32.NewProc("CreateSolidBrush")
-	procDeleteObject     = gdi32.NewProc("DeleteObject")
-	procSetBkMode        = gdi32.NewProc("SetBkMode")
-	procSetTextColor     = gdi32.NewProc("SetTextColor")
-	procSetBkColor       = gdi32.NewProc("SetBkColor")
-	procSelectObject     = gdi32.NewProc("SelectObject")
-	procCreateFontW      = gdi32.NewProc("CreateFontW")
+	procCreateSolidBrush       = gdi32.NewProc("CreateSolidBrush")
+	procDeleteObject           = gdi32.NewProc("DeleteObject")
+	procCreateCompatibleDC     = gdi32.NewProc("CreateCompatibleDC")
+	procCreateCompatibleBitmap = gdi32.NewProc("CreateCompatibleBitmap")
+	procDeleteDC               = gdi32.NewProc("DeleteDC")
+	procBitBlt                 = gdi32.NewProc("BitBlt")
+	procSetBkMode              = gdi32.NewProc("SetBkMode")
+	procSetTextColor           = gdi32.NewProc("SetTextColor")
+	procSetBkColor             = gdi32.NewProc("SetBkColor")
+	procSelectObject           = gdi32.NewProc("SelectObject")
+	procCreateFontW            = gdi32.NewProc("CreateFontW")
 
 	procShellNotifyIconW                 = shell32.NewProc("Shell_NotifyIconW")
 	procDwmSetWindowAttribute            = dwmapi.NewProc("DwmSetWindowAttribute")
@@ -621,6 +654,22 @@ func MonitorCount() int {
 }
 func Invalidate(hwnd HWND) { procInvalidateRect.Call(uintptr(hwnd), 0, 0) }
 
+func SetScrollInfo(hwnd HWND, info *ScrollInfo, redraw bool) int32 {
+	info.Size = uint32(unsafe.Sizeof(*info))
+	redrawValue := uintptr(0)
+	if redraw {
+		redrawValue = 1
+	}
+	value, _, _ := procSetScrollInfo.Call(uintptr(hwnd), 2, uintptr(unsafe.Pointer(info)), redrawValue)
+	return int32(value)
+}
+
+func GetScrollInfo(hwnd HWND, info *ScrollInfo) bool {
+	info.Size = uint32(unsafe.Sizeof(*info))
+	value, _, _ := procGetScrollInfo.Call(uintptr(hwnd), 2, uintptr(unsafe.Pointer(info)))
+	return value != 0
+}
+
 func BeginPaint(hwnd HWND, paint *PaintStruct) HDC {
 	value, _, _ := procBeginPaint.Call(uintptr(hwnd), uintptr(unsafe.Pointer(paint)))
 	return HDC(value)
@@ -636,6 +685,24 @@ func DeleteObject(object uintptr) {
 	if object != 0 {
 		procDeleteObject.Call(object)
 	}
+}
+func CreateCompatibleDC(dc HDC) HDC {
+	value, _, _ := procCreateCompatibleDC.Call(uintptr(dc))
+	return HDC(value)
+}
+func CreateCompatibleBitmap(dc HDC, width, height int32) uintptr {
+	value, _, _ := procCreateCompatibleBitmap.Call(uintptr(dc), uintptr(width), uintptr(height))
+	return value
+}
+func DeleteDC(dc HDC) {
+	if dc != 0 {
+		procDeleteDC.Call(uintptr(dc))
+	}
+}
+func BitBlt(destination HDC, x, y, width, height int32, source HDC, sourceX, sourceY int32) bool {
+	const srcCopy = 0x00CC0020
+	value, _, _ := procBitBlt.Call(uintptr(destination), uintptr(x), uintptr(y), uintptr(width), uintptr(height), uintptr(source), uintptr(sourceX), uintptr(sourceY), srcCopy)
+	return value != 0
 }
 func FillRect(dc HDC, rect *Rect, brush HBRUSH) {
 	procFillRect.Call(uintptr(dc), uintptr(unsafe.Pointer(rect)), uintptr(brush))
