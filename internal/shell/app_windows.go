@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -147,7 +148,7 @@ type application struct {
 	pluginCatalogPage       plugins.CatalogPage
 	customArgumentsEdit     win32.HWND
 	pluginAliasEdit         win32.HWND
-	pluginCatalogEdit       win32.HWND
+	pluginTokenEdit         win32.HWND
 	pluginSearchEdit        win32.HWND
 	shellStatus             string
 	diagnosticUpdates       chan diagnosticUpdate
@@ -352,16 +353,13 @@ func Run(layout paths.Layout, build buildinfo.Info) (returnErr error) {
 	pluginCatalog := plugins.Catalog{}
 	pluginCatalogPage := plugins.CatalogPage{}
 	pluginStatus := fmt.Sprintf(texts.Text("plugin.status.initialDiscovered"), len(pluginItems))
-	if loaded.Settings.Plugins.CatalogURL != "" {
-		cached, cacheErr := plugins.LoadCatalogForSource(pluginLayout.Catalog, loaded.Settings.Plugins.CatalogURL)
-		if cacheErr == nil {
-			if page, queryErr := plugins.QueryCatalog(cached, loaded.Settings.Plugins); queryErr == nil {
-				pluginCatalog, pluginCatalogPage = cached, page
-				pluginStatus = fmt.Sprintf(texts.Text("plugin.status.cacheLoaded"), page.Total)
-			}
-		} else if !errors.Is(cacheErr, os.ErrNotExist) {
-			pluginStatus = texts.Text("plugin.status.cacheInvalid")
+	if cached, cacheErr := plugins.LoadCatalog(pluginLayout.Catalog); cacheErr == nil {
+		if page, queryErr := plugins.QueryCatalog(cached, loaded.Settings.Plugins); queryErr == nil {
+			pluginCatalog, pluginCatalogPage = cached, page
+			pluginStatus = fmt.Sprintf(texts.Text("plugin.status.cacheLoaded"), page.Total)
 		}
+	} else if !errors.Is(cacheErr, os.ErrNotExist) {
+		pluginStatus = texts.Text("plugin.status.cacheInvalid")
 	}
 	app := &application{
 		instance:   win32.ModuleHandle(),
@@ -914,10 +912,7 @@ func (app *application) handleMessage(hwnd win32.HWND, message uint32, wParam, l
 	case win32.WM_COMMAND:
 		controlID := uint16(wParam & 0xffff)
 		notification := uint16((wParam >> 16) & 0xffff)
-		if controlID == 2003 && notification == 0x0200 {
-			app.savePluginCatalogURL()
-			win32.Invalidate(hwnd)
-		} else if controlID == 2004 && notification == 0x0200 {
+		if controlID == 2004 && notification == 0x0200 {
 			app.savePluginSearch()
 			win32.Invalidate(hwnd)
 		}
@@ -1098,8 +1093,8 @@ func (app *application) recreateFonts() {
 	if app.pluginAliasEdit != 0 {
 		win32.SetControlFont(app.pluginAliasEdit, app.fontBody)
 	}
-	if app.pluginCatalogEdit != 0 {
-		win32.SetControlFont(app.pluginCatalogEdit, app.fontBody)
+	if app.pluginTokenEdit != 0 {
+		win32.SetControlFont(app.pluginTokenEdit, app.fontBody)
 	}
 	if app.pluginSearchEdit != 0 {
 		win32.SetControlFont(app.pluginSearchEdit, app.fontBody)
@@ -1908,9 +1903,7 @@ func (app *application) pluginClick(x, y int) {
 		}
 	case y >= sy(220) && y < sy(264):
 		app.refreshPlugins()
-		if app.settings.Plugins.CatalogURL != "" {
-			app.startPluginCatalogSync()
-		}
+		app.startPluginCatalogSync()
 	case y >= sy(270) && y < sy(314):
 		if len(app.pluginItems) == 0 {
 			app.pluginStatus = app.texts.Text("plugin.status.noneInstalled")
@@ -1996,56 +1989,17 @@ func (app *application) savePluginAlias() {
 	app.pluginStatus = app.texts.Text("plugin.status.aliasSaved")
 }
 
-func (app *application) savePluginCatalogURL() bool {
-	if app.pluginCatalogEdit == 0 {
-		return false
-	}
-	if app.pluginBusy {
-		app.pluginStatus = app.texts.Text("plugin.status.taskBusy")
-		win32.SetWindowText(app.pluginCatalogEdit, app.settings.Plugins.CatalogURL)
-		return false
-	}
-	next := app.settings.Plugins
-	next.CatalogURL = strings.TrimSpace(win32.GetWindowText(app.pluginCatalogEdit))
-	normalized, err := next.Normalized()
-	if err != nil {
-		app.pluginStatus = fmt.Sprintf(app.texts.Text("plugin.store.status.urlInvalid"), err)
-		win32.SetWindowText(app.pluginCatalogEdit, app.settings.Plugins.CatalogURL)
-		return false
-	}
-	settings := app.settings
-	settings.Plugins = normalized
-	if err := config.Save(app.layout.Config, settings); err != nil {
-		app.pluginStatus = fmt.Sprintf(app.texts.Text("plugin.store.status.urlSaveFailed"), err)
-		win32.SetWindowText(app.pluginCatalogEdit, app.settings.Plugins.CatalogURL)
-		return false
-	}
-	changed := normalized.CatalogURL != app.settings.Plugins.CatalogURL
-	app.settings = settings
-	if changed || normalized.CatalogURL == "" {
-		app.pluginCatalog = plugins.Catalog{}
-		app.pluginCatalogPage = plugins.CatalogPage{}
-	}
-	if normalized.CatalogURL == "" {
-		app.pluginStatus = app.texts.Text("plugin.store.status.disabled")
-	} else {
-		app.pluginStatus = app.texts.Text("plugin.store.status.urlSaved")
-	}
-	return true
-}
-
 func (app *application) startPluginCatalogSync() {
-	if app.pluginBusy || app.settings.Plugins.CatalogURL == "" {
+	if app.pluginBusy {
 		return
 	}
-	url := app.settings.Plugins.CatalogURL
 	configCopy := app.settings.Plugins
 	destination := app.pluginLayout.Catalog
 	app.pluginBusy = true
 	app.pluginStatus = app.texts.Text("plugin.store.status.syncing")
 	texts := app.texts
 	app.pluginTask = app.tasks.Run(func(ctx context.Context, id uint64) {
-		catalog, err := plugins.SyncCatalog(ctx, nil, url, destination)
+		catalog, err := plugins.SyncCatalog(ctx, nil, destination)
 		if err != nil {
 			app.publishPlugin(pluginUpdate{taskID: id, err: fmt.Sprintf(texts.Text("plugin.store.status.syncFailed"), err)})
 			return
@@ -2114,7 +2068,7 @@ func (app *application) pluginStoreClick(x, y int) {
 	sy := func(value int32) int { return int(app.pluginContentY(value)) }
 	switch {
 	case y >= sy(270) && y < sy(314):
-		if !app.savePluginCatalogURL() || !app.savePluginSearch() {
+		if !app.savePluginSearch() {
 			break
 		}
 		app.startPluginCatalogSync()
@@ -2185,8 +2139,8 @@ func (app *application) selectedCatalogPlugin() (plugins.CatalogItem, bool) {
 }
 
 func (app *application) startCatalogPluginInstall() {
-	if app.pluginBusy || app.gameState.Candidate == nil {
-		app.pluginStatus = app.texts.Text("plugin.store.status.busyNeedGame")
+	if app.pluginBusy {
+		app.pluginStatus = app.texts.Text("plugin.status.taskBusy")
 		return
 	}
 	item, ok := app.selectedCatalogPlugin()
@@ -2194,6 +2148,29 @@ func (app *application) startCatalogPluginInstall() {
 		app.pluginStatus = app.texts.Text("plugin.store.status.selectFirst")
 		return
 	}
+	rawToken := ""
+	if app.pluginTokenEdit != 0 {
+		rawToken = strings.TrimSpace(win32.GetWindowText(app.pluginTokenEdit))
+	}
+	if rawToken == "" {
+		gateURL := plugins.FufuStoreBaseURL + "/plugin-download-gate?id=" + url.QueryEscape(item.ID)
+		if err := openExternalURL(gateURL); err != nil {
+			app.pluginStatus = fmt.Sprintf(app.texts.Text("plugin.store.status.openFufuFailed"), err)
+			return
+		}
+		app.pluginStatus = fmt.Sprintf(app.texts.Text("plugin.store.status.needToken"), item.Name)
+		return
+	}
+	token, err := plugins.ParseFufuDownloadToken(rawToken)
+	if err != nil {
+		app.pluginStatus = fmt.Sprintf(app.texts.Text("plugin.store.status.tokenInvalid"), err)
+		return
+	}
+	if app.gameState.Candidate == nil {
+		app.pluginStatus = app.texts.Text("plugin.store.status.needGame")
+		return
+	}
+	win32.SetWindowText(app.pluginTokenEdit, "")
 	state := plugins.CloneState(app.pluginState)
 	candidate := *app.gameState.Candidate
 	layout := app.pluginLayout
@@ -2201,25 +2178,29 @@ func (app *application) startCatalogPluginInstall() {
 	app.pluginStatus = fmt.Sprintf(app.texts.Text("plugin.store.status.downloading"), item.Name)
 	texts := app.texts
 	app.pluginTask = app.tasks.Run(func(ctx context.Context, id uint64) {
-		temporary, err := os.CreateTemp(layout.Staging, item.ID+"-download-*.zip")
-		if err != nil {
-			app.publishPlugin(pluginUpdate{taskID: id, err: fmt.Sprintf(texts.Text("plugin.store.status.stagingFailed"), err)})
+		temporary, createErr := os.CreateTemp(layout.Staging, strings.ToLower(item.ID)+"-fufu-*.zip")
+		if createErr != nil {
+			app.publishPlugin(pluginUpdate{taskID: id, err: fmt.Sprintf(texts.Text("plugin.store.status.stagingFailed"), createErr)})
 			return
 		}
 		packagePath := temporary.Name()
 		_ = temporary.Close()
 		_ = os.Remove(packagePath)
 		defer os.Remove(packagePath)
-		if err := plugins.DownloadPackage(ctx, nil, item, packagePath); err != nil {
-			app.publishPlugin(pluginUpdate{taskID: id, err: fmt.Sprintf(texts.Text("plugin.store.status.downloadFailed"), err)})
+		if downloadErr := plugins.DownloadFufuPackage(ctx, nil, item, token, packagePath); downloadErr != nil {
+			app.publishPlugin(pluginUpdate{taskID: id, err: fmt.Sprintf(texts.Text("plugin.store.status.downloadFailed"), downloadErr)})
 			return
 		}
-		result, err := plugins.InstallLocalPackage(ctx, packagePath, item, layout, candidate, &state)
-		if err != nil {
-			app.publishPlugin(pluginUpdate{taskID: id, err: fmt.Sprintf(texts.Text("plugin.store.status.installFailed"), err)})
+		result, installErr := plugins.InstallFufuPackage(ctx, packagePath, item, layout, candidate, &state)
+		if installErr != nil {
+			app.publishPlugin(pluginUpdate{taskID: id, err: fmt.Sprintf(texts.Text("plugin.store.status.installFailed"), installErr)})
 			return
 		}
-		app.publishPlugin(pluginUpdate{taskID: id, state: &state, status: fmt.Sprintf(texts.Text("plugin.store.status.installed"), result.Manifest.Name, result.Manifest.Version)})
+		status := fmt.Sprintf(texts.Text("plugin.store.status.installed"), result.Manifest.Name, result.Manifest.Version)
+		if result.RollbackReady {
+			status += texts.Text("plugin.status.rollbackRetained")
+		}
+		app.publishPlugin(pluginUpdate{taskID: id, state: &state, status: status})
 	})
 }
 
@@ -2494,7 +2475,7 @@ func (app *application) paintPluginStore(dc win32.HDC, client win32.Rect, left i
 	installAction := app.texts.Text("plugin.store.install")
 	if item, ok := app.selectedCatalogPlugin(); ok {
 		selected = fmt.Sprintf("%s · %s · %s", item.Name, item.Version, item.Developer)
-		if installed, exists := app.pluginState.Installed[item.ID]; exists {
+		if installed, exists := app.pluginState.Installed[strings.ToLower(item.ID)]; exists {
 			if installed.ActiveVersion == item.Version {
 				selected += " · " + app.texts.Text("plugin.store.installed")
 				installAction = app.texts.Text("plugin.store.repair")
@@ -2749,7 +2730,7 @@ func (app *application) refreshTheme() {
 		win32.DeleteObject(uintptr(app.editBrush))
 	}
 	app.editBrush = win32.CreateSolidBrush(win32.Color(25, 29, 39))
-	for _, control := range []win32.HWND{app.customArgumentsEdit, app.pluginAliasEdit, app.pluginCatalogEdit, app.pluginSearchEdit} {
+	for _, control := range []win32.HWND{app.customArgumentsEdit, app.pluginAliasEdit, app.pluginTokenEdit, app.pluginSearchEdit} {
 		if control != 0 {
 			win32.SetControlDarkTheme(control, app.palette.Dark)
 			win32.Invalidate(control)
@@ -3053,14 +3034,14 @@ func (app *application) createLaunchControls() error {
 	win32.SetTextLimit(aliasEdit, 64)
 	win32.SetControlFont(aliasEdit, app.fontBody)
 	win32.SetControlDarkTheme(aliasEdit, app.palette.Dark)
-	catalogEdit, err := win32.CreateControl("EDIT", app.settings.Plugins.CatalogURL, win32.WS_CHILD|win32.WS_BORDER|win32.WS_TABSTOP|win32.ES_AUTOHSCROLL, 0, 0, 100, 32, app.hwnd, 2003, app.instance)
+	tokenEdit, err := win32.CreateControl("EDIT", "", win32.WS_CHILD|win32.WS_BORDER|win32.WS_TABSTOP|win32.ES_AUTOHSCROLL|win32.ES_PASSWORD, 0, 0, 100, 32, app.hwnd, 2003, app.instance)
 	if err != nil {
 		return err
 	}
-	app.pluginCatalogEdit = catalogEdit
-	win32.SetTextLimit(catalogEdit, 2048)
-	win32.SetControlFont(catalogEdit, app.fontBody)
-	win32.SetControlDarkTheme(catalogEdit, app.palette.Dark)
+	app.pluginTokenEdit = tokenEdit
+	win32.SetTextLimit(tokenEdit, 4096)
+	win32.SetControlFont(tokenEdit, app.fontBody)
+	win32.SetControlDarkTheme(tokenEdit, app.palette.Dark)
 	searchEdit, err := win32.CreateControl("EDIT", app.settings.Plugins.Search, win32.WS_CHILD|win32.WS_BORDER|win32.WS_TABSTOP|win32.ES_AUTOHSCROLL, 0, 0, 100, 32, app.hwnd, 2004, app.instance)
 	if err != nil {
 		return err
@@ -3082,8 +3063,8 @@ func (app *application) refreshLocalizedCueBanners() {
 	if app.pluginAliasEdit != 0 {
 		win32.SetCueBanner(app.pluginAliasEdit, app.texts.Text("plugin.aliasCue"))
 	}
-	if app.pluginCatalogEdit != 0 {
-		win32.SetCueBanner(app.pluginCatalogEdit, app.texts.Text("plugin.store.catalogCue"))
+	if app.pluginTokenEdit != 0 {
+		win32.SetCueBanner(app.pluginTokenEdit, app.texts.Text("plugin.store.tokenCue"))
 	}
 	if app.pluginSearchEdit != 0 {
 		win32.SetCueBanner(app.pluginSearchEdit, app.texts.Text("plugin.store.searchCue"))
@@ -3104,9 +3085,9 @@ func (app *application) layoutLaunchControls() {
 		aliasTop, aliasBottom := app.pluginContentY(370), app.pluginContentY(406)
 		win32.SetWindowPos(app.pluginAliasEdit, win32.Rect{Left: left, Top: aliasTop, Right: right, Bottom: aliasBottom}, win32.SWP_NOZORDER)
 	}
-	if app.pluginCatalogEdit != 0 {
-		catalogTop, catalogBottom := app.pluginContentY(170), app.pluginContentY(206)
-		win32.SetWindowPos(app.pluginCatalogEdit, win32.Rect{Left: left, Top: catalogTop, Right: right, Bottom: catalogBottom}, win32.SWP_NOZORDER)
+	if app.pluginTokenEdit != 0 {
+		tokenTop, tokenBottom := app.pluginContentY(170), app.pluginContentY(206)
+		win32.SetWindowPos(app.pluginTokenEdit, win32.Rect{Left: left, Top: tokenTop, Right: right, Bottom: tokenBottom}, win32.SWP_NOZORDER)
 	}
 	if app.pluginSearchEdit != 0 {
 		searchTop, searchBottom := app.pluginContentY(220), app.pluginContentY(256)
@@ -3126,10 +3107,10 @@ func (app *application) updateLaunchControlVisibility() {
 	} else if app.pluginAliasEdit != 0 {
 		win32.ShowWindow(app.pluginAliasEdit, win32.SW_HIDE)
 	}
-	if app.pluginCatalogEdit != 0 && app.selected == 9 {
-		win32.ShowWindow(app.pluginCatalogEdit, win32.SW_SHOWNORMAL)
-	} else if app.pluginCatalogEdit != 0 {
-		win32.ShowWindow(app.pluginCatalogEdit, win32.SW_HIDE)
+	if app.pluginTokenEdit != 0 && app.selected == 9 {
+		win32.ShowWindow(app.pluginTokenEdit, win32.SW_SHOWNORMAL)
+	} else if app.pluginTokenEdit != 0 {
+		win32.ShowWindow(app.pluginTokenEdit, win32.SW_HIDE)
 	}
 	if app.pluginSearchEdit != 0 && app.selected == 9 {
 		win32.ShowWindow(app.pluginSearchEdit, win32.SW_SHOWNORMAL)

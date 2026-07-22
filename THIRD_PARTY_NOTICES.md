@@ -5,13 +5,26 @@
 - Project: FufuLauncher/FufuLauncher
 - Source: <https://github.com/FufuLauncher/FufuLauncher>
 - Audited baseline: `b5a050ebd319341bddc4189491c90c22162d33fa`
-- Role: behavioral reference for this independent Go + Win32 reimplementation
+- Live store contract rechecked: 2026-07-22 (`fu1.fun/api/v1/plugins` and current upstream store client sources)
+- Role: behavioral reference for this independent Go + Win32 reimplementation, plus the fixed upstream source for plugin-store metadata and official download verification pages
 - License: MIT License
 - License copy: `LICENSES/FufuLauncher-MIT.txt`
 
-No FufuLauncher executable, DLL, image, sound, font or other binary asset is redistributed by the current project.
+No FufuLauncher executable, DLL, plugin package, image, sound, font or other binary asset is redistributed by the current project. At runtime the plugin-store page reads FufuLauncher's public store API and may open its official verification page in the user's system browser. Store content and individual plugins remain third-party material governed by their respective authors and terms.
 
-The audited upstream baseline contains opaque `Launcher.dll` and `Launcher_2.exe` files whose current bytes do not match the repository's adjacent SHA-512 list and which have no source, signature or VERSIONINFO. They are not executed, copied or packaged. See `docs/s09-design.md` for recorded SHA-256 values and the independent helper decision.
+The audited upstream baseline contains opaque `Launcher.dll` and `Launcher_2.exe` files whose bytes do not match the repository's adjacent SHA-512 list and have no reproducible source-to-binary linkage, signature or VERSIONINFO. They are not executed, copied or packaged. The later UnlockerIsland source repository is credited separately below; it does not retroactively authenticate those exact binaries. See `docs/s09-design.md` for recorded SHA-256 values and the independent helper decision.
+
+## FufuLauncher.UnlockerIsland
+
+- Project: FufuLauncher/FufuLauncher.UnlockerIsland
+- Source: <https://github.com/FufuLauncher/FufuLauncher.UnlockerIsland>
+- Audited commit: `cb6ce2112dada8ce7856469b21720eedc7c044f1`
+- Role: reference for Fufu's `Plugins/config.ini` discovery convention and `File=*.dll` loading behavior
+- License: MIT License
+- License copy: `LICENSES/FufuLauncher-UnlockerIsland-MIT.txt`
+- Redistribution: no upstream Launcher executable or DLL is copied or packaged; this project retains its independently audited Go/helper boundary
+
+Individual packages delivered through the Fufu store are not covered by the launcher's or UnlockerIsland repository's MIT license unless their own authors say so. A missing store license is recorded as `UNSPECIFIED-FUFU-STORE`; runtime installation is not permission to redistribute that package.
 
 ## golang.org/x/sys
 

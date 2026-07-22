@@ -7,6 +7,8 @@
 
 锁定提交 `b5a050ebd319341bddc4189491c90c22162d33fa` 同时携带 `Launcher.dll` 和 `Launcher_2.exe`，但仓库没有对应源代码、来源仓库、构建说明或版本协议。两者均为 x64 PE，均未签名且没有文件版本资源：
 
+> 2026-07-22 补充：上游后来公开了独立的 `FufuLauncher/FufuLauncher.UnlockerIsland` 源码仓库。该事实不改变锁定提交内二进制不可复现、哈希不符的审计结论。本项目只引用新仓库的 `Plugins/config.ini`/`File=*.dll` 目录约定，不切换回其 Launcher 二进制或无限等待/递归直接注入实现。
+
 | 文件 | 大小 | SHA-256 | 上游调用方式 |
 |---|---:|---|---|
 | `Launcher.dll` | 74240 | `BE35BACE23ED16CCE99E80F40A67ECFB7EE5CB6B87BA3CD06A643F613263E230` | 启动器进程静态 `LoadLibrary` 后调用四个 C ABI 导出 |

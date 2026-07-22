@@ -165,6 +165,7 @@ const (
 	WS_TABSTOP          = 0x00010000
 	WS_BORDER           = 0x00800000
 	ES_AUTOHSCROLL      = 0x0080
+	ES_PASSWORD         = 0x0020
 	CW_USEDEFAULT       = ^uint32(0x7fffffff)
 
 	SW_HIDE       = 0

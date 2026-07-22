@@ -4,6 +4,19 @@
 
 当前正在按照既定顺序实施。项目不会实现米游社/HoYoLAB/BBS、登录与账号切换、抽卡统计、签到、资讯、数据中心、帮助文档、养成计算器、附加程序和内置浏览器等已排除功能。
 
+## FufuLauncher 致敬与引用
+
+本项目是对 [FufuLauncher/FufuLauncher](https://github.com/FufuLauncher/FufuLauncher) 的独立 Go + Win32 重构。衷心感谢 FufuLauncher Dev Team 及其贡献者公开项目、产品思路和插件生态；本项目的范围梳理、上游行为对照以及插件商店协议适配都以该项目为重要参考。
+
+- FufuLauncher 采用 [MIT License](https://github.com/FufuLauncher/FufuLauncher/blob/master/LICENSE)；本仓库保留了对应许可证副本和第三方声明。
+- 插件模块包与商店数据固定使用 FufuLauncher 当前公开的官方来源；本项目不自建、不运营另一套插件商店，也不发布自有商店目录协议。
+- `data\plugins\catalog.json` 只是 Fufu 商店 API 响应的本地校验缓存，不是独立商店或可供第三方托管的目录格式。
+- 插件目录约定参考 Fufu 的开源 [FufuLauncher.UnlockerIsland](https://github.com/FufuLauncher/FufuLauncher.UnlockerIsland)：识别 `Plugins\<id>\config.ini` 的 `File=*.dll`。本项目不复制其 Launcher 二进制，而由现有隔离 helper 在加载前增加路径、ZIP、SHA-256、PE、依赖和当前游戏版本复核。
+- 人机验证使用系统默认浏览器打开 Fufu 官方验证页；项目仍不嵌入浏览器。用户可粘贴验证页返回的 `dl_token` 或完整 JSON，令牌只在内存中使用且不会保存。
+- 安装器不执行 Fufu 的远程 Lua，只实现官方 ZIP 下载、哈希校验和受限目录/INI 转换。无法映射为单一根 DLL、含额外可执行格式或无法通过审计的插件会失败关闭。
+- Fufu 商店中的插件由各插件作者提供，插件自身的许可证、支持与风险不等同于 FufuLauncher 的 MIT 许可证，也不由本项目背书。商店未提供许可证字段时，本地记录为 `UNSPECIFIED-FUFU-STORE`，这不代表授予再分发权限。
+- 本项目不是 FufuLauncher 官方版本，与 FufuLauncher Dev Team 没有隶属或官方合作关系；名称与链接仅用于说明重构对象、兼容来源和致谢。
+
 ## 开工前文档
 
 - [需求总表与唯一代码执行顺序](docs/implementation-order.md)
@@ -39,3 +52,4 @@
 - 稳定性：所有后台工作与 Win32 UI 线程隔离，按专项风险清单逐阶段过门禁。
 - 基线：上游 `master` 固定到 `b5a050ebd319341bddc4189491c90c22162d33fa`（2026-07-16 UTC）。
 - 注入：默认关闭；只接受 `data\injection\modules` 中来源、许可证、SHA-256、PE、文件版本和游戏版本全部匹配的模块，并由独立管理员 helper 重复核验。项目不打包来源不透明的上游注入二进制。
+- 插件生态：商店来源固定为 FufuLauncher 官方服务，不提供自定义目录 URL，也不建设或运营独立插件商店。
