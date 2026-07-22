@@ -139,6 +139,20 @@ func TestInstallFufuPackageRejectsMismatchedDLLAndUnresolvedDependency(t *testin
 	}
 }
 
+func TestInstallFufuPackageAcceptsAuditedInstalledDependency(t *testing.T) {
+	fixture := newPackageFixture(t)
+	dependencyPath, dependencyItem := fixture.fufuPackageFile(t, "Dependency", "1.0.3", "Dependency.dll", "")
+	state := DefaultState()
+	if _, err := InstallFufuPackage(t.Context(), dependencyPath, dependencyItem, fixture.layout, fixture.candidate, &state); err != nil {
+		t.Fatal(err)
+	}
+	rootPath, rootItem := fixture.fufuPackageFile(t, "Root", "1.0.3", "Root.dll", "")
+	rootItem.Dependencies = []FufuDependency{{ProjectName: "dependency", ProjectVersion: "1.0.3"}}
+	if _, err := InstallFufuPackage(t.Context(), rootPath, rootItem, fixture.layout, fixture.candidate, &state); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func (fixture packageFixture) fufuPackageFile(t *testing.T, id, version, dllName, prefix string) (string, CatalogItem) {
 	t.Helper()
 	packagePath := filepath.Join(fixture.root, "fufu-"+strings.ToLower(id)+".zip")

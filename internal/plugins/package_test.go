@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -58,14 +59,22 @@ func newPackageFixture(t *testing.T) packageFixture {
 }
 
 func (fixture packageFixture) packageFile(t *testing.T, version, unsafeEntry string) (string, CatalogItem) {
+	return fixture.packageFileRevision(t, version, "", unsafeEntry)
+}
+
+func (fixture packageFixture) packageFileRevision(t *testing.T, version, revision, unsafeEntry string) (string, CatalogItem) {
 	t.Helper()
 	moduleData, _ := json.MarshalIndent(fixture.module, "", "  ")
-	manifest := Manifest{SchemaVersion: 1, ID: "fixture", Name: "Fixture Plugin", Developer: "Tests", Description: "Owned fixture plugin", Version: version, Category: "visuals", Tags: []string{"fixture"}, Capabilities: []string{"visual"}, SourceURL: "https://example.invalid/source", License: "Test-Only", ModuleFile: "module.json", Files: []PackageFile{
+	description := "Owned fixture plugin"
+	if revision != "" {
+		description += " " + revision
+	}
+	manifest := Manifest{SchemaVersion: 1, ID: "fixture", Name: "Fixture Plugin", Developer: "Tests", Description: description, Version: version, Category: "visuals", Tags: []string{"fixture"}, Capabilities: []string{"visual"}, SourceURL: "https://example.invalid/source", License: "Test-Only", ModuleFile: "module.json", Files: []PackageFile{
 		{Path: "module.json", Size: int64(len(moduleData)), SHA256: bytesSHA256(moduleData)},
 		{Path: "module.dll", Size: int64(len(fixture.dll)), SHA256: bytesSHA256(fixture.dll)},
 	}}
 	manifestData, _ := json.MarshalIndent(manifest, "", "  ")
-	packagePath := filepath.Join(fixture.root, "fixture-"+version+".zip")
+	packagePath := filepath.Join(fixture.root, "fixture-"+version+revision+".zip")
 	file, err := os.Create(packagePath)
 	if err != nil {
 		t.Fatal(err)
@@ -94,6 +103,53 @@ func (fixture packageFixture) packageFile(t *testing.T, version, unsafeEntry str
 	hash, _ := fileSHA256(packagePath)
 	item := CatalogItem{ID: manifest.ID, Name: manifest.Name, Developer: manifest.Developer, Description: manifest.Description, Version: manifest.Version, Category: manifest.Category, Tags: manifest.Tags, Capabilities: manifest.Capabilities, SourceURL: manifest.SourceURL, License: manifest.License, PackageURL: "https://example.invalid/fixture.zip", PackageSize: info.Size(), PackageSHA256: hash, UpdatedUTC: time.Now().UTC().Format(time.RFC3339)}
 	return packagePath, item
+}
+
+func TestInstallSameVersionRevisionKeepsAndRestoresRollback(t *testing.T) {
+	fixture := newPackageFixture(t)
+	state := DefaultState()
+	firstPath, firstItem := fixture.packageFileRevision(t, "1.0.0", "-a", "")
+	if _, err := InstallLocalPackage(t.Context(), firstPath, firstItem, fixture.layout, fixture.candidate, &state); err != nil {
+		t.Fatal(err)
+	}
+	firstRevision := state.Installed["fixture"].ActiveRevision
+	secondPath, secondItem := fixture.packageFileRevision(t, "1.0.0", "-b", "")
+	if _, err := InstallLocalPackage(t.Context(), secondPath, secondItem, fixture.layout, fixture.candidate, &state); err != nil {
+		t.Fatal(err)
+	}
+	installed := state.Installed["fixture"]
+	if installed.ActiveRevision == firstRevision || !containsExact(installed.RollbackVersions, firstRevision) {
+		t.Fatalf("same-version revision was not retained: %+v", installed)
+	}
+	if _, err := Rollback(t.Context(), fixture.layout, &state, "fixture", firstRevision, fixture.candidate); err != nil {
+		t.Fatal(err)
+	}
+	if state.Installed["fixture"].ActiveRevision != firstRevision {
+		t.Fatalf("same-version rollback did not restore revision: %+v", state.Installed["fixture"])
+	}
+}
+
+func TestRepairIdenticalRevisionDoesNotCreateRollbackCopy(t *testing.T) {
+	fixture := newPackageFixture(t)
+	state := DefaultState()
+	packagePath, item := fixture.packageFileRevision(t, "1.0.0", "-same", "")
+	if _, err := InstallLocalPackage(t.Context(), packagePath, item, fixture.layout, fixture.candidate, &state); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := InstallLocalPackage(t.Context(), packagePath, item, fixture.layout, fixture.candidate, &state); err != nil {
+		t.Fatal(err)
+	}
+	if len(state.Installed["fixture"].RollbackVersions) != 0 {
+		t.Fatalf("identical repair created rollback state: %+v", state.Installed["fixture"])
+	}
+	versions := filepath.Join(fixture.layout.Versions, "fixture")
+	entries, err := os.ReadDir(versions)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("identical repair left rollback directories: %v", entries)
+	}
 }
 
 func TestInstallPackageUpdateKeepsRollback(t *testing.T) {
@@ -300,6 +356,41 @@ func TestRecoverTransactionRestoresOldActive(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(active, "new.txt")); !os.IsNotExist(err) {
 		t.Fatalf("uncommitted active survived recovery: %v", err)
+	}
+}
+
+func TestRecoverTransactionDistinguishesSameVersionRevisions(t *testing.T) {
+	fixture := newPackageFixture(t)
+	if err := fixture.layout.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	const oldRevision = "1.0.0-rev.1111111111111111"
+	const newRevision = "1.0.0-rev.2222222222222222"
+	active := filepath.Join(fixture.layout.Modules, "fixture")
+	backup := filepath.Join(fixture.layout.Versions, "fixture", oldRevision)
+	stage := filepath.Join(fixture.layout.Staging, "fixture-same-crash")
+	for _, directory := range []string{active, backup, stage} {
+		if err := os.MkdirAll(directory, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(active, "new.txt"), []byte("new"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(backup, "old.txt"), []byte("old"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	journal := installJournal{SchemaVersion: 1, Phase: "new_moved", PluginID: "fixture", NewVersion: newRevision, OldVersion: oldRevision, StageName: "fixture-same-crash", Backup: filepath.Join("versions", "fixture", oldRevision)}
+	if err := saveJournal(fixture.layout.Transaction, journal); err != nil {
+		t.Fatal(err)
+	}
+	state := DefaultState()
+	state.Installed["fixture"] = InstalledState{ActiveVersion: "1.0.0", ActiveRevision: oldRevision}
+	if err := RecoverTransaction(fixture.layout, &state); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(active, "old.txt")); err != nil {
+		t.Fatalf("old same-version revision was not restored: %v", err)
 	}
 }
 

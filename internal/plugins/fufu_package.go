@@ -179,12 +179,62 @@ func InstallFufuMainPackage(ctx context.Context, packagePath string, layout Layo
 		_ = safeRemoveAll(layout.Staging, stageRoot)
 		return InstallResult{}, err
 	}
+	if err := preserveFufuTargetValues(filepath.Join(layout.Modules, FufuMainTargetID), candidateDirectory); err != nil {
+		_ = safeRemoveAll(layout.Staging, stageRoot)
+		return InstallResult{}, fmt.Errorf("preserve FuFuPlugin settings: %w", err)
+	}
 	result, err := commitInstall(layout, state, manifest, stageName, candidateDirectory)
 	if err != nil {
 		_ = safeRemoveAll(layout.Staging, stageRoot)
 		return InstallResult{}, err
 	}
 	return result, nil
+}
+
+// preserveFufuTargetValues carries forward every still-valid setting that is
+// present in both the active and replacement INI. New upstream fields retain
+// their packaged defaults, while removed or type-incompatible fields are not
+// copied into the replacement.
+func preserveFufuTargetValues(activeDirectory, candidateDirectory string) error {
+	info, err := os.Lstat(activeDirectory)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		return errors.New("active FuFuPlugin path is not a directory")
+	}
+	if err := rejectReparse(activeDirectory); err != nil {
+		return fmt.Errorf("active FuFuPlugin directory: %w", err)
+	}
+	oldData, err := readFileBounded(filepath.Join(activeDirectory, "config.ini"), 1<<20)
+	if err != nil {
+		return err
+	}
+	oldLines, err := parseINILines(oldData)
+	if err != nil {
+		return err
+	}
+	replacementPath := filepath.Join(candidateDirectory, "config.ini")
+	replacement, err := LoadFufuTargetConfig(replacementPath)
+	if err != nil {
+		return err
+	}
+	physical := iniValues(oldLines)
+	values := make(map[string]string)
+	for _, field := range replacement.Schema.Fields {
+		value, ok := physical[iniLookupKey(field.Section, field.Key)]
+		if !ok || validateFieldValue(field, value) != nil {
+			continue
+		}
+		values[field.ID] = value
+	}
+	if len(values) == 0 {
+		return nil
+	}
+	return applyConfigValues(replacementPath, replacement.Schema, values)
 }
 
 func downloadFufuPackage(ctx context.Context, client *http.Client, item CatalogItem, downloadToken, destination, trustedOrigin string) error {
@@ -298,13 +348,8 @@ func InstallFufuPackage(ctx context.Context, packagePath string, item CatalogIte
 	if err := validateFufuCatalogItem(item, FufuStoreBaseURL); err != nil {
 		return InstallResult{}, err
 	}
-	for _, dependency := range item.Dependencies {
-		name := strings.TrimSpace(dependency.PluginName)
-		project := strings.TrimSpace(dependency.ProjectName)
-		version := strings.TrimSpace(dependency.ProjectVersion)
-		if (name != "" && name != "无") || (project != "" && project != "无") || (version != "" && version != "无") {
-			return InstallResult{}, fmt.Errorf("Fufu plugin dependency is not yet installed transactionally: %s / %s", name, project)
-		}
+	if err := ValidateFufuDependencies(layout, *state, item); err != nil {
+		return InstallResult{}, err
 	}
 	if err := layout.Ensure(); err != nil {
 		return InstallResult{}, err
@@ -345,6 +390,61 @@ func InstallFufuPackage(ctx context.Context, packagePath string, item CatalogIte
 		return InstallResult{}, err
 	}
 	return result, nil
+}
+
+// ValidateFufuDependencies requires dependencies to have completed the same
+// audited transactional install path before a dependent package is accepted.
+// Fufu download tokens are plugin-specific, so callers must obtain and install
+// each missing dependency separately rather than forwarding another token.
+func ValidateFufuDependencies(layout Layout, state State, item CatalogItem) error {
+	for _, dependency := range item.Dependencies {
+		name := normalizeFufuDependencyPart(dependency.PluginName)
+		project := normalizeFufuDependencyPart(dependency.ProjectName)
+		version := normalizeFufuDependencyPart(dependency.ProjectVersion)
+		if name == "" && project == "" && version == "" {
+			continue
+		}
+		matched := false
+		for id, installed := range state.Installed {
+			manifest, err := loadManifest(filepath.Join(layout.Modules, id, "plugin.json"), id)
+			if err != nil {
+				continue
+			}
+			identityMatches := false
+			for _, required := range []string{name, project} {
+				if required != "" && (strings.EqualFold(required, manifest.ID) || strings.EqualFold(required, manifest.Name)) {
+					identityMatches = true
+				}
+			}
+			if !identityMatches || version != "" && installed.ActiveVersion != version {
+				continue
+			}
+			matched = true
+			break
+		}
+		if !matched {
+			identity := project
+			if identity == "" {
+				identity = name
+			}
+			if identity == "" {
+				identity = "unknown"
+			}
+			if version != "" {
+				identity += " @ " + version
+			}
+			return fmt.Errorf("required Fufu plugin dependency is not installed at the requested version: %s", identity)
+		}
+	}
+	return nil
+}
+
+func normalizeFufuDependencyPart(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "无" {
+		return ""
+	}
+	return value
 }
 
 func extractAndAdaptFufuPackage(ctx context.Context, packagePath string, item CatalogItem, candidateRoot, candidateDirectory string, candidate game.Candidate) (Manifest, error) {

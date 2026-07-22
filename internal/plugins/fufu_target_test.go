@@ -123,3 +123,63 @@ func TestSetFufuTargetEnabledUsesDisabledSuffix(t *testing.T) {
 		t.Fatalf("unexpected enabled state: enabled=%v installed=%v err=%v", enabled, installed, err)
 	}
 }
+
+func TestPreserveFufuTargetValuesKeepsExistingAndLeavesNewDefaults(t *testing.T) {
+	root := t.TempDir()
+	active := filepath.Join(root, "active")
+	candidate := filepath.Join(root, "candidate")
+	if err := os.MkdirAll(active, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(candidate, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	general := "[General]\r\nName=FuFuPlugin\r\nDeveloper=Tests\r\nFile=FufuLauncher.UnlockerIsland.dll\r\nVersion=1.0.0\r\n"
+	oldConfig := general + "[Existing]\r\nName=Existing\r\nType=int\r\nValue=144\r\n"
+	newConfig := general + "[Existing]\r\nName=Existing\r\nType=int\r\nValue=60\r\n[Added]\r\nName=Added\r\nType=bool\r\nValue=1\r\n"
+	if err := os.WriteFile(filepath.Join(active, "config.ini"), []byte(oldConfig), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(candidate, "config.ini"), []byte(newConfig), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := preserveFufuTargetValues(active, candidate); err != nil {
+		t.Fatal(err)
+	}
+	target, err := LoadFufuTargetConfig(filepath.Join(candidate, "config.ini"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	values, err := ReadConfig(filepath.Join(candidate, "config.ini"), target.Schema)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if values["fufu.existing"] != "144" || values["fufu.added"] != "1" {
+		t.Fatalf("unexpected preserved values: %+v", values)
+	}
+}
+
+func TestFufuTargetRejectsReparseDirectory(t *testing.T) {
+	root := t.TempDir()
+	realDirectory := filepath.Join(root, "real")
+	if err := os.MkdirAll(realDirectory, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	config := "[General]\r\nName=FuFuPlugin\r\nDeveloper=Tests\r\nFile=FufuLauncher.UnlockerIsland.dll\r\nVersion=1.0.0\r\n[Enabled]\r\nName=Enabled\r\nType=bool\r\nValue=1\r\n"
+	if err := os.WriteFile(filepath.Join(realDirectory, "config.ini"), []byte(config), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(realDirectory, FufuMainDLL), []byte("fixture"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(root, "linked")
+	if err := os.Symlink(realDirectory, link); err != nil {
+		t.Skipf("directory symlinks are unavailable: %v", err)
+	}
+	if _, err := LoadFufuTargetConfig(filepath.Join(link, "config.ini")); err == nil {
+		t.Fatal("Fufu config under a reparse directory was accepted")
+	}
+	if err := SetFufuTargetEnabled(link, FufuMainDLL, false); err == nil {
+		t.Fatal("Fufu DLL under a reparse directory was renamed")
+	}
+}

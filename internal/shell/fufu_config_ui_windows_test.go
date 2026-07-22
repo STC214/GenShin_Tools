@@ -45,3 +45,19 @@ func TestActiveListStateCoversConfigInstalledAndStoreLists(t *testing.T) {
 		t.Fatalf("unexpected store list state: position=%p total=%d visible=%d ok=%v", position, total, visible, ok)
 	}
 }
+
+func TestFufuHeaderActionUsesHorizontalDPIScaling(t *testing.T) {
+	const right = 1000
+	if got := fufuHeaderActionAt(640, right, 96); got != 1 {
+		t.Fatalf("repair boundary action=%d, want 1", got)
+	}
+	if got := fufuHeaderActionAt(830, right, 96); got != 2 {
+		t.Fatalf("toggle boundary action=%d, want 2", got)
+	}
+	if got := fufuHeaderActionAt(279, right, 192); got != 0 {
+		t.Fatalf("high-DPI point before repair action=%d, want 0", got)
+	}
+	if got := fufuHeaderActionAt(280, right, 192); got != 1 {
+		t.Fatalf("high-DPI repair boundary action=%d, want 1", got)
+	}
+}

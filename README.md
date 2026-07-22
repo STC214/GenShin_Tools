@@ -14,6 +14,7 @@
 - 插件目录约定参考 Fufu 的开源 [FufuLauncher.UnlockerIsland](https://github.com/FufuLauncher/FufuLauncher.UnlockerIsland)：识别 `Plugins\<id>\config.ini` 的 `File=*.dll`。本项目不复制其 Launcher 二进制，而由现有隔离 helper 在加载前增加路径、ZIP、SHA-256、PE、依赖和当前游戏版本复核。
 - “配置目标”中的 FuFuPlugin 主插件按 Fufu 当前源码声明的 [FuFuPlugin.zip 官方 GitHub 路径](https://github.com/CodeCubist/FufuLauncher--Plugins/blob/main/FuFuPlugin.zip)按需下载，本仓库不随包再分发该二进制。界面读取上游 `config.ini`，一次性生成全部 `bool/int/float/string/key` 配置控件；配置、已安装插件和商店插件列表均使用按条目数量自适应的原生滚动条，并在行间保留小间距。下载/修复、`.dll/.disabled` 启停和注入开关保持功能兼容，但不复刻原界面。
 - 主插件包没有随 Fufu 商店 API 提供固定 SHA-256；本项目会记录每次实际下载的 SHA-256，并在激活前执行受限 ZIP、amd64 PE、依赖和当前游戏兼容审计。其二进制授权不能由 FufuLauncher 主仓库的 MIT 许可证推定，本地标记为 `UNSPECIFIED-FUFU-BUNDLE`。
+- FuFuPlugin 修复会迁移新旧 INI 中仍兼容的用户配置，新字段采用上游默认值；同一语义版本的不同包内容使用独立修订指纹参与事务恢复和回滚。商店依赖必须先使用依赖插件自己的验证令牌完成审计安装，程序不会把某个插件的令牌转发给其他依赖包。
 - 人机验证使用系统默认浏览器打开 Fufu 官方验证页；项目仍不嵌入浏览器。用户可粘贴验证页返回的 `dl_token` 或完整 JSON，令牌只在内存中使用且不会保存。
 - 安装器不执行 Fufu 的远程 Lua，只实现官方 ZIP 下载、哈希校验和受限目录/INI 转换。无法映射为单一根 DLL、含额外可执行格式或无法通过审计的插件会失败关闭。
 - Fufu 商店中的插件由各插件作者提供，插件自身的许可证、支持与风险不等同于 FufuLauncher 的 MIT 许可证，也不由本项目背书。商店未提供许可证字段时，本地记录为 `UNSPECIFIED-FUFU-STORE`，这不代表授予再分发权限。

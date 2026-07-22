@@ -23,6 +23,7 @@ type State struct {
 
 type InstalledState struct {
 	ActiveVersion    string   `json:"activeVersion"`
+	ActiveRevision   string   `json:"activeRevision,omitempty"`
 	RollbackVersions []string `json:"rollbackVersions,omitempty"`
 }
 
@@ -210,7 +211,7 @@ func normalizeState(state *State) error {
 		state.Installed = map[string]InstalledState{}
 	}
 	for id, installed := range state.Installed {
-		if !idPattern.MatchString(id) || !versionPattern.MatchString(installed.ActiveVersion) {
+		if !idPattern.MatchString(id) || !versionPattern.MatchString(installed.ActiveVersion) || installed.ActiveRevision != "" && !versionPattern.MatchString(installed.ActiveRevision) {
 			return fmt.Errorf("invalid installed state for plugin %q", id)
 		}
 		for _, version := range installed.RollbackVersions {

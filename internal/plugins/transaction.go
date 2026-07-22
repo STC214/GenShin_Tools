@@ -2,6 +2,8 @@ package plugins
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -26,7 +28,8 @@ type installJournal struct {
 
 func commitInstall(layout Layout, state *State, manifest Manifest, stageName, candidateDirectory string) (InstallResult, error) {
 	active := filepath.Join(layout.Modules, manifest.ID)
-	journal := installJournal{SchemaVersion: installTransactionSchema, Operation: "install", Phase: "prepared", PluginID: manifest.ID, NewVersion: manifest.Version, StageName: stageName}
+	newRevision := manifestRevision(manifest)
+	journal := installJournal{SchemaVersion: installTransactionSchema, Operation: "install", Phase: "prepared", PluginID: manifest.ID, NewVersion: newRevision, StageName: stageName}
 	result := InstallResult{Manifest: manifest}
 
 	if info, err := os.Lstat(active); err == nil {
@@ -40,26 +43,41 @@ func commitInstall(layout Layout, state *State, manifest Manifest, stageName, ca
 		if err != nil {
 			return InstallResult{}, fmt.Errorf("refuse to replace unauditable active plugin: %w", err)
 		}
-		if installed, ok := state.Installed[manifest.ID]; ok && installed.ActiveVersion != oldManifest.Version {
-			return InstallResult{}, errors.New("plugin state active version does not match the active directory")
+		if installed, ok := state.Installed[manifest.ID]; ok {
+			if installed.ActiveVersion != oldManifest.Version || installed.ActiveRevision != "" && installed.ActiveRevision != manifestRevision(oldManifest) {
+				return InstallResult{}, errors.New("plugin state active revision does not match the active directory")
+			}
 		}
 		journal.OldVersion = oldManifest.Version
+		if oldManifest.Version == manifest.Version {
+			journal.OldVersion = manifestRevision(oldManifest)
+		}
 		result.PreviousVersion = oldManifest.Version
-		versionDirectory := filepath.Join(layout.Versions, manifest.ID, oldManifest.Version)
-		if _, err := os.Lstat(versionDirectory); errors.Is(err, os.ErrNotExist) {
-			if err := os.MkdirAll(filepath.Dir(versionDirectory), 0o755); err != nil {
-				return InstallResult{}, err
-			}
-			journal.Backup, err = filepath.Rel(layout.Root, versionDirectory)
-			if err != nil {
-				return InstallResult{}, err
-			}
-			result.RollbackReady = true
-		} else if err != nil {
-			return InstallResult{}, err
-		} else {
+		if journal.OldVersion == newRevision {
 			journal.Backup = filepath.Join("staging", stageName, "previous")
-			result.RollbackReady = true // An older copy already exists in versions.
+		} else {
+			versionDirectory := filepath.Join(layout.Versions, manifest.ID, journal.OldVersion)
+			if _, err := os.Lstat(versionDirectory); err == nil && journal.OldVersion == oldManifest.Version {
+				journal.OldVersion = manifestRevision(oldManifest)
+				versionDirectory = filepath.Join(layout.Versions, manifest.ID, journal.OldVersion)
+			} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+				return InstallResult{}, err
+			}
+			if _, err := os.Lstat(versionDirectory); errors.Is(err, os.ErrNotExist) {
+				if err := os.MkdirAll(filepath.Dir(versionDirectory), 0o755); err != nil {
+					return InstallResult{}, err
+				}
+				journal.Backup, err = filepath.Rel(layout.Root, versionDirectory)
+				if err != nil {
+					return InstallResult{}, err
+				}
+				result.RollbackReady = true
+			} else if err != nil {
+				return InstallResult{}, err
+			} else {
+				journal.Backup = filepath.Join("staging", stageName, "previous")
+				result.RollbackReady = true // An older copy already exists in versions.
+			}
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return InstallResult{}, err
@@ -97,16 +115,16 @@ func commitInstall(layout Layout, state *State, manifest Manifest, stageName, ca
 	}
 
 	previousInstalled, hadPreviousInstalled := state.Installed[manifest.ID]
-	installed := InstalledState{ActiveVersion: manifest.Version}
+	installed := InstalledState{ActiveVersion: manifest.Version, ActiveRevision: newRevision}
 	if hadPreviousInstalled {
 		previous := previousInstalled
 		installed.RollbackVersions = append(installed.RollbackVersions, previous.RollbackVersions...)
 	}
-	if journal.OldVersion != "" && journal.OldVersion != manifest.Version {
+	if journal.OldVersion != "" && journal.OldVersion != newRevision {
 		installed.RollbackVersions = append(installed.RollbackVersions, journal.OldVersion)
 	}
 	installed.RollbackVersions = uniqueStrings(installed.RollbackVersions)
-	installed.RollbackVersions = removeString(installed.RollbackVersions, manifest.Version)
+	installed.RollbackVersions = removeString(installed.RollbackVersions, newRevision)
 	state.Installed[manifest.ID] = installed
 	if err := SaveState(layout.State, *state); err != nil {
 		if hadPreviousInstalled {
@@ -144,7 +162,7 @@ func RecoverTransaction(layout Layout, state *State) error {
 		return recoverUninstallTransaction(layout, state, journal)
 	}
 	installed, stateCommitted := state.Installed[journal.PluginID]
-	stateCommitted = stateCommitted && installed.ActiveVersion == journal.NewVersion
+	stateCommitted = stateCommitted && installedRevision(installed) == journal.NewVersion
 	if journal.Phase == "state_committed" || (journal.Phase == "new_moved" && stateCommitted) {
 		return cleanupCommittedTransaction(layout, journal)
 	}
@@ -174,6 +192,20 @@ func RecoverTransaction(layout Layout, state *State) error {
 		return err
 	}
 	return os.Remove(layout.Transaction)
+}
+
+func manifestRevision(manifest Manifest) string {
+	data, _ := json.Marshal(manifest)
+	sum := sha256.Sum256(data)
+	version := strings.SplitN(manifest.Version, "+", 2)[0]
+	return version + "-rev." + hex.EncodeToString(sum[:8])
+}
+
+func installedRevision(installed InstalledState) string {
+	if installed.ActiveRevision != "" {
+		return installed.ActiveRevision
+	}
+	return installed.ActiveVersion
 }
 
 func cleanupCommittedTransaction(layout Layout, journal installJournal) error {

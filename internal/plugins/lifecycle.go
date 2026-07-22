@@ -17,7 +17,7 @@ func Rollback(ctx context.Context, layout Layout, state *State, id, version stri
 		return InstallResult{}, errors.New("invalid plugin rollback request")
 	}
 	installed, ok := state.Installed[id]
-	if !ok || installed.ActiveVersion == version || !containsExact(installed.RollbackVersions, version) {
+	if !ok || installedRevision(installed) == version || !containsExact(installed.RollbackVersions, version) {
 		return InstallResult{}, errors.New("requested plugin rollback version is unavailable")
 	}
 	if err := layout.Ensure(); err != nil {
@@ -42,7 +42,7 @@ func Rollback(ctx context.Context, layout Layout, state *State, id, version stri
 		return InstallResult{}, err
 	}
 	manifest, err := loadManifest(filepath.Join(candidateDirectory, "plugin.json"), id)
-	if err != nil || manifest.Version != version {
+	if err != nil || manifest.Version != version && manifestRevision(manifest) != version {
 		_ = safeRemoveAll(layout.Staging, stageRoot)
 		return InstallResult{}, errors.New("rollback directory manifest/version is invalid")
 	}
@@ -78,8 +78,8 @@ func Uninstall(layout Layout, state *State, id string) (Manifest, error) {
 	if !tracked {
 		return Manifest{}, errors.New("uninstall requires a transactionally installed plugin")
 	}
-	if installed.ActiveVersion != manifest.Version {
-		return Manifest{}, errors.New("plugin state active version does not match the active directory")
+	if installed.ActiveVersion != manifest.Version || installed.ActiveRevision != "" && installed.ActiveRevision != manifestRevision(manifest) {
+		return Manifest{}, errors.New("plugin state active revision does not match the active directory")
 	}
 	stageRoot, err := os.MkdirTemp(layout.Staging, id+"-uninstall-")
 	if err != nil {

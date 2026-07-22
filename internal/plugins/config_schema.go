@@ -135,6 +135,16 @@ func applyConfigValues(configPath string, schema ConfigSchema, values map[string
 	if err := validateConfigSchema(schema); err != nil {
 		return err
 	}
+	if err := rejectReparse(filepath.Dir(configPath)); err != nil {
+		return fmt.Errorf("plugin config directory: %w", err)
+	}
+	if _, err := os.Lstat(configPath); err == nil {
+		if err := rejectReparse(configPath); err != nil {
+			return fmt.Errorf("plugin config file: %w", err)
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
 	fields := make(map[string]ConfigField, len(schema.Fields))
 	for _, field := range schema.Fields {
 		fields[field.ID] = field

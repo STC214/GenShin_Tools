@@ -39,6 +39,15 @@ type FufuSetting struct {
 }
 
 func LoadFufuTargetConfig(configPath string) (FufuTargetConfig, error) {
+	if err := validateFufuTargetDirectory(filepath.Dir(configPath)); err != nil {
+		return FufuTargetConfig{}, err
+	}
+	if err := regularFile(configPath); err != nil {
+		return FufuTargetConfig{}, err
+	}
+	if err := rejectReparse(configPath); err != nil {
+		return FufuTargetConfig{}, fmt.Errorf("Fufu target config: %w", err)
+	}
 	data, err := readFileBounded(configPath, 1<<20)
 	if err != nil {
 		return FufuTargetConfig{}, err
@@ -113,6 +122,9 @@ func orderedINISections(lines []string) []string {
 }
 
 func FufuTargetEnabled(directory, dllName string) (enabled bool, installed bool, err error) {
+	if err := validateFufuTargetDirectory(directory); err != nil {
+		return false, false, err
+	}
 	if filepath.Base(dllName) != dllName || !strings.EqualFold(filepath.Ext(dllName), ".dll") {
 		return false, false, errors.New("Fufu target DLL name is unsafe")
 	}
@@ -133,6 +145,9 @@ func FufuTargetEnabled(directory, dllName string) (enabled bool, installed bool,
 }
 
 func SetFufuTargetEnabled(directory, dllName string, enable bool) error {
+	if err := validateFufuTargetDirectory(directory); err != nil {
+		return err
+	}
 	enabled, installed, err := FufuTargetEnabled(directory, dllName)
 	if err != nil {
 		return err
@@ -158,6 +173,20 @@ func SetFufuTargetEnabled(directory, dllName string, enable bool) error {
 	return os.Rename(from, to)
 }
 
+func validateFufuTargetDirectory(directory string) error {
+	info, err := os.Lstat(directory)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		return errors.New("Fufu target directory is not a directory")
+	}
+	if err := rejectReparse(directory); err != nil {
+		return fmt.Errorf("Fufu target directory: %w", err)
+	}
+	return nil
+}
+
 func regularExists(path string) (bool, error) {
 	info, err := os.Lstat(path)
 	if errors.Is(err, os.ErrNotExist) {
@@ -168,6 +197,9 @@ func regularExists(path string) (bool, error) {
 	}
 	if !info.Mode().IsRegular() {
 		return false, fmt.Errorf("Fufu target path is not a regular file: %s", filepath.Base(path))
+	}
+	if err := rejectReparse(path); err != nil {
+		return false, fmt.Errorf("Fufu target file: %w", err)
 	}
 	return true, nil
 }

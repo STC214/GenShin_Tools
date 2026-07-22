@@ -884,6 +884,10 @@ func (app *application) handleMessage(hwnd win32.HWND, message uint32, wParam, l
 	case win32.WM_LBUTTONDOWN:
 		x, y := int(int16(lParam&0xffff)), int(int16((lParam>>16)&0xffff))
 		if selected := app.navigationAt(x, y); selected >= 0 && selected != app.selected {
+			if app.selected == 8 && app.pluginTargetMode && !app.flushFufuEdits() {
+				win32.Invalidate(hwnd)
+				return 0
+			}
 			app.selected = selected
 			app.updateLaunchControlVisibility()
 			win32.Invalidate(hwnd)
@@ -940,12 +944,18 @@ func (app *application) handleMessage(hwnd win32.HWND, message uint32, wParam, l
 		switch wParam {
 		case win32.VK_UP:
 			if app.selected > 0 {
+				if app.selected == 8 && app.pluginTargetMode && !app.flushFufuEdits() {
+					return 0
+				}
 				app.selected--
 				app.updateLaunchControlVisibility()
 				win32.Invalidate(hwnd)
 			}
 		case win32.VK_DOWN:
 			if app.selected < len(navigation)-1 {
+				if app.selected == 8 && app.pluginTargetMode && !app.flushFufuEdits() {
+					return 0
+				}
 				app.selected++
 				app.updateLaunchControlVisibility()
 				win32.Invalidate(hwnd)
@@ -1052,6 +1062,9 @@ func (app *application) restore() {
 
 func (app *application) requestShutdown() {
 	app.shutdown.Do(func() {
+		if !app.flushFufuEdits() {
+			app.logger.Error("save pending FuFuPlugin settings during shutdown", map[string]any{"error": app.pluginStatus})
+		}
 		localenhance.StopStartupSound()
 		if app.captureHotkeyRegistered {
 			win32.UnregisterHotKey(app.hwnd, captureHotkeyID)
@@ -1772,21 +1785,34 @@ func (app *application) fufuSetting(fieldID string) (plugins.FufuSetting, bool) 
 	return plugins.FufuSetting{}, false
 }
 
-func (app *application) saveFufuField(fieldID string) {
+func (app *application) saveFufuField(fieldID string) bool {
 	setting, ok := app.fufuSetting(fieldID)
 	control := app.fufuEdits[fieldID]
 	if !ok || control == 0 {
-		return
+		return true
 	}
 	value := win32.GetWindowText(control)
+	if value == app.fufuValues[fieldID] {
+		return true
+	}
 	if err := plugins.UpdateConfig(filepath.Join(app.fufuTargetDirectory(), "config.ini"), app.fufuTarget.Schema, setting.Field.ID, value); err != nil {
 		app.pluginStatus = fmt.Sprintf(app.texts.Text("fufu.status.saveFailed"), err)
 		app.logger.Error("save Fufu target setting", map[string]any{"field": setting.Field.ID, "error": err.Error()})
 		win32.SetWindowText(control, app.fufuValues[fieldID])
-		return
+		return false
 	}
 	app.fufuValues[fieldID] = value
 	app.pluginStatus = fmt.Sprintf(app.texts.Text("fufu.status.saved"), setting.Field.Name)
+	return true
+}
+
+func (app *application) flushFufuEdits() bool {
+	for _, setting := range app.fufuTarget.Settings {
+		if setting.Field.Type != "bool" && !app.saveFufuField(setting.Field.ID) {
+			return false
+		}
+	}
+	return true
 }
 
 func (app *application) toggleFufuBool(setting plugins.FufuSetting) {
@@ -1907,6 +1933,10 @@ func (app *application) startFufuMainRepair() {
 		app.injectionStatus = app.texts.Text("plugin.store.status.needGame")
 		return
 	}
+	if !app.flushFufuEdits() {
+		app.injectionStatus = app.pluginStatus
+		return
+	}
 	state := plugins.CloneState(app.pluginState)
 	layout := app.pluginLayout
 	candidate := *app.gameState.Candidate
@@ -1948,6 +1978,10 @@ func (app *application) startFufuMainRepair() {
 func (app *application) setFufuInjectionEnabled(enable bool) {
 	if !app.fufuTargetInstalled {
 		app.injectionStatus = app.texts.Text("fufu.status.notInstalled")
+		return
+	}
+	if !app.flushFufuEdits() {
+		app.injectionStatus = app.pluginStatus
 		return
 	}
 	directory := app.fufuTargetDirectory()
@@ -2087,9 +2121,10 @@ func (app *application) injectionClick(x, y int) {
 	case y >= sy(170) && y < sy(230):
 		client := win32.GetClientRect(app.hwnd)
 		right := int(client.Right - win32.Scale(42, app.dpi))
-		if x >= right-sy(170) {
+		switch fufuHeaderActionAt(x, right, app.dpi) {
+		case 2:
 			app.setFufuInjectionEnabled(!(app.fufuTargetEnabled && app.settings.Injection.Enabled))
-		} else if x >= right-sy(360) {
+		case 1:
 			app.startFufuMainRepair()
 		}
 	case y >= sy(240) && y < sy(284):
@@ -2356,9 +2391,10 @@ func (app *application) fufuConfigClick(x, y int) {
 	case y >= sy(170) && y < sy(224):
 		client := win32.GetClientRect(app.hwnd)
 		right := int(client.Right - win32.Scale(42, app.dpi))
-		if x >= right-sy(170) {
+		switch fufuHeaderActionAt(x, right, app.dpi) {
+		case 2:
 			app.setFufuInjectionEnabled(!(app.fufuTargetEnabled && app.settings.Injection.Enabled))
-		} else if x >= right-sy(360) {
+		case 1:
 			app.startFufuMainRepair()
 		}
 	case y >= sy(235) && y < sy(535):
@@ -2374,9 +2410,22 @@ func (app *application) fufuConfigClick(x, y int) {
 			}
 		}
 	case y >= sy(540) && y < sy(584):
+		if !app.flushFufuEdits() {
+			break
+		}
 		app.pluginTargetMode = false
 		app.updateLaunchControlVisibility()
 	}
+}
+
+func fufuHeaderActionAt(x, right int, dpi uint32) int {
+	if x >= right-int(win32.Scale(170, dpi)) {
+		return 2
+	}
+	if x >= right-int(win32.Scale(360, dpi)) {
+		return 1
+	}
+	return 0
 }
 
 func (app *application) savePluginAlias() {
@@ -2575,6 +2624,10 @@ func (app *application) startCatalogPluginInstall() {
 	item, ok := app.selectedCatalogPlugin()
 	if !ok {
 		app.pluginStatus = app.texts.Text("plugin.store.status.selectFirst")
+		return
+	}
+	if err := plugins.ValidateFufuDependencies(app.pluginLayout, app.pluginState, item); err != nil {
+		app.pluginStatus = fmt.Sprintf(app.texts.Text("plugin.store.status.installFailed"), err)
 		return
 	}
 	rawToken := ""
