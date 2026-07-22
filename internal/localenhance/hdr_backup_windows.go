@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"time"
 
+	"genshintools/internal/platform/winfile"
+
 	"golang.org/x/sys/windows"
 )
 
@@ -88,7 +90,7 @@ func saveHDRBackup(path string, snapshot HDRSnapshot) error {
 	}
 	source, _ := windows.UTF16PtrFromString(temporaryPath)
 	destination, _ := windows.UTF16PtrFromString(path)
-	if err := windows.MoveFileEx(source, destination, windows.MOVEFILE_REPLACE_EXISTING|windows.MOVEFILE_WRITE_THROUGH); err != nil {
+	if err := winfile.Replace(source, destination, windows.MOVEFILE_REPLACE_EXISTING|windows.MOVEFILE_WRITE_THROUGH); err != nil {
 		return err
 	}
 	committed = true

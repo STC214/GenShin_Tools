@@ -10,6 +10,7 @@ import (
 	"unsafe"
 
 	"genshintools/internal/gamewindow"
+	"genshintools/internal/platform/winfile"
 
 	"golang.org/x/sys/windows"
 )
@@ -162,7 +163,7 @@ func writePNGAtomic(destination string, frame image.Image) error {
 	if err := temporary.Close(); err != nil {
 		return err
 	}
-	if err := windows.MoveFileEx(windows.StringToUTF16Ptr(temporaryPath), windows.StringToUTF16Ptr(destination), windows.MOVEFILE_REPLACE_EXISTING|windows.MOVEFILE_WRITE_THROUGH); err != nil {
+	if err := winfile.Replace(windows.StringToUTF16Ptr(temporaryPath), windows.StringToUTF16Ptr(destination), windows.MOVEFILE_REPLACE_EXISTING|windows.MOVEFILE_WRITE_THROUGH); err != nil {
 		return err
 	}
 	committed = true

@@ -1,6 +1,8 @@
 package plugins
 
 import (
+	"genshintools/internal/platform/winfile"
+
 	"golang.org/x/sys/windows"
 )
 
@@ -13,5 +15,5 @@ func replaceFile(source, destination string) error {
 	if err != nil {
 		return err
 	}
-	return windows.MoveFileEx(sourcePointer, destinationPointer, windows.MOVEFILE_REPLACE_EXISTING|windows.MOVEFILE_WRITE_THROUGH)
+	return winfile.Replace(sourcePointer, destinationPointer, windows.MOVEFILE_REPLACE_EXISTING|windows.MOVEFILE_WRITE_THROUGH)
 }

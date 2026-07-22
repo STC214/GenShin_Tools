@@ -74,7 +74,7 @@ function Write-S13Report {
             'mixed integrity/UAC cancellation and antivirus quarantine',
             'multi-monitor 125/150/200 percent DPI and display removal',
             'clean Windows 10/11 first-run, update and rollback',
-            'project license selection and upstream scope-v2 disposition'
+            'project license selection'
         )
     }
     $Temporary = "$ReportPath.tmp"

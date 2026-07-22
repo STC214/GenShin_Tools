@@ -13,6 +13,8 @@ import (
 	"time"
 	"unsafe"
 
+	"genshintools/internal/platform/win32"
+
 	"golang.org/x/sys/windows"
 )
 
@@ -95,6 +97,46 @@ func resetCapturedInput() {
 	capturedInput.timesMu.Unlock()
 }
 
+func capturedFixtureWindowProcedure(hwnd uintptr, message uint32, wParam, lParam uintptr) uintptr {
+	return win32.DefWindowProc(win32.HWND(hwnd), message, wParam, lParam)
+}
+
+func installCapturedForegroundWindow(t *testing.T) func() {
+	t.Helper()
+	className := fmt.Sprintf("GenshinTools.InputCapture.%d.%d", os.Getpid(), time.Now().UnixNano())
+	callback := win32.NewCallback(capturedFixtureWindowProcedure)
+	class := win32.WndClassEx{
+		Style:     win32.CS_HREDRAW | win32.CS_VREDRAW,
+		WndProc:   callback,
+		Instance:  win32.ModuleHandle(),
+		Cursor:    win32.LoadArrowCursor(),
+		ClassName: win32.UTF16(className),
+	}
+	if err := win32.RegisterClass(&class); err != nil {
+		t.Fatal(err)
+	}
+	hwnd, err := win32.CreateWindow(win32.UTF16(className), win32.UTF16("Genshin Tools input capture"), 0, 0, 160, 80, win32.ModuleHandle())
+	if err != nil {
+		t.Fatal(err)
+	}
+	win32.ShowWindow(hwnd, win32.SW_SHOWNORMAL)
+	win32.UpdateWindow(hwnd)
+	win32.SetForegroundWindow(hwnd)
+	deadline := time.Now().Add(time.Second)
+	for windows.GetForegroundWindow() != windows.HWND(hwnd) && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+		win32.SetForegroundWindow(hwnd)
+	}
+	if windows.GetForegroundWindow() != windows.HWND(hwnd) {
+		win32.DestroyWindow(hwnd)
+		t.Fatal("capture fixture could not become the foreground window")
+	}
+	return func() {
+		win32.DestroyWindow(hwnd)
+		runtime.KeepAlive(callback)
+	}
+}
+
 func installCaptureHooks(t *testing.T) func() {
 	t.Helper()
 	module, _, callErr := procGetModuleHandleW.Call(0)
@@ -141,6 +183,8 @@ func TestCapturedSendInputPairs(t *testing.T) {
 	}
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
+	closeForeground := installCapturedForegroundWindow(t)
+	defer closeForeground()
 	threadID := windows.GetCurrentThreadId()
 	cleanup := installCaptureHooks(t)
 	defer cleanup()
@@ -201,6 +245,8 @@ func TestCapturedNativeEngine(t *testing.T) {
 
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
+	closeForeground := installCapturedForegroundWindow(t)
+	defer closeForeground()
 	threadID := windows.GetCurrentThreadId()
 	cleanup := installCaptureHooks(t)
 	defer cleanup()

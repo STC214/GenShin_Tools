@@ -1,6 +1,10 @@
 package diagnostics
 
-import "golang.org/x/sys/windows"
+import (
+	"genshintools/internal/platform/winfile"
+
+	"golang.org/x/sys/windows"
+)
 
 func replaceMarker(source, destination string) error {
 	sourceUTF16, err := windows.UTF16PtrFromString(source)
@@ -11,5 +15,5 @@ func replaceMarker(source, destination string) error {
 	if err != nil {
 		return err
 	}
-	return windows.MoveFileEx(sourceUTF16, destinationUTF16, windows.MOVEFILE_REPLACE_EXISTING|windows.MOVEFILE_WRITE_THROUGH)
+	return winfile.Replace(sourceUTF16, destinationUTF16, windows.MOVEFILE_REPLACE_EXISTING|windows.MOVEFILE_WRITE_THROUGH)
 }
