@@ -3,6 +3,7 @@
 /dist/
 /artifacts/
 /assets/app.ico
+/assets/app-icon.png
 /cmd/genshin-tools/app.syso
 *.exe
 *.dll
@@ -19,7 +20,9 @@
 *.out
 *.coverprofile
 *.pprof
+*.trace
 /coverage/
+/test-results/
 
 # Portable runtime state (when an executable is placed in the repository root)
 /data/
@@ -43,6 +46,7 @@
 # Editors and operating system files
 /.idea/
 /.vscode/
+/.vs/
 *.code-workspace
 *.user
 *.suo
