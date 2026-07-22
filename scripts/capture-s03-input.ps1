@@ -46,8 +46,8 @@ try {
     }
     if ($Window -eq [IntPtr]::Zero) { throw 'Could not find the main window' }
     [void][S03WindowCapture]::SetForegroundWindow($Window)
-    # Select the third navigation row (Input Enhancement).
-    $X = 100; $Y = 204; $LParam = [IntPtr](($Y -shl 16) -bor $X)
+    # Select the seventh navigation row (Input Enhancement).
+    $X = 100; $Y = 398; $LParam = [IntPtr](($Y -shl 16) -bor $X)
     [void][S03WindowCapture]::SendMessage($Window, 0x0201, [UIntPtr]::Zero, $LParam)
     [void][S03WindowCapture]::UpdateWindow($Window)
     Start-Sleep -Milliseconds 400

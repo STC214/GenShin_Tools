@@ -366,6 +366,9 @@ var (
 	procGetGuiResources               = user32.NewProc("GetGuiResources")
 	procGetSysColor                   = user32.NewProc("GetSysColor")
 	procSystemParametersInfoW         = user32.NewProc("SystemParametersInfoW")
+	procGetKeyboardLayout             = user32.NewProc("GetKeyboardLayout")
+	procMapVirtualKeyExW              = user32.NewProc("MapVirtualKeyExW")
+	procGetKeyNameTextW               = user32.NewProc("GetKeyNameTextW")
 
 	procCreateSolidBrush       = gdi32.NewProc("CreateSolidBrush")
 	procDeleteObject           = gdi32.NewProc("DeleteObject")
@@ -930,6 +933,34 @@ func Color(r, g, b byte) uint32 {
 	return value
 }
 func Scale(value int32, dpi uint32) int32 { return value * int32(dpi) / 96 }
+
+// KeyName returns the label Windows assigns to a key in the active keyboard
+// layout. It deliberately never exposes the internal virtual-key number.
+func KeyName(virtualKey uint32) string {
+	if virtualKey == 0 {
+		return "Unset"
+	}
+	layout, _, _ := procGetKeyboardLayout.Call(0)
+	scan, _, _ := procMapVirtualKeyExW.Call(uintptr(virtualKey), 4, layout) // MAPVK_VK_TO_VSC_EX
+	if scan != 0 {
+		parameter := (scan & 0xff) << 16
+		if scan&0xff00 != 0 {
+			parameter |= 1 << 24
+		}
+		buffer := make([]uint16, 128)
+		length, _, _ := procGetKeyNameTextW.Call(parameter, uintptr(unsafe.Pointer(&buffer[0])), uintptr(len(buffer)))
+		if length > 0 {
+			return windows.UTF16ToString(buffer[:length])
+		}
+	}
+	if virtualKey >= 0x70 && virtualKey <= 0x87 {
+		return fmt.Sprintf("F%d", virtualKey-0x6f)
+	}
+	if (virtualKey >= 'A' && virtualKey <= 'Z') || (virtualKey >= '0' && virtualKey <= '9') {
+		return string(rune(virtualKey))
+	}
+	return "Unknown key"
+}
 
 func errno(err error) error {
 	if err == nil {

@@ -3,9 +3,10 @@ package capture
 
 import (
 	"errors"
-	"fmt"
 	"path/filepath"
 	"strings"
+
+	"genshintools/internal/platform/win32"
 )
 
 const (
@@ -67,11 +68,5 @@ func (config Config) HotkeyString() string {
 	if config.Modifiers&ModWin != 0 {
 		parts = append(parts, "Win")
 	}
-	key := fmt.Sprintf("VK_%02X", config.VirtualKey)
-	if config.VirtualKey >= 0x70 && config.VirtualKey <= 0x87 {
-		key = fmt.Sprintf("F%d", config.VirtualKey-0x6F)
-	} else if config.VirtualKey >= 'A' && config.VirtualKey <= 'Z' {
-		key = string(rune(config.VirtualKey))
-	}
-	return strings.Join(append(parts, key), "+")
+	return strings.Join(append(parts, win32.KeyName(config.VirtualKey)), "+")
 }

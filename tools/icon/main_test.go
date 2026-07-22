@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"encoding/binary"
+	"image"
+	"image/color"
 	"image/png"
 	"os"
 	"path/filepath"
@@ -10,13 +12,43 @@ import (
 )
 
 func TestGenerateIsDeterministicAndDecodable(t *testing.T) {
+	source := filepath.Join(t.TempDir(), "source.png")
+	sourceFile, err := os.Create(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	portrait := image.NewNRGBA(image.Rect(0, 0, 64, 96))
+	for y := 0; y < 96; y++ {
+		for x := 0; x < 64; x++ {
+			portrait.SetNRGBA(x, y, color.NRGBA{R: uint8(x), G: uint8(y), B: 200, A: 255})
+		}
+	}
+	if err := png.Encode(sourceFile, portrait); err != nil {
+		t.Fatal(err)
+	}
+	if err := sourceFile.Close(); err != nil {
+		t.Fatal(err)
+	}
 	first := filepath.Join(t.TempDir(), "first.ico")
 	second := filepath.Join(t.TempDir(), "second.ico")
-	if err := generate(first); err != nil {
+	preview := filepath.Join(t.TempDir(), "preview.png")
+	if err := generate(source, preview, first); err != nil {
 		t.Fatalf("generate first icon: %v", err)
 	}
-	if err := generate(second); err != nil {
+	if err := generate(source, "", second); err != nil {
 		t.Fatalf("generate second icon: %v", err)
+	}
+	previewImage, err := os.Open(preview)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decodedPreview, err := png.Decode(previewImage)
+	_ = previewImage.Close()
+	if err != nil {
+		t.Fatalf("decode preview: %v", err)
+	}
+	if decodedPreview.Bounds().Dx() != 64 || decodedPreview.Bounds().Dy() != 64 {
+		t.Fatalf("preview is not the top square crop: bounds=%v err=%v", decodedPreview.Bounds(), err)
 	}
 
 	firstBytes, err := os.ReadFile(first)

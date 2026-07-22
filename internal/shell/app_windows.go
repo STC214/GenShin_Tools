@@ -3783,17 +3783,7 @@ func recordLabel(texts localization.Catalog, nameKey string, key uint32, recordi
 	if recording {
 		return fmt.Sprintf(texts.Text("input.record.pending"), name)
 	}
-	return fmt.Sprintf(texts.Text("input.record.ready"), name, virtualKeyName(key))
-}
-
-func virtualKeyName(key uint32) string {
-	if (key >= 'A' && key <= 'Z') || (key >= '0' && key <= '9') {
-		return string(rune(key))
-	}
-	if key >= 0x70 && key <= 0x87 {
-		return fmt.Sprintf("F%d", key-0x6f)
-	}
-	return fmt.Sprintf("VK 0x%02X", key)
+	return fmt.Sprintf(texts.Text("input.record.ready"), name, win32.KeyName(key))
 }
 
 func (app *application) createLaunchControls() error {

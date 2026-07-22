@@ -5,6 +5,7 @@ import (
 	"image"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -83,6 +84,14 @@ func TestConfigRejectsInputPhysicalKeyConflict(t *testing.T) {
 	config.VirtualKey = 0x7B
 	if !config.ConflictsWith(0x77, 'F', 0x7B) {
 		t.Fatal("F12 conflict was not detected")
+	}
+}
+
+func TestHotkeyStringUsesKeyboardLabel(t *testing.T) {
+	config := DefaultConfig()
+	name := config.HotkeyString()
+	if strings.Contains(strings.ToUpper(name), "VK") || strings.Contains(strings.ToLower(name), "0x") {
+		t.Fatalf("hotkey string exposed an internal key code: %q", name)
 	}
 }
 
