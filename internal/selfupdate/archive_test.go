@@ -107,6 +107,7 @@ func writeReleaseZIP(t *testing.T, destination string, extras map[string][]byte,
 		"GenshinTools-injector.exe": []byte("injector"),
 		"GenshinTools-updater.exe":  []byte("updater"),
 		"GenshinTools.exe":          []byte("main"),
+		"LICENSE":                   []byte("MIT"),
 		"LICENSE_POLICY.md":         []byte("policy"),
 		"THIRD_PARTY_NOTICES.md":    []byte("notices"),
 	}

@@ -237,6 +237,7 @@ END
         New-Item -ItemType Directory -Force -Path (Join-Path $DistDir "data\$directory") | Out-Null
     }
     Copy-Item -LiteralPath (Join-Path $ProjectRoot 'THIRD_PARTY_NOTICES.md') -Destination $DistDir -Force
+    Copy-Item -LiteralPath (Join-Path $ProjectRoot 'LICENSE') -Destination $DistDir -Force
     Copy-Item -LiteralPath (Join-Path $ProjectRoot 'LICENSE_POLICY.md') -Destination $DistDir -Force
     Copy-Item -LiteralPath (Join-Path $ProjectRoot 'LICENSES') -Destination $DistDir -Recurse -Force
 

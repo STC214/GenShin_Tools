@@ -73,8 +73,7 @@ function Write-S13Report {
             'lock/unlock, sleep/resume and RDP transitions',
             'mixed integrity/UAC cancellation and antivirus quarantine',
             'multi-monitor 125/150/200 percent DPI and display removal',
-            'clean Windows 10/11 first-run, update and rollback',
-            'project license selection'
+            'clean Windows 10/11 first-run, update and rollback'
         )
     }
     $Temporary = "$ReportPath.tmp"

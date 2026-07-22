@@ -1,13 +1,12 @@
 # Project license policy
 
-No project-wide source-code license has been selected yet. Until the owner chooses one, the repository is not granting reuse rights beyond those required by law.
+Original source code and documentation in this repository are licensed under the MIT License in the root `LICENSE` file.
 
-This does not change third-party licenses. Every referenced or redistributed third-party component must retain its own license and attribution under `LICENSES/` and `THIRD_PARTY_NOTICES.md`.
+This project license does not replace or expand third-party licenses. Every referenced or redistributed dependency, DLL, plugin, protocol definition and media asset retains its own copyright and license terms under `LICENSES/` and `THIRD_PARTY_NOTICES.md`.
 
-Before the first public source or binary release:
+Release artifacts must:
 
-1. Choose and add the project license.
-2. Audit every Go module, DLL, plugin, protocol definition and media asset.
-3. Record its source URL, pinned version/commit, license and SHA-256 where applicable.
-4. Exclude anything whose source or redistribution permission is unclear.
-
+1. Include the root `LICENSE`, this policy, `THIRD_PARTY_NOTICES.md` and all applicable `LICENSES/` texts.
+2. Record each third-party source URL, pinned version/commit, license and SHA-256 where applicable.
+3. Exclude anything whose source or redistribution permission is unclear.
+4. Keep FufuLauncher and store-plugin attribution separate from this project's MIT grant.

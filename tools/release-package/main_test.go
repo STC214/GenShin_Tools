@@ -19,6 +19,7 @@ func TestPackageReleaseCreatesVerifiedDeterministicCandidate(t *testing.T) {
 		"GenshinTools-injector.exe": "injector",
 		"GenshinTools-updater.exe":  "updater",
 		"build-info.json":           `{"version":"1.2.3","target":"windows/amd64"}`,
+		"LICENSE":                   "MIT",
 		"LICENSE_POLICY.md":         "candidate only",
 		"THIRD_PARTY_NOTICES.md":    "notices",
 		"LICENSES/dependency.txt":   "license",
