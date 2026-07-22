@@ -92,6 +92,17 @@ type application struct {
 	fontBody  win32.HFONT
 	fontNav   win32.HFONT
 
+	buttonRects     []win32.Rect
+	hoverButton     int
+	buttonShadow    win32.HBRUSH
+	buttonPen       uintptr
+	buttonHoverPen  uintptr
+	buttonShadowPen uintptr
+	pointerX        int32
+	pointerY        int32
+	pointerInside   bool
+	trackingMouse   bool
+
 	snapshots               chan diagnosticSnapshot
 	lastSnap                diagnosticSnapshot
 	inputNative             *input.Native
@@ -416,6 +427,7 @@ func Run(layout paths.Layout, build buildinfo.Info) (returnErr error) {
 		overlayStatus:       "",
 		injectionStatus:     "",
 		pluginTargetMode:    true,
+		hoverButton:         -1,
 	}
 	app.syncStoreSelection()
 	app.refreshFufuTarget()
@@ -881,8 +893,32 @@ func (app *application) handleMessage(hwnd win32.HWND, message uint32, wParam, l
 			}
 		}
 		return 0
+	case win32.WM_MOUSEMOVE:
+		x, y := int32(int16(lParam&0xffff)), int32(int16((lParam>>16)&0xffff))
+		app.pointerX, app.pointerY, app.pointerInside = x, y, true
+		if !app.trackingMouse {
+			app.trackingMouse = win32.TrackMouseLeave(hwnd)
+		}
+		hovered := buttonIndexAt(app.buttonRects, x, y)
+		if hovered != app.hoverButton {
+			previous := app.hoverButton
+			app.hoverButton = hovered
+			app.invalidateButtonHover(previous, hovered)
+		}
+		return 0
+	case win32.WM_MOUSELEAVE:
+		app.pointerInside = false
+		app.trackingMouse = false
+		if app.hoverButton != -1 {
+			previous := app.hoverButton
+			app.hoverButton = -1
+			app.invalidateButtonHover(previous, -1)
+		}
+		return 0
 	case win32.WM_LBUTTONDOWN:
 		x, y := int(int16(lParam&0xffff)), int(int16((lParam>>16)&0xffff))
+		client := win32.GetClientRect(hwnd)
+		contentAction := x >= int(win32.Scale(252, app.dpi)) && x < int(client.Right-win32.Scale(42, app.dpi))
 		if selected := app.navigationAt(x, y); selected >= 0 && selected != app.selected {
 			if app.selected == 8 && app.pluginTargetMode && !app.flushFufuEdits() {
 				win32.Invalidate(hwnd)
@@ -891,25 +927,25 @@ func (app *application) handleMessage(hwnd win32.HWND, message uint32, wParam, l
 			app.selected = selected
 			app.updateLaunchControlVisibility()
 			win32.Invalidate(hwnd)
-		} else if app.selected == 1 && x >= int(win32.Scale(210, app.dpi)) {
+		} else if app.selected == 1 && contentAction {
 			app.gameClick(x, y)
-		} else if app.selected == 2 && x >= int(win32.Scale(210, app.dpi)) {
+		} else if app.selected == 2 && contentAction {
 			app.resourceClick(x, y)
-		} else if app.selected == 3 && x >= int(win32.Scale(210, app.dpi)) {
+		} else if app.selected == 3 && contentAction {
 			app.serverClick(x, y)
-		} else if app.selected == 4 && x >= int(win32.Scale(210, app.dpi)) {
+		} else if app.selected == 4 && contentAction {
 			app.localEnhanceClick(x, y)
-		} else if app.selected == 5 && x >= int(win32.Scale(210, app.dpi)) {
+		} else if app.selected == 5 && contentAction {
 			app.mediaClick(x, y)
-		} else if app.selected == 6 && x >= int(win32.Scale(210, app.dpi)) {
+		} else if app.selected == 6 && contentAction {
 			app.inputClick(x, y)
-		} else if app.selected == 7 && x >= int(win32.Scale(210, app.dpi)) {
+		} else if app.selected == 7 && contentAction {
 			app.injectionClick(x, y)
-		} else if app.selected == 8 && x >= int(win32.Scale(210, app.dpi)) {
+		} else if app.selected == 8 && contentAction {
 			app.pluginClick(x, y)
-		} else if app.selected == 9 && x >= int(win32.Scale(210, app.dpi)) {
+		} else if app.selected == 9 && contentAction {
 			app.pluginStoreClick(x, y)
-		} else if app.selected == 10 && x >= int(win32.Scale(210, app.dpi)) {
+		} else if app.selected == 10 && contentAction {
 			app.settingsClick(y)
 		}
 		return 0
@@ -1227,7 +1263,10 @@ func (app *application) paint(hwnd win32.HWND) {
 				oldBitmap := win32.SelectObject(memoryDC, bitmap)
 				dc = memoryDC
 				defer func() {
-					win32.BitBlt(windowDC, 0, 0, width, height, memoryDC, 0, 0)
+					dirty := paint.Paint
+					if dirty.Right > dirty.Left && dirty.Bottom > dirty.Top {
+						win32.BitBlt(windowDC, dirty.Left, dirty.Top, dirty.Right-dirty.Left, dirty.Bottom-dirty.Top, memoryDC, dirty.Left, dirty.Top)
+					}
 					win32.SelectObject(memoryDC, oldBitmap)
 					win32.DeleteObject(bitmap)
 					win32.DeleteDC(memoryDC)
@@ -1241,8 +1280,6 @@ func (app *application) paint(hwnd win32.HWND) {
 	defer win32.DeleteObject(uintptr(background))
 	sidebar := win32.CreateSolidBrush(win32.Color(24, 27, 36))
 	defer win32.DeleteObject(uintptr(sidebar))
-	selected := win32.CreateSolidBrush(win32.Color(45, 51, 80))
-	defer win32.DeleteObject(uintptr(selected))
 	accent := win32.CreateSolidBrush(win32.Color(100, 132, 255))
 	defer win32.DeleteObject(uintptr(accent))
 	status := win32.CreateSolidBrush(win32.Color(20, 23, 31))
@@ -1256,6 +1293,8 @@ func (app *application) paint(hwnd win32.HWND) {
 	statusRect := win32.Rect{Left: sidebarWidth, Top: client.Bottom - statusHeight, Right: client.Right, Bottom: client.Bottom}
 	win32.FillRect(dc, &statusRect, status)
 	win32.SetTransparentBackground(dc)
+	app.beginButtonPaint()
+	defer app.endButtonPaint()
 
 	old := win32.SelectObject(dc, uintptr(app.fontNav))
 	win32.SetTextColor(dc, win32.Color(235, 238, 248))
@@ -1265,8 +1304,8 @@ func (app *application) paint(hwnd win32.HWND) {
 	for index, item := range navigation {
 		top := start + int32(index)*itemHeight
 		row := win32.Rect{Left: win32.Scale(10, app.dpi), Top: top, Right: sidebarWidth - win32.Scale(10, app.dpi), Bottom: top + itemHeight - win32.Scale(4, app.dpi)}
+		app.paintNavigationSurface(dc, row, index == app.selected)
 		if index == app.selected {
-			win32.FillRect(dc, &row, selected)
 			bar := win32.Rect{Left: row.Left, Top: row.Top + win32.Scale(8, app.dpi), Right: row.Left + win32.Scale(3, app.dpi), Bottom: row.Bottom - win32.Scale(8, app.dpi)}
 			win32.FillRect(dc, &bar, accent)
 		}
@@ -1314,7 +1353,7 @@ func (app *application) paint(hwnd win32.HWND) {
 		cardBrush := win32.CreateSolidBrush(win32.Color(25, 29, 39))
 		defer win32.DeleteObject(uintptr(cardBrush))
 		card := win32.Rect{Left: contentLeft, Top: win32.Scale(184, app.dpi), Right: client.Right - win32.Scale(42, app.dpi), Bottom: win32.Scale(330, app.dpi)}
-		win32.FillRect(dc, &card, cardBrush)
+		win32.DrawRoundedRect(dc, card, cardBrush, win32.Color(126, 136, 160), 1, max(int32(8), win32.Scale(12, app.dpi)))
 		win32.SetTextColor(dc, win32.Color(225, 229, 242))
 		card.Left += win32.Scale(24, app.dpi)
 		card.Top += win32.Scale(18, app.dpi)
@@ -1668,7 +1707,12 @@ func (app *application) paintMedia(dc win32.HDC, client win32.Rect, left int32) 
 	right := client.Right - win32.Scale(42, app.dpi)
 	row := func(top, bottom int32, brush win32.HBRUSH) win32.Rect {
 		rect := win32.Rect{Left: left, Top: win32.Scale(top, app.dpi), Right: right, Bottom: win32.Scale(bottom, app.dpi)}
-		win32.FillRect(dc, &rect, brush)
+		app.paintButtonSurface(dc, rect, brush)
+		return rect
+	}
+	staticRow := func(top, bottom int32, brush win32.HBRUSH) win32.Rect {
+		rect := win32.Rect{Left: left, Top: win32.Scale(top, app.dpi), Right: right, Bottom: win32.Scale(bottom, app.dpi)}
+		app.paintStaticSurface(dc, rect, brush)
 		return rect
 	}
 	draw := func(text string, rect win32.Rect, color uint32) {
@@ -1695,9 +1739,9 @@ func (app *application) paintMedia(dc win32.HDC, client win32.Rect, left int32) 
 	draw(fmt.Sprintf(app.texts.Text("media.metrics"), strings.Join(metrics, " / ")), row(420, 464, buttonBrush), win32.Color(225, 229, 242))
 	draw(fmt.Sprintf(app.texts.Text("media.offset"), app.settings.Overlay.OffsetX, app.settings.Overlay.OffsetY), row(470, 514, buttonBrush), win32.Color(225, 229, 242))
 	statsText := fmt.Sprintf(app.texts.Text("media.realtime"), metricValue(app.overlayStats.FPS, app.overlayStats.FPSValid), metricValue(app.overlayStats.CPU, app.overlayStats.CPUValid), metricValue(app.overlayStats.GPU, app.overlayStats.GPUValid))
-	draw(statsText, row(526, 566, cardBrush), win32.Color(166, 174, 197))
+	draw(statsText, staticRow(526, 566, cardBrush), win32.Color(166, 174, 197))
 	status := app.captureStatus + "  |  " + app.overlayStatus
-	draw(status, row(572, 612, cardBrush), win32.Color(126, 136, 160))
+	draw(status, staticRow(572, 612, cardBrush), win32.Color(126, 136, 160))
 }
 
 func metricValue(value float64, valid bool) string {
@@ -2120,11 +2164,11 @@ func (app *application) injectionClick(x, y int) {
 	switch {
 	case y >= sy(170) && y < sy(230):
 		client := win32.GetClientRect(app.hwnd)
-		right := int(client.Right - win32.Scale(42, app.dpi))
-		switch fufuHeaderActionAt(x, right, app.dpi) {
-		case 2:
+		_, repair, toggle := fufuHeaderRects(win32.Scale(252, app.dpi), client.Right-win32.Scale(42, app.dpi), win32.Scale(170, app.dpi), win32.Scale(230, app.dpi), app.dpi)
+		switch {
+		case pointInButton(toggle, int32(x), int32(y)):
 			app.setFufuInjectionEnabled(!(app.fufuTargetEnabled && app.settings.Injection.Enabled))
-		case 1:
+		case pointInButton(repair, int32(x), int32(y)):
 			app.startFufuMainRepair()
 		}
 	case y >= sy(240) && y < sy(284):
@@ -2193,7 +2237,12 @@ func (app *application) paintInjection(dc win32.HDC, client win32.Rect, left int
 	right := client.Right - win32.Scale(42, app.dpi)
 	row := func(top, bottom int32, brush win32.HBRUSH) win32.Rect {
 		rect := win32.Rect{Left: left, Top: win32.Scale(top, app.dpi), Right: right, Bottom: win32.Scale(bottom, app.dpi)}
-		win32.FillRect(dc, &rect, brush)
+		app.paintButtonSurface(dc, rect, brush)
+		return rect
+	}
+	staticRow := func(top, bottom int32, brush win32.HBRUSH) win32.Rect {
+		rect := win32.Rect{Left: left, Top: win32.Scale(top, app.dpi), Right: right, Bottom: win32.Scale(bottom, app.dpi)}
+		app.paintStaticSurface(dc, rect, brush)
 		return rect
 	}
 	draw := func(text string, rect win32.Rect, color uint32) {
@@ -2203,17 +2252,18 @@ func (app *application) paintInjection(dc win32.HDC, client win32.Rect, left int
 		win32.DrawText(dc, text, &rect, win32.DT_LEFT|win32.DT_VCENTER|win32.DT_SINGLELINE|win32.DT_END_ELLIPSIS)
 	}
 	settings := app.settings.Injection
-	header := row(170, 230, cardBrush)
-	actionLeft := header.Right - win32.Scale(360, app.dpi)
-	toggleLeft := header.Right - win32.Scale(170, app.dpi)
+	selectorRect, repairRect, toggleRect := fufuHeaderRects(left, right, win32.Scale(170, app.dpi), win32.Scale(230, app.dpi), app.dpi)
+	app.paintStaticSurface(dc, selectorRect, cardBrush)
+	app.paintButtonSurface(dc, repairRect, buttonBrush)
+	app.paintButtonSurface(dc, toggleRect, accentBrush)
 	metadata := app.texts.Text("fufu.target.notInstalled")
 	if app.fufuTargetInstalled {
 		metadata = fmt.Sprintf("%s  |  %s  |  %s", app.fufuTarget.Name, app.fufuTarget.Version, app.fufuTarget.Developer)
 	}
-	draw(fmt.Sprintf(app.texts.Text("fufu.target.label"), metadata), win32.Rect{Left: header.Left, Top: header.Top, Right: actionLeft, Bottom: header.Bottom}, win32.Color(225, 229, 242))
-	draw(app.texts.Text("fufu.target.repair"), win32.Rect{Left: actionLeft, Top: header.Top, Right: toggleLeft, Bottom: header.Bottom}, win32.Color(190, 197, 216))
+	draw(fmt.Sprintf(app.texts.Text("fufu.target.label"), metadata), selectorRect, win32.Color(225, 229, 242))
+	draw(app.texts.Text("fufu.target.repair"), repairRect, win32.Color(190, 197, 216))
 	toggleText := onOffText(app.texts.Language(), app.fufuTargetEnabled && settings.Enabled)
-	draw(fmt.Sprintf(app.texts.Text("fufu.target.injection"), toggleText), win32.Rect{Left: toggleLeft, Top: header.Top, Right: header.Right, Bottom: header.Bottom}, win32.Color(235, 238, 248))
+	draw(fmt.Sprintf(app.texts.Text("fufu.target.injection"), toggleText), toggleRect, win32.Color(235, 238, 248))
 	risk := app.texts.Text("injection.risk.unconfirmed")
 	if settings.RiskAcknowledged {
 		risk = app.texts.Text("injection.risk.confirmed")
@@ -2239,8 +2289,8 @@ func (app *application) paintInjection(dc win32.HDC, client win32.Rect, left int
 	if len(app.injectionWarnings) > 0 {
 		warning = app.injectionWarnings[0]
 	}
-	draw(warning, row(540, 574, cardBrush), win32.Color(166, 174, 197))
-	draw(app.injectionStatus, row(580, 614, cardBrush), win32.Color(145, 154, 180))
+	draw(warning, staticRow(540, 574, cardBrush), win32.Color(166, 174, 197))
+	draw(app.injectionStatus, staticRow(580, 614, cardBrush), win32.Color(145, 154, 180))
 }
 
 func (app *application) commitPluginSettings(next plugins.Config) bool {
@@ -2301,9 +2351,13 @@ func (app *application) pluginClick(x, y int) {
 	switch {
 	case y >= sy(170) && y < sy(214):
 		client := win32.GetClientRect(app.hwnd)
-		if x >= int(client.Right-win32.Scale(230, app.dpi)) {
+		safe, target := pluginHeaderRects(win32.Scale(252, app.dpi), client.Right-win32.Scale(42, app.dpi), app.pluginContentY(170), app.pluginContentY(214), app.dpi)
+		if pointInButton(target, int32(x), int32(y)) {
 			app.pluginTargetMode = true
 			app.updateLaunchControlVisibility()
+			break
+		}
+		if !pointInButton(safe, int32(x), int32(y)) {
 			break
 		}
 		next := app.settings.Plugins
@@ -2317,11 +2371,12 @@ func (app *application) pluginClick(x, y int) {
 		}
 	case y >= sy(220) && y < sy(264):
 		client := win32.GetClientRect(app.hwnd)
-		middle := int(win32.Scale(252, app.dpi)) + (int(client.Right)-int(win32.Scale(294, app.dpi)))/2
-		if x < middle {
+		row := win32.Rect{Left: win32.Scale(252, app.dpi), Top: app.pluginContentY(220), Right: client.Right - win32.Scale(42, app.dpi), Bottom: app.pluginContentY(264)}
+		switch buttonCellAt(row, int32(x), int32(y), 2, app.dpi) {
+		case 0:
 			app.refreshPlugins()
 			app.startPluginCatalogSync()
-		} else {
+		case 1:
 			app.startLocalPluginInstall()
 		}
 	case y >= sy(270) && y < sy(412):
@@ -2358,27 +2413,24 @@ func (app *application) pluginClick(x, y int) {
 		// The child edit control owns this row.
 	case y >= sy(520) && y < sy(564):
 		client := win32.GetClientRect(app.hwnd)
-		left := int(win32.Scale(252, app.dpi))
-		width := int(client.Right) - left - int(win32.Scale(42, app.dpi))
-		third := max(1, width/3)
-		switch {
-		case x < left+third:
+		row := win32.Rect{Left: win32.Scale(252, app.dpi), Top: app.pluginContentY(520), Right: client.Right - win32.Scale(42, app.dpi), Bottom: app.pluginContentY(564)}
+		switch buttonCellAt(row, int32(x), int32(y), 3, app.dpi) {
+		case 0:
 			app.savePluginAlias()
-		case x < left+2*third:
+		case 1:
 			app.movePlugin(-1)
-		default:
+		case 2:
 			app.movePlugin(1)
 		}
 	case y >= sy(570) && y < sy(614):
 		client := win32.GetClientRect(app.hwnd)
-		left := int(win32.Scale(252, app.dpi))
-		width := int(client.Right) - left - int(win32.Scale(42, app.dpi))
-		third := max(1, width/3)
-		if x < left+third {
+		row := win32.Rect{Left: win32.Scale(252, app.dpi), Top: app.pluginContentY(570), Right: client.Right - win32.Scale(42, app.dpi), Bottom: app.pluginContentY(614)}
+		switch buttonCellAt(row, int32(x), int32(y), 3, app.dpi) {
+		case 0:
 			app.startPluginRollback()
-		} else if x < left+2*third {
+		case 1:
 			app.startPluginUninstall()
-		} else {
+		case 2:
 			app.applyNextPluginPreset()
 		}
 	}
@@ -2390,11 +2442,11 @@ func (app *application) fufuConfigClick(x, y int) {
 	switch {
 	case y >= sy(170) && y < sy(224):
 		client := win32.GetClientRect(app.hwnd)
-		right := int(client.Right - win32.Scale(42, app.dpi))
-		switch fufuHeaderActionAt(x, right, app.dpi) {
-		case 2:
+		_, repair, toggle := fufuHeaderRects(win32.Scale(252, app.dpi), client.Right-win32.Scale(42, app.dpi), app.pluginContentY(170), app.pluginContentY(224), app.dpi)
+		switch {
+		case pointInButton(toggle, int32(x), int32(y)):
 			app.setFufuInjectionEnabled(!(app.fufuTargetEnabled && app.settings.Injection.Enabled))
-		case 1:
+		case pointInButton(repair, int32(x), int32(y)):
 			app.startFufuMainRepair()
 		}
 	case y >= sy(235) && y < sy(535):
@@ -2416,16 +2468,6 @@ func (app *application) fufuConfigClick(x, y int) {
 		app.pluginTargetMode = false
 		app.updateLaunchControlVisibility()
 	}
-}
-
-func fufuHeaderActionAt(x, right int, dpi uint32) int {
-	if x >= right-int(win32.Scale(170, dpi)) {
-		return 2
-	}
-	if x >= right-int(win32.Scale(360, dpi)) {
-		return 1
-	}
-	return 0
 }
 
 func (app *application) savePluginAlias() {
@@ -2544,13 +2586,13 @@ func (app *application) pluginStoreClick(x, y int) {
 	switch {
 	case y >= sy(270) && y < sy(314):
 		client := win32.GetClientRect(app.hwnd)
-		left := int(win32.Scale(252, app.dpi))
-		third := max(1, (int(client.Right)-left-int(win32.Scale(42, app.dpi)))/3)
-		if x < left+third {
+		row := win32.Rect{Left: win32.Scale(252, app.dpi), Top: app.pluginContentY(270), Right: client.Right - win32.Scale(42, app.dpi), Bottom: app.pluginContentY(314)}
+		switch buttonCellAt(row, int32(x), int32(y), 3, app.dpi) {
+		case 0:
 			if app.savePluginSearch() {
 				app.startPluginCatalogSync()
 			}
-		} else if x < left+2*third {
+		case 1:
 			values := []string{"", "utility", "gameplay", "visuals", "other"}
 			index := 0
 			for i, value := range values {
@@ -2562,7 +2604,7 @@ func (app *application) pluginStoreClick(x, y int) {
 			next := app.settings.Plugins
 			next.Category, next.Page = values[index], 1
 			app.applyPluginStoreConfig(next)
-		} else {
+		case 2:
 			values := []string{"popular", "newest", "rating", "name"}
 			index := 0
 			for i, value := range values {
@@ -2590,14 +2632,25 @@ func (app *application) pluginStoreClick(x, y int) {
 		}
 	case y >= sy(470) && y < sy(514):
 		client := win32.GetClientRect(app.hwnd)
-		middle := int(win32.Scale(252, app.dpi)) + (int(client.Right)-int(win32.Scale(294, app.dpi)))/2
 		next := app.settings.Plugins
-		if x < middle && next.Page > 1 {
+		row := win32.Rect{Left: win32.Scale(252, app.dpi), Top: app.pluginContentY(470), Right: client.Right - win32.Scale(42, app.dpi), Bottom: app.pluginContentY(514)}
+		switch buttonCellAt(row, int32(x), int32(y), 2, app.dpi) {
+		case 0:
+			if next.Page <= 1 {
+				break
+			}
 			next.Page--
-		} else if x >= middle && next.Page < app.pluginCatalogPage.TotalPages {
+		case 1:
+			if next.Page >= app.pluginCatalogPage.TotalPages {
+				break
+			}
 			next.Page++
+		default:
+			break
 		}
-		app.applyPluginStoreConfig(next)
+		if next.Page != app.settings.Plugins.Page {
+			app.applyPluginStoreConfig(next)
+		}
 	case y >= sy(520) && y < sy(564):
 		app.startCatalogPluginInstall()
 	}
@@ -2875,12 +2928,16 @@ func (app *application) paintPlugins(dc win32.HDC, client win32.Rect, left int32
 	right := client.Right - win32.Scale(42, app.dpi)
 	row := func(top, bottom int32, brush win32.HBRUSH) win32.Rect {
 		rect := win32.Rect{Left: left, Top: app.pluginContentY(top), Right: right, Bottom: app.pluginContentY(bottom)}
-		win32.FillRect(dc, &rect, brush)
+		app.paintButtonSurface(dc, rect, brush)
+		return rect
+	}
+	staticRow := func(top, bottom int32, brush win32.HBRUSH) win32.Rect {
+		rect := win32.Rect{Left: left, Top: app.pluginContentY(top), Right: right, Bottom: app.pluginContentY(bottom)}
+		app.paintStaticSurface(dc, rect, brush)
 		return rect
 	}
 	cell := func(rect win32.Rect, index, count int32) win32.Rect {
-		width := (rect.Right - rect.Left) / count
-		return win32.Rect{Left: rect.Left + index*width, Top: rect.Top, Right: rect.Left + (index+1)*width, Bottom: rect.Bottom}
+		return splitButtonRect(rect, index, count, app.dpi)
 	}
 	draw := func(value string, rect win32.Rect, color uint32) {
 		win32.SetTextColor(dc, color)
@@ -2892,24 +2949,27 @@ func (app *application) paintPlugins(dc win32.HDC, client win32.Rect, left int32
 	if app.settings.Plugins.SafeMode {
 		safe = app.texts.Text("plugin.safe.on")
 	}
-	safeRow := row(170, 214, warningBrush)
-	draw(fmt.Sprintf(app.texts.Text("plugin.safe"), safe), safeRow, win32.Color(255, 205, 150))
-	targetCell := safeRow
-	targetCell.Left = targetCell.Right - win32.Scale(230, app.dpi)
+	safeButton, targetCell := pluginHeaderRects(left, right, app.pluginContentY(170), app.pluginContentY(214), app.dpi)
+	app.paintButtonSurface(dc, safeButton, warningBrush)
+	app.paintButtonSurface(dc, targetCell, accentBrush)
+	draw(fmt.Sprintf(app.texts.Text("plugin.safe"), safe), safeButton, win32.Color(255, 205, 150))
 	draw(app.texts.Text("fufu.target.openConfig"), targetCell, win32.Color(235, 238, 248))
-	toolsRow := row(220, 264, buttonBrush)
-	draw(app.texts.Text("plugin.rescan"), cell(toolsRow, 0, 2), win32.Color(225, 229, 242))
+	toolsRow := win32.Rect{Left: left, Top: app.pluginContentY(220), Right: right, Bottom: app.pluginContentY(264)}
+	rescanButton, installButton := cell(toolsRow, 0, 2), cell(toolsRow, 1, 2)
+	app.paintButtonSurface(dc, rescanButton, buttonBrush)
+	app.paintButtonSurface(dc, installButton, buttonBrush)
+	draw(app.texts.Text("plugin.rescan"), rescanButton, win32.Color(225, 229, 242))
 	installText := app.texts.Text("plugin.installLocal")
 	if app.pluginBusy {
 		installText = app.texts.Text("plugin.busy")
 	}
-	draw(installText, cell(toolsRow, 1, 2), win32.Color(190, 197, 216))
+	draw(installText, installButton, win32.Color(190, 197, 216))
 	enabled := false
 	if item, ok := app.selectedPlugin(); ok {
 		enabled = item.Enabled
 	}
 	if len(app.pluginItems) == 0 {
-		draw(app.texts.Text("plugin.noneInstalled"), row(270, 412, cardBrush), win32.Color(145, 154, 180))
+		draw(app.texts.Text("plugin.noneInstalled"), staticRow(270, 412, cardBrush), win32.Color(145, 154, 180))
 	} else {
 		for visible := 0; visible < pluginVisibleRows; visible++ {
 			index := app.pluginListScroll + visible
@@ -2930,15 +2990,25 @@ func (app *application) paintPlugins(dc win32.HDC, client win32.Rect, left int32
 		}
 	}
 	draw(fmt.Sprintf(app.texts.Text("plugin.enabled"), onOffText(app.texts.Language(), enabled)), row(420, 464, accentBrush), win32.Color(235, 238, 248))
-	draw(app.texts.Text("plugin.aliasHint"), row(470, 514, cardBrush), win32.Color(145, 154, 180))
-	actions := row(520, 564, buttonBrush)
-	draw(app.texts.Text("plugin.aliasSave"), cell(actions, 0, 3), win32.Color(225, 229, 242))
-	draw(app.texts.Text("plugin.moveUp"), cell(actions, 1, 3), win32.Color(190, 197, 216))
-	draw(app.texts.Text("plugin.moveDown"), cell(actions, 2, 3), win32.Color(190, 197, 216))
-	lifecycle := row(570, 614, warningBrush)
-	draw(app.texts.Text("plugin.rollback"), cell(lifecycle, 0, 3), win32.Color(255, 205, 150))
-	draw(app.texts.Text("plugin.uninstall"), cell(lifecycle, 1, 3), win32.Color(255, 170, 150))
-	draw(app.texts.Text("plugin.nextPreset"), cell(lifecycle, 2, 3), win32.Color(255, 205, 150))
+	draw(app.texts.Text("plugin.aliasHint"), staticRow(470, 514, cardBrush), win32.Color(145, 154, 180))
+	actions := win32.Rect{Left: left, Top: app.pluginContentY(520), Right: right, Bottom: app.pluginContentY(564)}
+	for index, action := range []struct {
+		text  string
+		color uint32
+	}{{app.texts.Text("plugin.aliasSave"), win32.Color(225, 229, 242)}, {app.texts.Text("plugin.moveUp"), win32.Color(190, 197, 216)}, {app.texts.Text("plugin.moveDown"), win32.Color(190, 197, 216)}} {
+		button := cell(actions, int32(index), 3)
+		app.paintButtonSurface(dc, button, buttonBrush)
+		draw(action.text, button, action.color)
+	}
+	lifecycle := win32.Rect{Left: left, Top: app.pluginContentY(570), Right: right, Bottom: app.pluginContentY(614)}
+	for index, action := range []struct {
+		text  string
+		color uint32
+	}{{app.texts.Text("plugin.rollback"), win32.Color(255, 205, 150)}, {app.texts.Text("plugin.uninstall"), win32.Color(255, 170, 150)}, {app.texts.Text("plugin.nextPreset"), win32.Color(255, 205, 150)}} {
+		button := cell(lifecycle, int32(index), 3)
+		app.paintButtonSurface(dc, button, warningBrush)
+		draw(action.text, button, action.color)
+	}
 }
 
 func (app *application) paintFufuConfig(dc win32.HDC, client win32.Rect, left int32) {
@@ -2953,7 +3023,7 @@ func (app *application) paintFufuConfig(dc win32.HDC, client win32.Rect, left in
 	right := client.Right - win32.Scale(42, app.dpi)
 	row := func(top, bottom int32, brush win32.HBRUSH) win32.Rect {
 		rect := win32.Rect{Left: left, Top: app.pluginContentY(top), Right: right, Bottom: app.pluginContentY(bottom)}
-		win32.FillRect(dc, &rect, brush)
+		app.paintButtonSurface(dc, rect, brush)
 		return rect
 	}
 	draw := func(value string, rect win32.Rect, color uint32) {
@@ -2966,12 +3036,13 @@ func (app *application) paintFufuConfig(dc win32.HDC, client win32.Rect, left in
 	if app.fufuTargetInstalled {
 		targetName = fmt.Sprintf("%s  |  %s  |  %s", app.fufuTarget.Name, app.fufuTarget.Version, app.fufuTarget.Developer)
 	}
-	header := row(170, 224, accentBrush)
-	actionLeft := header.Right - win32.Scale(360, app.dpi)
-	toggleLeft := header.Right - win32.Scale(170, app.dpi)
-	draw(fmt.Sprintf(app.texts.Text("fufu.target.selector"), targetName), win32.Rect{Left: header.Left, Top: header.Top, Right: actionLeft, Bottom: header.Bottom}, win32.Color(235, 238, 248))
-	draw(app.texts.Text("fufu.target.repair"), win32.Rect{Left: actionLeft, Top: header.Top, Right: toggleLeft, Bottom: header.Bottom}, win32.Color(225, 229, 242))
-	draw(fmt.Sprintf(app.texts.Text("fufu.target.injection"), onOffText(app.texts.Language(), app.fufuTargetEnabled && app.settings.Injection.Enabled)), win32.Rect{Left: toggleLeft, Top: header.Top, Right: header.Right, Bottom: header.Bottom}, win32.Color(255, 205, 150))
+	selectorRect, repairRect, toggleRect := fufuHeaderRects(left, right, app.pluginContentY(170), app.pluginContentY(224), app.dpi)
+	app.paintStaticSurface(dc, selectorRect, cardBrush)
+	app.paintButtonSurface(dc, repairRect, accentBrush)
+	app.paintButtonSurface(dc, toggleRect, warningBrush)
+	draw(fmt.Sprintf(app.texts.Text("fufu.target.selector"), targetName), selectorRect, win32.Color(235, 238, 248))
+	draw(app.texts.Text("fufu.target.repair"), repairRect, win32.Color(225, 229, 242))
+	draw(fmt.Sprintf(app.texts.Text("fufu.target.injection"), onOffText(app.texts.Language(), app.fufuTargetEnabled && app.settings.Injection.Enabled)), toggleRect, win32.Color(255, 205, 150))
 	for visible := 0; visible < fufuVisibleRows; visible++ {
 		index := app.fufuScroll + visible
 		if index >= len(app.fufuTarget.Settings) {
@@ -2982,7 +3053,12 @@ func (app *application) paintFufuConfig(dc win32.HDC, client win32.Rect, left in
 		if visible%2 == 1 {
 			brush = buttonBrush
 		}
-		settingRow := row(int32(235+visible*50), int32(277+visible*50), brush)
+		settingRow := win32.Rect{Left: left, Top: app.pluginContentY(int32(235 + visible*50)), Right: right, Bottom: app.pluginContentY(int32(277 + visible*50))}
+		if setting.Field.Type == "bool" {
+			app.paintButtonSurface(dc, settingRow, brush)
+		} else {
+			app.paintStaticSurface(dc, settingRow, brush)
+		}
 		settingRow.Right -= win32.Scale(20, app.dpi)
 		labelRect := settingRow
 		labelRect.Right -= win32.Scale(280, app.dpi)
@@ -3010,12 +3086,16 @@ func (app *application) paintPluginStore(dc win32.HDC, client win32.Rect, left i
 	right := client.Right - win32.Scale(42, app.dpi)
 	row := func(top, bottom int32, brush win32.HBRUSH) win32.Rect {
 		rect := win32.Rect{Left: left, Top: app.pluginContentY(top), Right: right, Bottom: app.pluginContentY(bottom)}
-		win32.FillRect(dc, &rect, brush)
+		app.paintButtonSurface(dc, rect, brush)
+		return rect
+	}
+	staticRow := func(top, bottom int32, brush win32.HBRUSH) win32.Rect {
+		rect := win32.Rect{Left: left, Top: app.pluginContentY(top), Right: right, Bottom: app.pluginContentY(bottom)}
+		app.paintStaticSurface(dc, rect, brush)
 		return rect
 	}
 	cell := func(rect win32.Rect, index, count int32) win32.Rect {
-		width := (rect.Right - rect.Left) / count
-		return win32.Rect{Left: rect.Left + index*width, Top: rect.Top, Right: rect.Left + (index+1)*width, Bottom: rect.Bottom}
+		return splitButtonRect(rect, index, count, app.dpi)
 	}
 	draw := func(value string, rect win32.Rect, color uint32) {
 		win32.SetTextColor(dc, color)
@@ -3023,16 +3103,19 @@ func (app *application) paintPluginStore(dc win32.HDC, client win32.Rect, left i
 		rect.Right -= win32.Scale(12, app.dpi)
 		win32.DrawText(dc, value, &rect, win32.DT_LEFT|win32.DT_VCENTER|win32.DT_SINGLELINE|win32.DT_END_ELLIPSIS)
 	}
-	draw("", row(170, 214, cardBrush), win32.Color(225, 229, 242))
-	draw("", row(220, 264, cardBrush), win32.Color(225, 229, 242))
+	draw("", staticRow(170, 214, cardBrush), win32.Color(225, 229, 242))
+	draw("", staticRow(220, 264, cardBrush), win32.Color(225, 229, 242))
 	syncText := app.texts.Text("plugin.store.sync")
 	if app.pluginBusy {
 		syncText = app.texts.Text("plugin.store.busy")
 	}
-	toolsRow := row(270, 314, accentBrush)
-	draw(syncText, cell(toolsRow, 0, 3), win32.Color(235, 238, 248))
-	draw(fmt.Sprintf(app.texts.Text("plugin.store.category"), pluginCategoryText(app.texts, app.settings.Plugins.Category)), cell(toolsRow, 1, 3), win32.Color(225, 229, 242))
-	draw(fmt.Sprintf(app.texts.Text("plugin.store.sort"), pluginSortText(app.texts, app.settings.Plugins.Sort)), cell(toolsRow, 2, 3), win32.Color(225, 229, 242))
+	toolsRow := win32.Rect{Left: left, Top: app.pluginContentY(270), Right: right, Bottom: app.pluginContentY(314)}
+	toolLabels := []string{syncText, fmt.Sprintf(app.texts.Text("plugin.store.category"), pluginCategoryText(app.texts, app.settings.Plugins.Category)), fmt.Sprintf(app.texts.Text("plugin.store.sort"), pluginSortText(app.texts, app.settings.Plugins.Sort))}
+	for index, label := range toolLabels {
+		button := cell(toolsRow, int32(index), 3)
+		app.paintButtonSurface(dc, button, accentBrush)
+		draw(label, button, win32.Color(225, 229, 242))
+	}
 	installAction := app.texts.Text("plugin.store.install")
 	if item, ok := app.selectedCatalogPlugin(); ok {
 		if installed, exists := app.pluginState.Installed[strings.ToLower(item.ID)]; exists {
@@ -3044,7 +3127,7 @@ func (app *application) paintPluginStore(dc win32.HDC, client win32.Rect, left i
 		}
 	}
 	if len(app.pluginCatalogPage.Items) == 0 {
-		draw(app.texts.Text("plugin.store.none"), row(320, 462, cardBrush), win32.Color(145, 154, 180))
+		draw(app.texts.Text("plugin.store.none"), staticRow(320, 462, cardBrush), win32.Color(145, 154, 180))
 	} else {
 		for visible := 0; visible < storeVisibleRows; visible++ {
 			index := app.storeListScroll + visible
@@ -3068,11 +3151,14 @@ func (app *application) paintPluginStore(dc win32.HDC, client win32.Rect, left i
 			draw(value, itemRow, win32.Color(225, 229, 242))
 		}
 	}
-	pages := row(470, 514, buttonBrush)
-	draw(app.texts.Text("plugin.store.previous"), cell(pages, 0, 2), win32.Color(190, 197, 216))
-	draw(fmt.Sprintf(app.texts.Text("plugin.store.next"), app.pluginCatalogPage.Page, app.pluginCatalogPage.TotalPages), cell(pages, 1, 2), win32.Color(190, 197, 216))
+	pages := win32.Rect{Left: left, Top: app.pluginContentY(470), Right: right, Bottom: app.pluginContentY(514)}
+	previousButton, nextButton := cell(pages, 0, 2), cell(pages, 1, 2)
+	app.paintButtonSurface(dc, previousButton, buttonBrush)
+	app.paintButtonSurface(dc, nextButton, buttonBrush)
+	draw(app.texts.Text("plugin.store.previous"), previousButton, win32.Color(190, 197, 216))
+	draw(fmt.Sprintf(app.texts.Text("plugin.store.next"), app.pluginCatalogPage.Page, app.pluginCatalogPage.TotalPages), nextButton, win32.Color(190, 197, 216))
 	draw(installAction, row(520, 564, accentBrush), win32.Color(235, 238, 248))
-	draw(app.pluginStatus, row(570, 614, cardBrush), win32.Color(145, 154, 180))
+	draw(app.pluginStatus, staticRow(570, 614, cardBrush), win32.Color(145, 154, 180))
 }
 
 func pluginCategoryText(texts localization.Catalog, category string) string {
@@ -3261,7 +3347,12 @@ func (app *application) paintSettings(dc win32.HDC, client win32.Rect, left int3
 	right := client.Right - win32.Scale(42, app.dpi)
 	row := func(top, bottom int32, brush win32.HBRUSH) win32.Rect {
 		rect := win32.Rect{Left: left, Top: app.pluginContentY(top), Right: right, Bottom: app.pluginContentY(bottom)}
-		win32.FillRect(dc, &rect, brush)
+		app.paintButtonSurface(dc, rect, brush)
+		return rect
+	}
+	staticRow := func(top, bottom int32, brush win32.HBRUSH) win32.Rect {
+		rect := win32.Rect{Left: left, Top: app.pluginContentY(top), Right: right, Bottom: app.pluginContentY(bottom)}
+		app.paintStaticSurface(dc, rect, brush)
 		return rect
 	}
 	draw := func(value string, rect win32.Rect, color uint32) {
@@ -3284,8 +3375,8 @@ func (app *application) paintSettings(dc win32.HDC, client win32.Rect, left int3
 		diagnosticText = app.texts.Text("settings.status.exporting")
 	}
 	draw(diagnosticText, row(520, 564, buttonBrush), win32.Color(225, 229, 242))
-	draw(fmt.Sprintf("%s · v%s · %s · %s b5a050ebd319", app.texts.Text("settings.about"), app.build.Version, app.build.Commit, app.texts.Text("settings.upstream")), row(570, 614, cardBrush), win32.Color(166, 174, 197))
-	draw(app.shellStatus, row(620, 660, cardBrush), win32.Color(145, 154, 180))
+	draw(fmt.Sprintf("%s · v%s · %s · %s b5a050ebd319", app.texts.Text("settings.about"), app.build.Version, app.build.Commit, app.texts.Text("settings.upstream")), staticRow(570, 614, cardBrush), win32.Color(166, 174, 197))
+	draw(app.shellStatus, staticRow(620, 660, cardBrush), win32.Color(145, 154, 180))
 	updateText := app.updateStatus("Check for updates", "检查更新")
 	if app.updateBusy {
 		updateText = app.updateStatus("Checking for updates...", "正在检查更新……")
@@ -3426,8 +3517,16 @@ func (app *application) inputClick(x, y int) {
 		app.inputUIError = ""
 		app.inputNative.Enable(!config.Enabled)
 	case y >= sy(226) && y < sy(266):
-		mode := (x - left) / max(1, int(win32.Scale(132, app.dpi)))
-		if mode >= 0 && mode <= int(input.ModeMouseRight) {
+		mode := -1
+		modeWidth := win32.Scale(132, app.dpi)
+		for index := 0; index <= int(input.ModeMouseRight); index++ {
+			rect := win32.Rect{Left: int32(left) + int32(index)*modeWidth, Top: win32.Scale(226, app.dpi), Right: int32(left) + int32(index+1)*modeWidth - win32.Scale(8, app.dpi), Bottom: win32.Scale(266, app.dpi)}
+			if pointInButton(rect, int32(x), int32(y)) {
+				mode = index
+				break
+			}
+		}
+		if mode >= 0 {
 			config.Mode = input.Mode(mode)
 			config.Enabled = false
 			if err := app.inputNative.Configure(config); err != nil {
@@ -3516,7 +3615,12 @@ func (app *application) paintInput(dc win32.HDC, client win32.Rect, left int32) 
 	right := client.Right - win32.Scale(42, app.dpi)
 	row := func(top, bottom int32, brush win32.HBRUSH) win32.Rect {
 		rect := win32.Rect{Left: left, Top: win32.Scale(top, app.dpi), Right: right, Bottom: win32.Scale(bottom, app.dpi)}
-		win32.FillRect(dc, &rect, brush)
+		app.paintButtonSurface(dc, rect, brush)
+		return rect
+	}
+	staticRow := func(top, bottom int32, brush win32.HBRUSH) win32.Rect {
+		rect := win32.Rect{Left: left, Top: win32.Scale(top, app.dpi), Right: right, Bottom: win32.Scale(bottom, app.dpi)}
+		app.paintStaticSurface(dc, rect, brush)
 		return rect
 	}
 	draw := func(text string, rect win32.Rect, color uint32) {
@@ -3543,14 +3647,14 @@ func (app *application) paintInput(dc win32.HDC, client win32.Rect, left int32) 
 		if int(config.Mode) == index {
 			brush = activeBrush
 		}
-		win32.FillRect(dc, &rect, brush)
+		app.paintButtonSurface(dc, rect, brush)
 		draw(name, rect, win32.Color(225, 229, 242))
 	}
 	if config.Mode == input.ModeKeyboard {
 		draw(recordLabel(app.texts, "input.key.trigger", config.TriggerKey, app.recording == 1), row(276, 316, buttonBrush), win32.Color(225, 229, 242))
 		draw(recordLabel(app.texts, "input.key.output", config.OutputKey, app.recording == 2), row(326, 366, buttonBrush), win32.Color(225, 229, 242))
 	} else {
-		draw(app.texts.Text("input.mouseTrigger"), row(276, 366, cardBrush), win32.Color(166, 174, 197))
+		draw(app.texts.Text("input.mouseTrigger"), staticRow(276, 366, cardBrush), win32.Color(166, 174, 197))
 	}
 	draw(recordLabel(app.texts, "input.key.stop", config.StopKey, app.recording == 3), row(376, 416, buttonBrush), win32.Color(225, 229, 242))
 	draw(fmt.Sprintf(app.texts.Text("input.interval"), config.IntervalMS), row(426, 466, buttonBrush), win32.Color(225, 229, 242))
@@ -3559,9 +3663,9 @@ func (app *application) paintInput(dc win32.HDC, client win32.Rect, left int32) 
 		visibleError = app.inputUIError
 	}
 	if visibleError != "" {
-		draw(fmt.Sprintf(app.texts.Text("input.error"), visibleError), row(476, 516, cardBrush), win32.Color(255, 126, 126))
+		draw(fmt.Sprintf(app.texts.Text("input.error"), visibleError), staticRow(476, 516, cardBrush), win32.Color(255, 126, 126))
 	} else {
-		draw(fmt.Sprintf(app.texts.Text("input.outputCount"), snapshot.OutputCount), row(476, 516, cardBrush), win32.Color(145, 154, 180))
+		draw(fmt.Sprintf(app.texts.Text("input.outputCount"), snapshot.OutputCount), staticRow(476, 516, cardBrush), win32.Color(145, 154, 180))
 	}
 }
 
@@ -3995,7 +4099,12 @@ func (app *application) paintServer(dc win32.HDC, client win32.Rect, left int32)
 	right := client.Right - win32.Scale(42, app.dpi)
 	row := func(top, bottom int32, brush win32.HBRUSH) win32.Rect {
 		rect := win32.Rect{Left: left, Top: win32.Scale(top, app.dpi), Right: right, Bottom: win32.Scale(bottom, app.dpi)}
-		win32.FillRect(dc, &rect, brush)
+		app.paintButtonSurface(dc, rect, brush)
+		return rect
+	}
+	staticRow := func(top, bottom int32, brush win32.HBRUSH) win32.Rect {
+		rect := win32.Rect{Left: left, Top: win32.Scale(top, app.dpi), Right: right, Bottom: win32.Scale(bottom, app.dpi)}
+		app.paintStaticSurface(dc, rect, brush)
 		return rect
 	}
 	draw := func(text string, rect win32.Rect, color uint32) {
@@ -4036,7 +4145,7 @@ func (app *application) paintServer(dc win32.HDC, client win32.Rect, left int32)
 	if state.Error != "" {
 		status, color = state.Error, win32.Color(255, 126, 126)
 	}
-	draw(status, row(376, 420, cardBrush), color)
+	draw(status, staticRow(376, 420, cardBrush), color)
 	if state.Transaction != nil {
 		installs, deletes, moves := 0, 0, 0
 		for _, item := range state.Plan.Items {
@@ -4050,10 +4159,10 @@ func (app *application) paintServer(dc win32.HDC, client win32.Rect, left int32)
 				continue
 			}
 		}
-		draw(fmt.Sprintf(app.texts.Text("server.planSummary"), installs, moves, deletes, formatBytes(uint64(state.Plan.DownloadBytes))), row(426, 470, cardBrush), win32.Color(190, 197, 216))
+		draw(fmt.Sprintf(app.texts.Text("server.planSummary"), installs, moves, deletes, formatBytes(uint64(state.Plan.DownloadBytes))), staticRow(426, 470, cardBrush), win32.Color(190, 197, 216))
 	}
-	draw(app.texts.Text("server.advancedInfo"), row(482, 526, cardBrush), win32.Color(166, 174, 197))
-	draw(app.texts.Text("server.rollbackInfo"), row(532, 576, cardBrush), win32.Color(126, 136, 160))
+	draw(app.texts.Text("server.advancedInfo"), staticRow(482, 526, cardBrush), win32.Color(166, 174, 197))
+	draw(app.texts.Text("server.rollbackInfo"), staticRow(532, 576, cardBrush), win32.Color(126, 136, 160))
 }
 
 func quickServerText(texts localization.Catalog, server localenhance.QuickServer) string {
@@ -4198,7 +4307,12 @@ func (app *application) paintLocalEnhance(dc win32.HDC, client win32.Rect, left 
 	right := client.Right - win32.Scale(42, app.dpi)
 	row := func(top, bottom int32, brush win32.HBRUSH) win32.Rect {
 		rect := win32.Rect{Left: left, Top: win32.Scale(top, app.dpi), Right: right, Bottom: win32.Scale(bottom, app.dpi)}
-		win32.FillRect(dc, &rect, brush)
+		app.paintButtonSurface(dc, rect, brush)
+		return rect
+	}
+	staticRow := func(top, bottom int32, brush win32.HBRUSH) win32.Rect {
+		rect := win32.Rect{Left: left, Top: win32.Scale(top, app.dpi), Right: right, Bottom: win32.Scale(bottom, app.dpi)}
+		app.paintStaticSurface(dc, rect, brush)
 		return rect
 	}
 	draw := func(text string, rect win32.Rect, color uint32) {
@@ -4222,7 +4336,7 @@ func (app *application) paintLocalEnhance(dc win32.HDC, client win32.Rect, left 
 	if status == "" {
 		status = app.texts.Text("local.safety")
 	}
-	draw(status, row(572, 610, cardBrush), win32.Color(145, 154, 180))
+	draw(status, staticRow(572, 610, cardBrush), win32.Color(145, 154, 180))
 }
 
 func (app *application) gameClick(x, y int) {
@@ -4257,18 +4371,32 @@ func (app *application) gameClick(x, y int) {
 		next.Width, next.Height = presets[index][0], presets[index][1]
 		app.commitLaunchConfig(next)
 	case y >= sy(308) && y < sy(346):
-		midpoint := int(win32.Scale(650, app.dpi))
+		client := win32.GetClientRect(app.hwnd)
+		left, right := win32.Scale(252, app.dpi), client.Right-win32.Scale(42, app.dpi)
+		midpoint := left + (right-left)/2
+		monitorRect := win32.Rect{Left: left, Top: win32.Scale(308, app.dpi), Right: midpoint - win32.Scale(4, app.dpi), Bottom: win32.Scale(346, app.dpi)}
+		postRect := win32.Rect{Left: midpoint + win32.Scale(4, app.dpi), Top: monitorRect.Top, Right: right, Bottom: monitorRect.Bottom}
 		next := app.settings.Launch
-		if x < midpoint {
+		if pointInButton(monitorRect, int32(x), int32(y)) {
 			next.Monitor = (next.Monitor + 1) % (win32.MonitorCount() + 1)
-		} else {
+		} else if pointInButton(postRect, int32(x), int32(y)) {
 			next.PostBehavior = (next.PostBehavior + 1) % 3
+		} else {
+			break
 		}
 		app.commitLaunchConfig(next)
 	case y >= sy(396) && y < sy(434):
-		contentLeft := int(win32.Scale(252, app.dpi))
-		clientRight := int(win32.GetClientRect(app.hwnd).Right - win32.Scale(42, app.dpi))
-		column := (x - contentLeft) * 3 / max(1, clientRight-contentLeft)
+		contentLeft := win32.Scale(252, app.dpi)
+		clientRight := win32.GetClientRect(app.hwnd).Right - win32.Scale(42, app.dpi)
+		actionWidth := (clientRight - contentLeft) / 3
+		column := -1
+		for index := 0; index < 3; index++ {
+			rect := win32.Rect{Left: contentLeft + int32(index)*actionWidth, Top: win32.Scale(396, app.dpi), Right: contentLeft + int32(index+1)*actionWidth - win32.Scale(6, app.dpi), Bottom: win32.Scale(434, app.dpi)}
+			if pointInButton(rect, int32(x), int32(y)) {
+				column = index
+				break
+			}
+		}
 		switch column {
 		case 0:
 			if app.gameState.Scanning {
@@ -4425,7 +4553,12 @@ func (app *application) paintGame(dc win32.HDC, client win32.Rect, left int32) {
 	right := client.Right - win32.Scale(42, app.dpi)
 	row := func(top, bottom int32, brush win32.HBRUSH) win32.Rect {
 		rect := win32.Rect{Left: left, Top: win32.Scale(top, app.dpi), Right: right, Bottom: win32.Scale(bottom, app.dpi)}
-		win32.FillRect(dc, &rect, brush)
+		app.paintButtonSurface(dc, rect, brush)
+		return rect
+	}
+	staticRow := func(top, bottom int32, brush win32.HBRUSH) win32.Rect {
+		rect := win32.Rect{Left: left, Top: win32.Scale(top, app.dpi), Right: right, Bottom: win32.Scale(bottom, app.dpi)}
+		app.paintStaticSurface(dc, rect, brush)
 		return rect
 	}
 	draw := func(text string, rect win32.Rect, color uint32) {
@@ -4450,8 +4583,8 @@ func (app *application) paintGame(dc win32.HDC, client win32.Rect, left int32) {
 	midpoint := left + (right-left)/2
 	monitorRect := win32.Rect{Left: left, Top: win32.Scale(308, app.dpi), Right: midpoint - win32.Scale(4, app.dpi), Bottom: win32.Scale(346, app.dpi)}
 	postRect := win32.Rect{Left: midpoint + win32.Scale(4, app.dpi), Top: monitorRect.Top, Right: right, Bottom: monitorRect.Bottom}
-	win32.FillRect(dc, &monitorRect, buttonBrush)
-	win32.FillRect(dc, &postRect, buttonBrush)
+	app.paintButtonSurface(dc, monitorRect, buttonBrush)
+	app.paintButtonSurface(dc, postRect, buttonBrush)
 	monitor := app.texts.Text("game.monitor.default")
 	if app.settings.Launch.Monitor > 0 {
 		monitor = fmt.Sprintf(app.texts.Text("game.monitor.number"), app.settings.Launch.Monitor)
@@ -4464,7 +4597,7 @@ func (app *application) paintGame(dc win32.HDC, client win32.Rect, left int32) {
 	actions := []string{app.texts.Text("game.action.scan"), app.texts.Text("game.action.select"), app.texts.Text("game.action.shortcut")}
 	for index, text := range actions {
 		rect := win32.Rect{Left: left + int32(index)*actionWidth, Top: win32.Scale(396, app.dpi), Right: left + int32(index+1)*actionWidth - win32.Scale(6, app.dpi), Bottom: win32.Scale(434, app.dpi)}
-		win32.FillRect(dc, &rect, buttonBrush)
+		app.paintButtonSurface(dc, rect, buttonBrush)
 		draw(text, rect, win32.Color(190, 197, 216))
 	}
 
@@ -4482,13 +4615,13 @@ func (app *application) paintGame(dc win32.HDC, client win32.Rect, left int32) {
 	} else if state.Error != "" {
 		status, statusColor = state.Error, win32.Color(255, 126, 126)
 	}
-	draw(status, row(440, 476, cardBrush), statusColor)
+	draw(status, staticRow(440, 476, cardBrush), statusColor)
 	if state.Candidate == nil {
 		return
 	}
 	candidate := state.Candidate
-	draw(fmt.Sprintf(app.texts.Text("game.path"), candidate.Root), row(482, 518, cardBrush), win32.Color(225, 229, 242))
-	draw(fmt.Sprintf(app.texts.Text("game.identity"), candidate.ExeName, localizedValueOrUnknown(app.texts, candidate.Version), gameServerText(app.texts, candidate.Server)), row(524, 560, cardBrush), win32.Color(190, 197, 216))
+	draw(fmt.Sprintf(app.texts.Text("game.path"), candidate.Root), staticRow(482, 518, cardBrush), win32.Color(225, 229, 242))
+	draw(fmt.Sprintf(app.texts.Text("game.identity"), candidate.ExeName, localizedValueOrUnknown(app.texts, candidate.Version), gameServerText(app.texts, candidate.Server)), staticRow(524, 560, cardBrush), win32.Color(190, 197, 216))
 	running := app.texts.Text("game.running.none")
 	if len(state.Running) > 0 {
 		if state.Running[0].VerifiedPath {
@@ -4497,7 +4630,7 @@ func (app *application) paintGame(dc win32.HDC, client win32.Rect, left int32) {
 			running = fmt.Sprintf(app.texts.Text("game.running.possible"), state.Running[0].PID)
 		}
 	}
-	draw(fmt.Sprintf(app.texts.Text("game.files"), formatBytes(state.Size.Bytes), state.Size.Files, state.Skipped, running), row(566, 602, cardBrush), win32.Color(166, 174, 197))
+	draw(fmt.Sprintf(app.texts.Text("game.files"), formatBytes(state.Size.Bytes), state.Size.Files, state.Skipped, running), staticRow(566, 602, cardBrush), win32.Color(166, 174, 197))
 }
 
 func gameWindowModeText(texts localization.Catalog, mode launch.WindowMode) string {
@@ -4750,7 +4883,12 @@ func (app *application) paintResources(dc win32.HDC, client win32.Rect, left int
 	right := client.Right - win32.Scale(42, app.dpi)
 	row := func(top, bottom int32, brush win32.HBRUSH) win32.Rect {
 		rect := win32.Rect{Left: left, Top: win32.Scale(top, app.dpi), Right: right, Bottom: win32.Scale(bottom, app.dpi)}
-		win32.FillRect(dc, &rect, brush)
+		app.paintButtonSurface(dc, rect, brush)
+		return rect
+	}
+	staticRow := func(top, bottom int32, brush win32.HBRUSH) win32.Rect {
+		rect := win32.Rect{Left: left, Top: win32.Scale(top, app.dpi), Right: right, Bottom: win32.Scale(bottom, app.dpi)}
+		app.paintStaticSurface(dc, rect, brush)
 		return rect
 	}
 	draw := func(text string, rect win32.Rect, color uint32) {
@@ -4784,20 +4922,20 @@ func (app *application) paintResources(dc win32.HDC, client win32.Rect, left int
 	if state.Error != "" {
 		status, statusColor = state.Error, win32.Color(255, 126, 126)
 	}
-	draw(status, row(364, 408, cardBrush), statusColor)
+	draw(status, staticRow(364, 408, cardBrush), statusColor)
 	version := localizedValueOrUnknown(app.texts, state.Version)
-	draw(fmt.Sprintf(app.texts.Text("resource.onlineVersion"), version), row(414, 450, cardBrush), win32.Color(190, 197, 216))
+	draw(fmt.Sprintf(app.texts.Text("resource.onlineVersion"), version), staticRow(414, 450, cardBrush), win32.Color(190, 197, 216))
 	if state.HasPlan {
-		draw(fmt.Sprintf(app.texts.Text("resource.planSummary"), len(state.Manifest.Files), len(state.Plan.Changes()), formatBytes(uint64(state.Plan.DownloadBytes))), row(456, 492, cardBrush), win32.Color(190, 197, 216))
+		draw(fmt.Sprintf(app.texts.Text("resource.planSummary"), len(state.Manifest.Files), len(state.Plan.Changes()), formatBytes(uint64(state.Plan.DownloadBytes))), staticRow(456, 492, cardBrush), win32.Color(190, 197, 216))
 	}
 	if state.Progress.FilesTotal > 0 {
 		eta := app.texts.Text("resource.eta.calculating")
 		if state.Progress.ETA > 0 {
 			eta = state.Progress.ETA.Round(time.Second).String()
 		}
-		draw(fmt.Sprintf(app.texts.Text("resource.progress"), state.Progress.FilesDone, state.Progress.FilesTotal, formatBytes(uint64(state.Progress.BytesDone)), formatBytes(uint64(state.Progress.BytesTotal)), formatBytes(uint64(state.Progress.Speed)), eta), row(498, 534, cardBrush), win32.Color(145, 154, 180))
+		draw(fmt.Sprintf(app.texts.Text("resource.progress"), state.Progress.FilesDone, state.Progress.FilesTotal, formatBytes(uint64(state.Progress.BytesDone)), formatBytes(uint64(state.Progress.BytesTotal)), formatBytes(uint64(state.Progress.Speed)), eta), staticRow(498, 534, cardBrush), win32.Color(145, 154, 180))
 	}
-	draw(app.texts.Text("resource.safety"), row(540, 576, cardBrush), win32.Color(126, 136, 160))
+	draw(app.texts.Text("resource.safety"), staticRow(540, 576, cardBrush), win32.Color(126, 136, 160))
 }
 
 func formatBytes(value uint64) string {

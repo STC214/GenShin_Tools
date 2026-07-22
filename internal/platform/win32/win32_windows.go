@@ -24,6 +24,13 @@ type HDC uintptr
 type Point struct{ X, Y int32 }
 type Rect struct{ Left, Top, Right, Bottom int32 }
 
+type TrackMouseEvent struct {
+	Size      uint32
+	Flags     uint32
+	Window    HWND
+	HoverTime uint32
+}
+
 type Msg struct {
 	HWnd     HWND
 	Message  uint32
@@ -201,6 +208,7 @@ const (
 	WM_CTLCOLOREDIT     = 0x0133
 	WM_SYSCOMMAND       = 0x0112
 	WM_MOUSEMOVE        = 0x0200
+	WM_MOUSELEAVE       = 0x02A3
 	WM_LBUTTONDOWN      = 0x0201
 	WM_LBUTTONDBLCLK    = 0x0203
 	WM_RBUTTONUP        = 0x0205
@@ -269,6 +277,7 @@ const (
 
 	MF_STRING       = 0x0000
 	TPM_RIGHTBUTTON = 0x0002
+	TME_LEAVE       = 0x00000002
 	TPM_RETURNCMD   = 0x0100
 
 	TH32CS_SNAPTHREAD           = 0x00000004
@@ -349,6 +358,7 @@ var (
 	procCreatePopupMenu               = user32.NewProc("CreatePopupMenu")
 	procAppendMenuW                   = user32.NewProc("AppendMenuW")
 	procTrackPopupMenu                = user32.NewProc("TrackPopupMenu")
+	procTrackMouseEvent               = user32.NewProc("TrackMouseEvent")
 	procDestroyMenu                   = user32.NewProc("DestroyMenu")
 	procGetCursorPos                  = user32.NewProc("GetCursorPos")
 	procSetCursorPos                  = user32.NewProc("SetCursorPos")
@@ -367,6 +377,8 @@ var (
 	procSetBkColor             = gdi32.NewProc("SetBkColor")
 	procSelectObject           = gdi32.NewProc("SelectObject")
 	procCreateFontW            = gdi32.NewProc("CreateFontW")
+	procCreatePen              = gdi32.NewProc("CreatePen")
+	procRoundRect              = gdi32.NewProc("RoundRect")
 
 	procShellNotifyIconW                 = shell32.NewProc("Shell_NotifyIconW")
 	procDwmSetWindowAttribute            = dwmapi.NewProc("DwmSetWindowAttribute")
@@ -653,6 +665,15 @@ func MonitorCount() int {
 	return int(value)
 }
 func Invalidate(hwnd HWND) { procInvalidateRect.Call(uintptr(hwnd), 0, 0) }
+func InvalidateArea(hwnd HWND, rect Rect) {
+	procInvalidateRect.Call(uintptr(hwnd), uintptr(unsafe.Pointer(&rect)), 0)
+}
+
+func TrackMouseLeave(hwnd HWND) bool {
+	event := TrackMouseEvent{Size: uint32(unsafe.Sizeof(TrackMouseEvent{})), Flags: TME_LEAVE, Window: hwnd}
+	value, _, _ := procTrackMouseEvent.Call(uintptr(unsafe.Pointer(&event)))
+	return value != 0
+}
 
 func SetScrollInfo(hwnd HWND, info *ScrollInfo, redraw bool) int32 {
 	info.Size = uint32(unsafe.Sizeof(*info))
@@ -706,6 +727,30 @@ func BitBlt(destination HDC, x, y, width, height int32, source HDC, sourceX, sou
 }
 func FillRect(dc HDC, rect *Rect, brush HBRUSH) {
 	procFillRect.Call(uintptr(dc), uintptr(unsafe.Pointer(rect)), uintptr(brush))
+}
+func DrawRoundedRect(dc HDC, rect Rect, brush HBRUSH, borderColor uint32, borderWidth, radius int32) {
+	pen := CreatePen(borderColor, borderWidth)
+	if pen == 0 {
+		FillRect(dc, &rect, brush)
+		return
+	}
+	DrawRoundedRectWithPen(dc, rect, brush, pen, radius)
+	DeleteObject(pen)
+}
+func CreatePen(color uint32, width int32) uintptr {
+	pen, _, _ := procCreatePen.Call(0, uintptr(width), uintptr(color))
+	return pen
+}
+func DrawRoundedRectWithPen(dc HDC, rect Rect, brush HBRUSH, pen uintptr, radius int32) {
+	if pen == 0 {
+		FillRect(dc, &rect, brush)
+		return
+	}
+	oldPen := SelectObject(dc, pen)
+	oldBrush := SelectObject(dc, uintptr(brush))
+	procRoundRect.Call(uintptr(dc), uintptr(rect.Left), uintptr(rect.Top), uintptr(rect.Right), uintptr(rect.Bottom), uintptr(radius), uintptr(radius))
+	SelectObject(dc, oldBrush)
+	SelectObject(dc, oldPen)
 }
 func SetTransparentBackground(dc HDC)   { procSetBkMode.Call(uintptr(dc), TRANSPARENT) }
 func SetTextColor(dc HDC, color uint32) { procSetTextColor.Call(uintptr(dc), uintptr(color)) }

@@ -47,17 +47,11 @@ func TestActiveListStateCoversConfigInstalledAndStoreLists(t *testing.T) {
 }
 
 func TestFufuHeaderActionUsesHorizontalDPIScaling(t *testing.T) {
-	const right = 1000
-	if got := fufuHeaderActionAt(640, right, 96); got != 1 {
-		t.Fatalf("repair boundary action=%d, want 1", got)
+	selector, repair, toggle := fufuHeaderRects(100, 1000, 170, 224, 192)
+	if !pointInButton(selector, 200, 200) || !pointInButton(repair, repair.Left, 200) || !pointInButton(toggle, toggle.Left, 200) {
+		t.Fatalf("header actions do not scale with DPI: selector=%+v repair=%+v toggle=%+v", selector, repair, toggle)
 	}
-	if got := fufuHeaderActionAt(830, right, 96); got != 2 {
-		t.Fatalf("toggle boundary action=%d, want 2", got)
-	}
-	if got := fufuHeaderActionAt(279, right, 192); got != 0 {
-		t.Fatalf("high-DPI point before repair action=%d, want 0", got)
-	}
-	if got := fufuHeaderActionAt(280, right, 192); got != 1 {
-		t.Fatalf("high-DPI repair boundary action=%d, want 1", got)
+	if pointInButton(repair, repair.Left-1, 200) || pointInButton(toggle, toggle.Left-1, 200) {
+		t.Fatalf("header visual gaps must not activate an action: repair=%+v toggle=%+v", repair, toggle)
 	}
 }
