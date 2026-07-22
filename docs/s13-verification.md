@@ -39,12 +39,12 @@
 ## 候选包
 
 - 文件：`artifacts/release/GenshinTools-0.9.0-windows-amd64-candidate.zip`
-- 大小：待 MIT 许可证提交后重新生成
-- SHA-256：待 MIT 许可证提交后重新生成
-- ZIP 条目：预计 14 个，仅包含 `release.json`、三个 Release EXE、`build-info.json`、项目 MIT 许可证、第三方通知、许可证政策和 `LICENSES/` 文本。
+- 大小：7,421,040 bytes
+- SHA-256：`c153d089a4031824d491c2c89059bce0a269bacf260ac08b4b67eadb08ffde4c`
+- ZIP 条目：14 个，仅包含 `release.json`、三个 Release EXE、`build-info.json`、项目 MIT 许可证、第三方通知、许可证政策和 `LICENSES/` 文本。
 - 明确不含：Debug EXE、`data/`、日志、缓存、staging、测试夹具和源码。
 
-候选 ZIP 使用固定条目顺序和时间戳；最终构建时间、源提交和哈希在 MIT 许可证与发布链提交后重新记录。清洁重建四个 EXE 后再次打包得到相同大小和 SHA-256，可确认相同源码、提交身份和工具链可复现。源码、提交或显式构建时间改变会按设计改变 `build-info.json` 和包哈希。
+候选 ZIP 使用固定条目顺序和时间戳；本轮构建时间固定为 `2026-07-22T15:23:25Z`（Git HEAD `15d5af70feb1a4ff164748f522b532850e15e4d0` 的提交时间）。清洁重建四个 EXE 后再次打包得到相同大小和 SHA-256，可确认相同源码、提交身份和工具链可复现。源码、提交或显式构建时间改变会按设计改变 `build-info.json` 和包哈希。
 
 ## 尚未关闭的人工门禁
 
