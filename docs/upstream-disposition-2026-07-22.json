@@ -1,0 +1,239 @@
+{
+  "schemaVersion": 1,
+  "base": "b5a050ebd319341bddc4189491c90c22162d33fa",
+  "head": "5f6af35fcb90807d5db390ed4af58ca09ddd381c",
+  "reviewer": "Codex repository audit requested by project owner",
+  "reviewedUtc": "2026-07-22T14:15:27Z",
+  "items": [
+    {
+      "path": "FufuLauncher.Installer/setup.iss",
+      "classification": "in_scope",
+      "decision": "no_action_required",
+      "references": ["docs/upstream-disposition-2026-07-22.md: independent Go release version"],
+      "binaryReviewed": true,
+      "sourceAndLicenseReviewed": true,
+      "apiSchemaReviewed": true,
+      "exclusionsReviewed": true
+    },
+    {
+      "path": "FufuLauncher/Assets/freecam.png",
+      "classification": "in_scope",
+      "decision": "no_action_required",
+      "references": ["docs/upstream-disposition-2026-07-22.md: upstream UI asset is not redistributed"],
+      "binaryReviewed": true,
+      "sourceAndLicenseReviewed": true,
+      "apiSchemaReviewed": true,
+      "exclusionsReviewed": true
+    },
+    {
+      "path": "FufuLauncher/Constants/ApiEndpoints.cs",
+      "classification": "dependency_risk",
+      "decision": "implemented",
+      "references": ["internal/plugins/catalog.go", "docs/s10-design.md", "docs/upstream-disposition-2026-07-22.md"],
+      "binaryReviewed": true,
+      "sourceAndLicenseReviewed": true,
+      "apiSchemaReviewed": true,
+      "exclusionsReviewed": true
+    },
+    {
+      "path": "FufuLauncher/Data/Repositories/AchievementRepository.cs",
+      "classification": "dependency_risk",
+      "decision": "no_action_required",
+      "references": ["docs/upstream-scope-matrix.md: achievements and data center are permanently excluded"],
+      "binaryReviewed": true,
+      "sourceAndLicenseReviewed": true,
+      "apiSchemaReviewed": true,
+      "exclusionsReviewed": true
+    },
+    {
+      "path": "FufuLauncher/Data/Repositories/LocalSettingsRepository.cs",
+      "classification": "in_scope",
+      "decision": "no_action_required",
+      "references": ["internal/config/settings.go", "docs/upstream-disposition-2026-07-22.md: EF and SQLite migration is not used"],
+      "binaryReviewed": true,
+      "sourceAndLicenseReviewed": true,
+      "apiSchemaReviewed": true,
+      "exclusionsReviewed": true
+    },
+    {
+      "path": "FufuLauncher/Data/Repositories/MetadataRepository.cs",
+      "classification": "in_scope",
+      "decision": "no_action_required",
+      "references": ["docs/upstream-scope-matrix.md: metadata-backed excluded pages are not retained", "internal/config/settings.go"],
+      "binaryReviewed": true,
+      "sourceAndLicenseReviewed": true,
+      "apiSchemaReviewed": true,
+      "exclusionsReviewed": true
+    },
+    {
+      "path": "FufuLauncher/FufuLauncher.csproj",
+      "classification": "review_required",
+      "decision": "no_action_required",
+      "references": ["go.mod", "docs/upstream-disposition-2026-07-22.md: upstream CSharp version and dependencies are not imported"],
+      "binaryReviewed": true,
+      "sourceAndLicenseReviewed": true,
+      "apiSchemaReviewed": true,
+      "exclusionsReviewed": true
+    },
+    {
+      "path": "FufuLauncher/Helpers/SystemEnvironmentHelper.cs",
+      "classification": "dependency_risk",
+      "decision": "no_action_required",
+      "references": ["docs/upstream-disposition-2026-07-22.md: hardware inventory exists only for excluded remote Lua test surface"],
+      "binaryReviewed": true,
+      "sourceAndLicenseReviewed": true,
+      "apiSchemaReviewed": true,
+      "exclusionsReviewed": true
+    },
+    {
+      "path": "FufuLauncher/MainWindow.xaml.cs",
+      "classification": "in_scope",
+      "decision": "no_action_required",
+      "references": ["docs/upstream-scope-matrix.md: Acrylic and elaborate upstream UI are excluded"],
+      "binaryReviewed": true,
+      "sourceAndLicenseReviewed": true,
+      "apiSchemaReviewed": true,
+      "exclusionsReviewed": true
+    },
+    {
+      "path": "FufuLauncher/Models/PluginDependency.cs",
+      "classification": "review_required",
+      "decision": "implemented",
+      "references": ["internal/plugins/catalog.go", "internal/plugins/fufu_package.go", "internal/plugins/fufu_package_test.go"],
+      "binaryReviewed": true,
+      "sourceAndLicenseReviewed": true,
+      "apiSchemaReviewed": true,
+      "exclusionsReviewed": true
+    },
+    {
+      "path": "FufuLauncher/Models/PluginStoreItem.cs",
+      "classification": "dependency_risk",
+      "decision": "implemented",
+      "references": ["internal/plugins/catalog.go", "docs/upstream-disposition-2026-07-22.md: public fields retained and private credentials excluded"],
+      "binaryReviewed": true,
+      "sourceAndLicenseReviewed": true,
+      "apiSchemaReviewed": true,
+      "exclusionsReviewed": true
+    },
+    {
+      "path": "FufuLauncher/Plugins/FuFuPlugin/config.ini",
+      "classification": "in_scope",
+      "decision": "implemented",
+      "references": ["internal/plugins/config_schema.go", "internal/plugins/fufu_package.go", "internal/shell/fufu_config_ui_windows_test.go"],
+      "binaryReviewed": true,
+      "sourceAndLicenseReviewed": true,
+      "apiSchemaReviewed": true,
+      "exclusionsReviewed": true
+    },
+    {
+      "path": "FufuLauncher/Services/GeetestService.cs",
+      "classification": "dependency_risk",
+      "decision": "implemented",
+      "references": ["docs/s10-design.md: system-browser token flow", "README.md: no embedded browser and memory-only token"],
+      "binaryReviewed": true,
+      "sourceAndLicenseReviewed": true,
+      "apiSchemaReviewed": true,
+      "exclusionsReviewed": true
+    },
+    {
+      "path": "FufuLauncher/Services/LuaPluginInstaller.cs",
+      "classification": "dependency_risk",
+      "decision": "no_action_required",
+      "references": ["docs/s10-design.md: remote Lua permanently excluded", "internal/plugins/fufu_package.go: restricted ZIP conversion"],
+      "binaryReviewed": true,
+      "sourceAndLicenseReviewed": true,
+      "apiSchemaReviewed": true,
+      "exclusionsReviewed": true
+    },
+    {
+      "path": "FufuLauncher/Services/PluginStoreService.cs",
+      "classification": "dependency_risk",
+      "decision": "implemented",
+      "references": ["internal/plugins/catalog.go", "internal/plugins/fufu_package.go", "docs/upstream-disposition-2026-07-22.md"],
+      "binaryReviewed": true,
+      "sourceAndLicenseReviewed": true,
+      "apiSchemaReviewed": true,
+      "exclusionsReviewed": true
+    },
+    {
+      "path": "FufuLauncher/Strings/en-US/Resources.resw",
+      "classification": "review_required",
+      "decision": "no_action_required",
+      "references": ["internal/localization", "docs/upstream-disposition-2026-07-22.md: only retained behavior is localized independently"],
+      "binaryReviewed": true,
+      "sourceAndLicenseReviewed": true,
+      "apiSchemaReviewed": true,
+      "exclusionsReviewed": true
+    },
+    {
+      "path": "FufuLauncher/Strings/zh-CN/Resources.resw",
+      "classification": "review_required",
+      "decision": "no_action_required",
+      "references": ["internal/localization", "docs/upstream-disposition-2026-07-22.md: only retained behavior is localized independently"],
+      "binaryReviewed": true,
+      "sourceAndLicenseReviewed": true,
+      "apiSchemaReviewed": true,
+      "exclusionsReviewed": true
+    },
+    {
+      "path": "FufuLauncher/Update.json",
+      "classification": "in_scope",
+      "decision": "no_action_required",
+      "references": ["internal/selfupdate", "docs/upstream-disposition-2026-07-22.md: independent signed update protocol"],
+      "binaryReviewed": true,
+      "sourceAndLicenseReviewed": true,
+      "apiSchemaReviewed": true,
+      "exclusionsReviewed": true
+    },
+    {
+      "path": "FufuLauncher/ViewModels/PluginStoreViewModel.cs",
+      "classification": "dependency_risk",
+      "decision": "implemented",
+      "references": ["internal/shell/app_windows.go", "internal/plugins/fufu_package.go", "docs/upstream-disposition-2026-07-22.md"],
+      "binaryReviewed": true,
+      "sourceAndLicenseReviewed": true,
+      "apiSchemaReviewed": true,
+      "exclusionsReviewed": true
+    },
+    {
+      "path": "FufuLauncher/ViewModels/SettingsViewModel.cs",
+      "classification": "dependency_risk",
+      "decision": "no_action_required",
+      "references": ["docs/upstream-scope-matrix.md: account, BBS, widget and toolbox settings are excluded"],
+      "binaryReviewed": true,
+      "sourceAndLicenseReviewed": true,
+      "apiSchemaReviewed": true,
+      "exclusionsReviewed": true
+    },
+    {
+      "path": "FufuLauncher/Views/Main/PluginStorePage.xaml",
+      "classification": "dependency_risk",
+      "decision": "no_action_required",
+      "references": ["internal/shell/app_windows.go", "docs/upstream-disposition-2026-07-22.md: simplified native UI; private and Lua-test controls excluded"],
+      "binaryReviewed": true,
+      "sourceAndLicenseReviewed": true,
+      "apiSchemaReviewed": true,
+      "exclusionsReviewed": true
+    },
+    {
+      "path": "FufuLauncher/Views/Main/PluginStorePage.xaml.cs",
+      "classification": "dependency_risk",
+      "decision": "implemented",
+      "references": ["internal/shell/app_windows.go", "internal/plugins/catalog.go", "docs/upstream-disposition-2026-07-22.md"],
+      "binaryReviewed": true,
+      "sourceAndLicenseReviewed": true,
+      "apiSchemaReviewed": true,
+      "exclusionsReviewed": true
+    },
+    {
+      "path": "UpdateFufuLauncher/MainWindow.xaml.cs",
+      "classification": "in_scope",
+      "decision": "no_action_required",
+      "references": ["internal/selfupdate", "docs/upstream-disposition-2026-07-22.md: upstream updater version is independent"],
+      "binaryReviewed": true,
+      "sourceAndLicenseReviewed": true,
+      "apiSchemaReviewed": true,
+      "exclusionsReviewed": true
+    }
+  ]
+}
