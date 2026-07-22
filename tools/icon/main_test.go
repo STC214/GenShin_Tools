@@ -50,6 +50,13 @@ func TestGenerateIsDeterministicAndDecodable(t *testing.T) {
 	if decodedPreview.Bounds().Dx() != 64 || decodedPreview.Bounds().Dy() != 64 {
 		t.Fatalf("preview is not the top square crop: bounds=%v err=%v", decodedPreview.Bounds(), err)
 	}
+	for _, point := range []image.Point{{X: 0, Y: 0}, {X: 17, Y: 31}, {X: 63, Y: 63}} {
+		got := color.NRGBAModel.Convert(decodedPreview.At(point.X, point.Y)).(color.NRGBA)
+		want := portrait.NRGBAAt(point.X, point.Y)
+		if got != want {
+			t.Errorf("preview pixel %v = %#v, want top-crop pixel %#v", point, got, want)
+		}
+	}
 
 	firstBytes, err := os.ReadFile(first)
 	if err != nil {

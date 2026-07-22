@@ -940,6 +940,18 @@ func KeyName(virtualKey uint32) string {
 	if virtualKey == 0 {
 		return "Unset"
 	}
+	// These keys have ambiguous legacy scan-code encodings. In particular,
+	// MAPVK_VK_TO_VSC_EX returns E1 1D for Pause, but GetKeyNameTextW only has
+	// one extended-key bit and consequently identifies that value as Right Ctrl.
+	// Num Lock and Print Screen have similar historical aliases.
+	switch virtualKey {
+	case 0x13: // VK_PAUSE
+		return "Pause"
+	case 0x2c: // VK_SNAPSHOT
+		return "Print Screen"
+	case 0x90: // VK_NUMLOCK
+		return "Num Lock"
+	}
 	layout, _, _ := procGetKeyboardLayout.Call(0)
 	scan, _, _ := procMapVirtualKeyExW.Call(uintptr(virtualKey), 4, layout) // MAPVK_VK_TO_VSC_EX
 	if scan != 0 {

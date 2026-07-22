@@ -13,3 +13,16 @@ func TestKeyNameUsesKeyboardLabelsInsteadOfVirtualKeyCodes(t *testing.T) {
 		}
 	}
 }
+
+func TestKeyNameHandlesAmbiguousLegacyScanCodes(t *testing.T) {
+	tests := map[uint32]string{
+		0x13: "Pause",
+		0x2c: "Print Screen",
+		0x90: "Num Lock",
+	}
+	for key, want := range tests {
+		if got := KeyName(key); got != want {
+			t.Errorf("KeyName(0x%02X) = %q, want %q", key, got, want)
+		}
+	}
+}
