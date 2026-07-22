@@ -4,9 +4,9 @@
   "owner": "FufuLauncher",
   "name": "FufuLauncher",
   "branch": "master",
-  "commit": "b5a050ebd319341bddc4189491c90c22162d33fa",
-  "commitTimeUtc": "2026-07-16T12:14:09Z",
-  "checkedAtUtc": "2026-07-17T04:08:18Z",
+  "commit": "5f6af35fcb90807d5db390ed4af58ca09ddd381c",
+  "commitTimeUtc": "2026-07-22T08:57:37Z",
+  "checkedAtUtc": "2026-07-22T14:15:27Z",
   "scopePolicy": "scope-v2",
   "mode": "audit-only",
   "notes": "Baseline for behavioral comparison. Updating this file requires a reviewed upstream diff; excluded modules must never be auto-imported."
