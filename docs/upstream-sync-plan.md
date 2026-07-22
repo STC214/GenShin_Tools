@@ -8,7 +8,7 @@
 
 - 仓库：`FufuLauncher/FufuLauncher`
 - 分支：`master`
-- 提交：`b5a050ebd319341bddc4189491c90c22162d33fa`
+- 提交：`5f6af35fcb90807d5db390ed4af58ca09ddd381c`
 - 提交时间：2026-07-16T12:14:09Z
 - 范围策略：`scope-v2`（单独识别程序自更新、版本清单和安装器变更）
 

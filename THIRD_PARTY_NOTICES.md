@@ -4,7 +4,7 @@
 
 - Project: FufuLauncher/FufuLauncher
 - Source: <https://github.com/FufuLauncher/FufuLauncher>
-- Audited baseline: `b5a050ebd319341bddc4189491c90c22162d33fa`
+- Audited baseline: `5f6af35fcb90807d5db390ed4af58ca09ddd381c`
 - Live store contract rechecked: 2026-07-22 (`fu1.fun/api/v1/plugins` and current upstream store client sources)
 - Role: behavioral reference for this independent Go + Win32 reimplementation, plus the fixed upstream source for plugin-store metadata and official download verification pages
 - License: MIT License

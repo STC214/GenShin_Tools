@@ -1,7 +1,7 @@
 # S12 验证记录
 
 更新时间：2026-07-19  
-状态：S12 代码与自动门禁已完成；许可证和上游人工 disposition 尚未完成；后续 S13 短时自动矩阵已通过。
+状态：S12 代码与自动门禁已完成；上游人工 disposition 已完成并提升基线；许可证仍待项目所有者选择；后续 S13 全量自动矩阵已通过。
 
 ## 通过项
 
@@ -25,7 +25,7 @@ scripts/build.ps1 -Configuration Both
 scripts/verify-artifact.ps1
 ```
 
-以上代码/构建门禁在本记录日期均通过。上游检查生成 scope-v2 报告后按设计因一个 `review_required` 项返回非零，等待人工处置。默认 `go vet ./...` 仍会报告 Win32 ABI callback/LPARAM 边界的 `unsafe.Pointer` 提示；这些位置已由 `scripts/test.ps1` 使用 `-unsafeptr=false` 隔离，并保留在全量审计报告中供人工复核。
+以上代码/构建门禁在本记录日期均通过。2026-07-22 的 scope-v2 报告覆盖 23 个变更文件和 21 个提交，完整 disposition 通过工具校验后已把基线提升到 `5f6af35fcb90807d5db390ed4af58ca09ddd381c`。默认 `go vet ./...` 仍会报告 Win32 ABI callback/LPARAM 边界的 `unsafe.Pointer` 提示；这些位置已由 `scripts/test.ps1` 使用 `-unsafeptr=false` 隔离，并保留在全量审计报告中供人工复核。
 
 ## 发布配置边界
 
