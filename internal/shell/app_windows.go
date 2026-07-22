@@ -927,6 +927,8 @@ func (app *application) handleMessage(hwnd win32.HWND, message uint32, wParam, l
 			app.selected = selected
 			app.updateLaunchControlVisibility()
 			win32.Invalidate(hwnd)
+		} else if app.selected == 0 && contentAction {
+			app.homeClick(x, y)
 		} else if app.selected == 1 && contentAction {
 			app.gameClick(x, y)
 		} else if app.selected == 2 && contentAction {
@@ -1367,6 +1369,28 @@ func (app *application) paint(hwnd win32.HWND) {
 		card.Top += win32.Scale(38, app.dpi)
 		card.Bottom = card.Top + win32.Scale(32, app.dpi)
 		win32.DrawText(dc, app.texts.Text("home.scope"), &card, win32.DT_LEFT|win32.DT_VCENTER|win32.DT_SINGLELINE|win32.DT_END_ELLIPSIS)
+
+		buttonBrush := win32.CreateSolidBrush(win32.Color(35, 40, 54))
+		defer win32.DeleteObject(uintptr(buttonBrush))
+		accentBrush := win32.CreateSolidBrush(win32.Color(52, 66, 112))
+		defer win32.DeleteObject(uintptr(accentBrush))
+		cleanButton, injectionButton := homeLaunchRects(client, app.dpi)
+		if validButtonRect(cleanButton) && validButtonRect(injectionButton) {
+			if app.launchBusy() {
+				app.paintStaticSurface(dc, cleanButton, cardBrush)
+				app.paintStaticSurface(dc, injectionButton, cardBrush)
+			} else {
+				app.paintButtonSurface(dc, cleanButton, buttonBrush)
+				app.paintButtonSurface(dc, injectionButton, accentBrush)
+			}
+			win32.SetTextColor(dc, win32.Color(225, 229, 242))
+			win32.DrawText(dc, app.texts.Text("home.cleanLaunch"), &cleanButton, win32.DT_CENTER|win32.DT_VCENTER|win32.DT_SINGLELINE|win32.DT_END_ELLIPSIS)
+			injectionText := app.texts.Text("home.injectionLaunch")
+			if app.launchBusy() {
+				injectionText = app.texts.Text("injection.status.launchBusy")
+			}
+			win32.DrawText(dc, injectionText, &injectionButton, win32.DT_CENTER|win32.DT_VCENTER|win32.DT_SINGLELINE|win32.DT_END_ELLIPSIS)
+		}
 	}
 
 	win32.SetTextColor(dc, win32.Color(126, 136, 160))
@@ -1378,7 +1402,9 @@ func (app *application) paint(hwnd win32.HWND) {
 	}
 	resources := app.lastSnap.Resources
 	statusText := fmt.Sprintf("v%s  |  DPI %d  |  CPU %s  |  Goroutines %d  |  Threads %d  |  Handles %d  |  USER %d  |  GDI %d", app.build.Version, app.dpi, cpu, runtime.NumGoroutine(), resources.Threads, resources.Handles, resources.USER, resources.GDI)
-	if app.selected == 8 || app.selected == 9 {
+	if app.selected == 0 && app.injectionStatus != "" {
+		statusText = app.injectionStatus
+	} else if app.selected == 8 || app.selected == 9 {
 		statusText = app.pluginStatus
 	}
 	win32.DrawText(dc, statusText, &statusRect, win32.DT_LEFT|win32.DT_VCENTER|win32.DT_SINGLELINE|win32.DT_END_ELLIPSIS)
@@ -2116,6 +2142,10 @@ func (app *application) startInjectionAudit() {
 }
 
 func (app *application) startInjectionLaunch() {
+	if app.launchBusy() {
+		app.injectionStatus = app.texts.Text("injection.status.launchBusy")
+		return
+	}
 	if app.gameState.Candidate == nil || app.launchEngine == nil {
 		app.injectionStatus = app.texts.Text("injection.status.launchNeedGame")
 		return
@@ -2134,7 +2164,7 @@ func (app *application) startInjectionLaunch() {
 		available[item.Manifest.ID] = true
 	}
 	moduleIDs := plugins.EnabledInOrder(app.pluginState, available)
-	if len(moduleIDs) > 0 && app.settings.Plugins.SafeMode {
+	if injectionBlockedBySafeMode(app.settings.Plugins.SafeMode, moduleIDs, settings.ModuleID) {
 		app.injectionStatus = app.texts.Text("injection.status.safeModeBlocked")
 		return
 	}
@@ -2157,6 +2187,50 @@ func (app *application) startInjectionLaunch() {
 		}
 		app.publishInjection(update)
 	})
+}
+
+func injectionBlockedBySafeMode(safeMode bool, moduleIDs []string, fallbackModuleID string) bool {
+	return safeMode && (len(moduleIDs) > 0 || strings.TrimSpace(fallbackModuleID) != "")
+}
+
+func (app *application) launchBusy() bool {
+	return app.injectionLaunching || app.launchSnap.State == launch.StateStarting || app.launchSnap.State == launch.StateRunning
+}
+
+func (app *application) startCleanLaunch() {
+	if app.launchBusy() {
+		app.injectionStatus = app.texts.Text("injection.status.launchBusy")
+		return
+	}
+	if app.gameState.Candidate == nil || app.launchEngine == nil {
+		app.injectionStatus = app.texts.Text("injection.status.cleanNeedGame")
+		return
+	}
+	if !app.syncLaunchConfig() {
+		app.injectionStatus = fmt.Sprintf(app.texts.Text("injection.status.launchConfigFailed"), app.launchUIError)
+		return
+	}
+	if err := app.launchEngine.Launch(*app.gameState.Candidate, app.settings.Launch); err != nil {
+		app.injectionStatus = fmt.Sprintf(app.texts.Text("injection.status.cleanFailed"), err)
+		return
+	}
+	app.injectionStatus = app.texts.Text("injection.status.cleanStarted")
+}
+
+func (app *application) homeClick(x, y int) {
+	cleanButton, injectionButton := homeLaunchRects(win32.GetClientRect(app.hwnd), app.dpi)
+	if !validButtonRect(cleanButton) || !validButtonRect(injectionButton) {
+		return
+	}
+	switch {
+	case pointInButton(cleanButton, int32(x), int32(y)):
+		app.startCleanLaunch()
+	case pointInButton(injectionButton, int32(x), int32(y)):
+		app.startInjectionLaunch()
+	default:
+		return
+	}
+	win32.Invalidate(app.hwnd)
 }
 
 func (app *application) injectionClick(x, y int) {
@@ -2197,16 +2271,7 @@ func (app *application) injectionClick(x, y int) {
 	case y >= sy(390) && y < sy(434):
 		app.startInjectionLaunch()
 	case y >= sy(440) && y < sy(484):
-		app.injectionLaunching = false
-		if app.gameState.Candidate == nil || app.launchEngine == nil {
-			app.injectionStatus = app.texts.Text("injection.status.cleanNeedGame")
-		} else if !app.syncLaunchConfig() {
-			app.injectionStatus = fmt.Sprintf(app.texts.Text("injection.status.launchConfigFailed"), app.launchUIError)
-		} else if err := app.launchEngine.Launch(*app.gameState.Candidate, app.settings.Launch); err != nil {
-			app.injectionStatus = fmt.Sprintf(app.texts.Text("injection.status.cleanFailed"), err)
-		} else {
-			app.injectionStatus = app.texts.Text("injection.status.cleanStarted")
-		}
+		app.startCleanLaunch()
 	case y >= sy(490) && y < sy(534):
 		presets := [][2]int{{15000, 5000}, {30000, 10000}, {60000, 20000}}
 		index := 0
@@ -2282,8 +2347,19 @@ func (app *application) paintInjection(dc win32.HDC, client win32.Rect, left int
 	if settings.ElevatedHelper {
 		helperMode = app.texts.Text("injection.helper.admin")
 	}
-	draw(fmt.Sprintf(app.texts.Text("injection.launch"), helperMode), row(390, 434, warningBrush), win32.Color(255, 205, 150))
-	draw(app.texts.Text("injection.cleanLaunch"), row(440, 484, accentBrush), win32.Color(235, 238, 248))
+	launchRect := win32.Rect{Left: left, Top: win32.Scale(390, app.dpi), Right: right, Bottom: win32.Scale(434, app.dpi)}
+	cleanRect := win32.Rect{Left: left, Top: win32.Scale(440, app.dpi), Right: right, Bottom: win32.Scale(484, app.dpi)}
+	if app.launchBusy() {
+		app.paintStaticSurface(dc, launchRect, cardBrush)
+		app.paintStaticSurface(dc, cleanRect, cardBrush)
+		draw(app.texts.Text("injection.status.launchBusy"), launchRect, win32.Color(145, 154, 180))
+		draw(app.texts.Text("injection.status.launchBusy"), cleanRect, win32.Color(145, 154, 180))
+	} else {
+		app.paintButtonSurface(dc, launchRect, warningBrush)
+		app.paintButtonSurface(dc, cleanRect, accentBrush)
+		draw(fmt.Sprintf(app.texts.Text("injection.launch"), helperMode), launchRect, win32.Color(255, 205, 150))
+		draw(app.texts.Text("injection.cleanLaunch"), cleanRect, win32.Color(235, 238, 248))
+	}
 	draw(fmt.Sprintf(app.texts.Text("injection.timeout"), float64(settings.HelperTimeoutMS)/1000, float64(settings.RemoteTimeoutMS)/1000), row(490, 534, buttonBrush), win32.Color(190, 197, 216))
 	warning := app.texts.Text("injection.warning.none")
 	if len(app.injectionWarnings) > 0 {
@@ -2307,6 +2383,20 @@ func (app *application) commitPluginSettings(next plugins.Config) bool {
 	}
 	app.settings = settings
 	return true
+}
+
+func (app *application) togglePluginSafeMode() {
+	next := app.settings.Plugins
+	next.SafeMode = !next.SafeMode
+	if !app.commitPluginSettings(next) {
+		return
+	}
+	if next.SafeMode {
+		app.pluginStatus = app.texts.Text("plugin.status.safeOn")
+	} else {
+		app.pluginStatus = app.texts.Text("plugin.status.safeOff")
+	}
+	app.injectionStatus = app.pluginStatus
 }
 
 func (app *application) refreshPlugins() bool {
@@ -2360,15 +2450,7 @@ func (app *application) pluginClick(x, y int) {
 		if !pointInButton(safe, int32(x), int32(y)) {
 			break
 		}
-		next := app.settings.Plugins
-		next.SafeMode = !next.SafeMode
-		if app.commitPluginSettings(next) {
-			if next.SafeMode {
-				app.pluginStatus = app.texts.Text("plugin.status.safeOn")
-			} else {
-				app.pluginStatus = app.texts.Text("plugin.status.safeOff")
-			}
-		}
+		app.togglePluginSafeMode()
 	case y >= sy(220) && y < sy(264):
 		client := win32.GetClientRect(app.hwnd)
 		row := win32.Rect{Left: win32.Scale(252, app.dpi), Top: app.pluginContentY(220), Right: client.Right - win32.Scale(42, app.dpi), Bottom: app.pluginContentY(264)}
@@ -2462,11 +2544,18 @@ func (app *application) fufuConfigClick(x, y int) {
 			}
 		}
 	case y >= sy(540) && y < sy(584):
-		if !app.flushFufuEdits() {
-			break
+		client := win32.GetClientRect(app.hwnd)
+		footer := win32.Rect{Left: win32.Scale(252, app.dpi), Top: app.pluginContentY(540), Right: client.Right - win32.Scale(42, app.dpi), Bottom: app.pluginContentY(584)}
+		switch buttonCellAt(footer, int32(x), int32(y), 2, app.dpi) {
+		case 0:
+			if !app.flushFufuEdits() {
+				break
+			}
+			app.pluginTargetMode = false
+			app.updateLaunchControlVisibility()
+		case 1:
+			app.togglePluginSafeMode()
 		}
-		app.pluginTargetMode = false
-		app.updateLaunchControlVisibility()
 	}
 }
 
@@ -3021,11 +3110,6 @@ func (app *application) paintFufuConfig(dc win32.HDC, client win32.Rect, left in
 	warningBrush := win32.CreateSolidBrush(win32.Color(74, 48, 35))
 	defer win32.DeleteObject(uintptr(warningBrush))
 	right := client.Right - win32.Scale(42, app.dpi)
-	row := func(top, bottom int32, brush win32.HBRUSH) win32.Rect {
-		rect := win32.Rect{Left: left, Top: app.pluginContentY(top), Right: right, Bottom: app.pluginContentY(bottom)}
-		app.paintButtonSurface(dc, rect, brush)
-		return rect
-	}
 	draw := func(value string, rect win32.Rect, color uint32) {
 		win32.SetTextColor(dc, color)
 		rect.Left += win32.Scale(18, app.dpi)
@@ -3071,9 +3155,17 @@ func (app *application) paintFufuConfig(dc win32.HDC, client win32.Rect, left in
 			draw(onOffText(app.texts.Language(), on), valueRect, win32.Color(235, 238, 248))
 		}
 	}
-	footer := row(540, 584, warningBrush)
+	footer := win32.Rect{Left: left, Top: app.pluginContentY(540), Right: right, Bottom: app.pluginContentY(584)}
+	genericButton, safeButton := splitButtonRect(footer, 0, 2, app.dpi), splitButtonRect(footer, 1, 2, app.dpi)
+	app.paintButtonSurface(dc, genericButton, buttonBrush)
+	safeBrush := accentBrush
+	if app.settings.Plugins.SafeMode {
+		safeBrush = warningBrush
+	}
+	app.paintButtonSurface(dc, safeButton, safeBrush)
 	footerText := fmt.Sprintf(app.texts.Text("fufu.setting.scroll"), min(len(app.fufuTarget.Settings), app.fufuScroll+1), min(len(app.fufuTarget.Settings), app.fufuScroll+fufuVisibleRows), len(app.fufuTarget.Settings))
-	draw(app.texts.Text("fufu.target.openGeneric")+"  |  "+footerText, footer, win32.Color(190, 197, 216))
+	draw(app.texts.Text("fufu.target.openGeneric")+"  |  "+footerText, genericButton, win32.Color(190, 197, 216))
+	draw(fmt.Sprintf(app.texts.Text("plugin.safe.compact"), onOffText(app.texts.Language(), app.settings.Plugins.SafeMode)), safeButton, win32.Color(255, 205, 150))
 }
 
 func (app *application) paintPluginStore(dc win32.HDC, client win32.Rect, left int32) {

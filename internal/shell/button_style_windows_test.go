@@ -43,3 +43,22 @@ func TestPluginHeaderGapIsNotInteractive(t *testing.T) {
 		t.Fatalf("header gap unexpectedly belongs to a button: safe=%+v target=%+v", safe, target)
 	}
 }
+
+func TestHomeLaunchButtonsStayInsideContentAndKeepGap(t *testing.T) {
+	client := win32.Rect{Right: 1100, Bottom: 720}
+	clean, inject := homeLaunchRects(client, 96)
+	if clean.Left < 252 || inject.Right != client.Right-42 || clean.Bottom != client.Bottom-58 {
+		t.Fatalf("unexpected home launch layout: clean=%+v inject=%+v", clean, inject)
+	}
+	if got := buttonIndexAt([]win32.Rect{clean, inject}, clean.Right, clean.Top+1); got != -1 {
+		t.Fatalf("home launch gap resolved to button %d", got)
+	}
+	clean, inject = homeLaunchRects(win32.Rect{Right: 700, Bottom: 420}, 96)
+	if validButtonRect(clean) || validButtonRect(inject) {
+		t.Fatalf("home launch buttons should hide when vertical space is insufficient: clean=%+v inject=%+v", clean, inject)
+	}
+	clean, inject = homeLaunchRects(win32.Rect{Right: 500, Bottom: 720}, 96)
+	if validButtonRect(clean) || validButtonRect(inject) {
+		t.Fatalf("home launch buttons should hide when horizontal space is insufficient: clean=%+v inject=%+v", clean, inject)
+	}
+}

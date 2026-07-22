@@ -120,6 +120,22 @@ func pluginHeaderRects(left, right, top, bottom int32, dpi uint32) (win32.Rect, 
 		win32.Rect{Left: boundary + gap, Top: top, Right: right, Bottom: bottom}
 }
 
+func homeLaunchRects(client win32.Rect, dpi uint32) (win32.Rect, win32.Rect) {
+	right := client.Right - win32.Scale(42, dpi)
+	bottom := client.Bottom - win32.Scale(58, dpi)
+	top := bottom - win32.Scale(48, dpi)
+	contentLeft := win32.Scale(252, dpi)
+	if top < win32.Scale(354, dpi) || right-contentLeft < win32.Scale(260, dpi) {
+		return win32.Rect{}, win32.Rect{}
+	}
+	row := win32.Rect{Left: max(contentLeft, right-win32.Scale(400, dpi)), Top: top, Right: right, Bottom: bottom}
+	return splitButtonRect(row, 0, 2, dpi), splitButtonRect(row, 1, 2, dpi)
+}
+
+func validButtonRect(rect win32.Rect) bool {
+	return rect.Right > rect.Left && rect.Bottom > rect.Top
+}
+
 func (app *application) paintNavigationSurface(dc win32.HDC, rect win32.Rect, selected bool) {
 	hovered := app.registerButtonRect(rect)
 	if !selected && !hovered {
