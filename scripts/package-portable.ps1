@@ -11,7 +11,7 @@ $ProjectRoot = Split-Path -Parent $PSScriptRoot
 . (Join-Path $PSScriptRoot 'environment.ps1')
 if (-not $Version) { $Version = (Get-Content -LiteralPath (Join-Path $ProjectRoot 'VERSION') -Raw -Encoding UTF8).Trim() }
 if (-not $DistDirectory) { $DistDirectory = Join-Path $ProjectRoot 'dist' }
-if (-not $Output) { $Output = Join-Path $ProjectRoot "artifacts\release\GenshinTools-$Version-windows-amd64-candidate.zip" }
+if (-not $Output) { $Output = Join-Path $ProjectRoot "artifacts\release\GenshinTools-$Version-windows-amd64-portable.zip" }
 
 $EnvironmentNames = @('GOCACHE', 'GOTMPDIR')
 $PreviousEnvironment = Save-ProcessEnvironment -Names $EnvironmentNames
@@ -22,7 +22,7 @@ New-Item -ItemType Directory -Force -Path $env:GOCACHE, $env:GOTMPDIR | Out-Null
 Push-Location $ProjectRoot
 try {
     & go run ./tools/release-package --dist $DistDirectory --output $Output --version $Version
-    if ($LASTEXITCODE -ne 0) { throw "release candidate packaging failed with code $LASTEXITCODE" }
+    if ($LASTEXITCODE -ne 0) { throw "portable release packaging failed with code $LASTEXITCODE" }
 } finally {
     Pop-Location
     Restore-ProcessEnvironment -Snapshot $PreviousEnvironment -Names $EnvironmentNames

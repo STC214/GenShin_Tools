@@ -8,7 +8,7 @@ import (
 	"testing"
 )
 
-func TestPackageReleaseCreatesVerifiedDeterministicCandidate(t *testing.T) {
+func TestPackageReleaseCreatesVerifiedDeterministicPortableZIP(t *testing.T) {
 	root := t.TempDir()
 	dist := filepath.Join(root, "dist")
 	if err := os.MkdirAll(filepath.Join(dist, "LICENSES"), 0o755); err != nil {
@@ -20,7 +20,7 @@ func TestPackageReleaseCreatesVerifiedDeterministicCandidate(t *testing.T) {
 		"GenshinTools-updater.exe":  "updater",
 		"build-info.json":           `{"version":"1.2.3","target":"windows/amd64"}`,
 		"LICENSE":                   "MIT",
-		"LICENSE_POLICY.md":         "candidate only",
+		"LICENSE_POLICY.md":         "portable release policy",
 		"THIRD_PARTY_NOTICES.md":    "notices",
 		"LICENSES/dependency.txt":   "license",
 	}
@@ -30,7 +30,7 @@ func TestPackageReleaseCreatesVerifiedDeterministicCandidate(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	output := filepath.Join(root, "candidate.zip")
+	output := filepath.Join(root, "portable.zip")
 	options := options{dist: dist, output: output, version: "1.2.3"}
 	if err := packageRelease(options); err != nil {
 		t.Fatal(err)
@@ -47,7 +47,7 @@ func TestPackageReleaseCreatesVerifiedDeterministicCandidate(t *testing.T) {
 		t.Fatal(err)
 	}
 	if string(first) != string(second) {
-		t.Fatal("candidate ZIP is not deterministic")
+		t.Fatal("portable ZIP is not deterministic")
 	}
 	archive, err := zip.OpenReader(output)
 	if err != nil {
@@ -58,7 +58,7 @@ func TestPackageReleaseCreatesVerifiedDeterministicCandidate(t *testing.T) {
 		t.Fatalf("unexpected archive entries: %d", len(archive.File))
 	}
 	checksum, err := os.ReadFile(output + ".sha256")
-	if err != nil || !strings.HasSuffix(string(checksum), "  candidate.zip\n") {
+	if err != nil || !strings.HasSuffix(string(checksum), "  portable.zip\n") {
 		t.Fatalf("invalid checksum sidecar: %q err=%v", checksum, err)
 	}
 }
@@ -68,7 +68,7 @@ func TestPackageReleaseRejectsMissingLicenseDirectory(t *testing.T) {
 	if err := os.MkdirAll(root, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	err := packageRelease(options{dist: root, output: filepath.Join(root, "candidate.zip"), version: "1.2.3"})
+	err := packageRelease(options{dist: root, output: filepath.Join(root, "portable.zip"), version: "1.2.3"})
 	if err == nil {
 		t.Fatal("missing license directory was accepted")
 	}

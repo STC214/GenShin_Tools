@@ -19,7 +19,7 @@ Run the complete source checks:
 
 The test script runs all normal vet analyzers except `unsafeptr`. Win32 callbacks must reconstruct SDK-owned structures from `LPARAM`; those conversions are isolated to the shell callback boundary and are covered by the Windows integration tests.
 
-Build console Debug, Windows GUI Release and the isolated console injection helper:
+Build console Debug plus Windows GUI Release, injection helper and update helper:
 
 ```powershell
 ./scripts/build.ps1
@@ -31,10 +31,10 @@ Verify the real emitted PE subsystem, icon, VERSIONINFO and portable layout:
 ./scripts/verify-artifact.ps1
 ```
 
-Generate and reopen a deterministic S12-compatible release candidate ZIP with a SHA-256 sidecar:
+Generate and reopen a deterministic S12-compatible portable ZIP with a SHA-256 sidecar:
 
 ```powershell
-./scripts/package-candidate.ps1
+./scripts/package-portable.ps1
 ```
 
 Run the complete short S13 automated release matrix:

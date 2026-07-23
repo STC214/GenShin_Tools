@@ -214,6 +214,7 @@ END
         "-X genshintools/internal/buildinfo.Commit=$Commit"
         "-X genshintools/internal/buildinfo.BuildTimeUTC=$BuildTimeUtc"
         "-X genshintools/internal/buildinfo.Configuration=helper"
+        '-H=windowsgui'
         '-s'
         '-w'
     )
@@ -226,6 +227,7 @@ END
         "-X genshintools/internal/buildinfo.Commit=$Commit"
         "-X genshintools/internal/buildinfo.BuildTimeUTC=$BuildTimeUtc"
         "-X genshintools/internal/buildinfo.Configuration=updater"
+        '-H=windowsgui'
         '-s'
         '-w'
     )

@@ -102,7 +102,7 @@ try {
     if (-not $SkipOnlineProvider) {
         Invoke-S13Step 'read-only Sophon provider schema audit' { & .\scripts\test-s06-provider.ps1 }
     }
-    Invoke-S13Step 'deterministic candidate ZIP, reopen and SHA-256' { & .\scripts\package-candidate.ps1 }
+    Invoke-S13Step 'deterministic portable ZIP, reopen and SHA-256' { & .\scripts\package-portable.ps1 }
     Invoke-S13Step 'child script process-environment isolation' { Assert-S13EnvironmentRestored }
     Write-S13Report -Status 'automated-passed'
     Write-Host "[S13] AUTOMATED PASS report=$ReportPath"

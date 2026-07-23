@@ -44,7 +44,7 @@ type sourceFile struct {
 func main() {
 	var options options
 	flag.StringVar(&options.dist, "dist", "dist", "verified build output directory")
-	flag.StringVar(&options.output, "output", "", "candidate ZIP output path")
+	flag.StringVar(&options.output, "output", "", "portable ZIP output path")
 	flag.StringVar(&options.version, "version", "", "product SemVer")
 	flag.Parse()
 	if err := packageRelease(options); err != nil {
@@ -91,11 +91,11 @@ func packageRelease(options options) error {
 	staged, err := selfupdate.StagePackage(context.Background(), output, verificationRoot, options.version, artifact)
 	if err != nil {
 		_ = os.Remove(output)
-		return fmt.Errorf("reopen candidate ZIP: %w", err)
+		return fmt.Errorf("reopen portable ZIP: %w", err)
 	}
 	if len(staged.Manifest.Files) != len(manifest.Files) {
 		_ = os.Remove(output)
-		return errors.New("reopened candidate ZIP file count differs")
+		return errors.New("reopened portable ZIP file count differs")
 	}
 	checksum := []byte(packageHash + "  " + filepath.Base(output) + "\n")
 	if err := writeAtomic(output+".sha256", checksum, 0o644); err != nil {
