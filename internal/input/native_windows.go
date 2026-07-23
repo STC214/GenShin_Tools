@@ -44,7 +44,8 @@ const (
 	mouseeventfRightDown = 0x0008
 	mouseeventfRightUp   = 0x0010
 
-	nativeQueueSize = 256
+	nativeQueueSize      = 256
+	mouseTargetStableFor = 300 * time.Millisecond
 )
 
 // injectionMarker is deliberately non-zero, uncommon, and limited to 32 bits.
@@ -108,6 +109,7 @@ type Native struct {
 	overflow       atomic.Bool
 	safetyDisabled atomic.Bool
 	runTarget      atomic.Uintptr
+	armTarget      atomic.Uintptr
 
 	keyboardCallback uintptr
 	mouseCallback    uintptr
@@ -197,9 +199,33 @@ func (n *Native) runHookThread(ready chan<- error) {
 	n.hookThread(ready)
 }
 
-func (n *Native) Configure(config Config) error { return n.engine.Configure(config) }
-func (n *Native) Enable(enabled bool)           { n.engine.Enable(enabled) }
-func (n *Native) Snapshot() Snapshot            { return n.engine.Snapshot() }
+func (n *Native) Configure(config Config) error {
+	before := n.engine.Snapshot().State
+	err := n.engine.Configure(config)
+	n.updateActivationTargets(before, n.engine.Snapshot())
+	return err
+}
+func (n *Native) Enable(enabled bool) {
+	before := n.engine.Snapshot().State
+	n.engine.Enable(enabled)
+	n.updateActivationTargets(before, n.engine.Snapshot())
+}
+func (n *Native) Snapshot() Snapshot { return n.engine.Snapshot() }
+
+func (n *Native) updateActivationTargets(before State, snapshot Snapshot) {
+	if before != StateRunning && snapshot.State == StateRunning {
+		n.armTarget.Store(0)
+		n.runTarget.Store(uintptr(n.foreground()))
+	} else if snapshot.State == StateArmed && snapshot.Config.Enabled && snapshot.Config.Mode != ModeKeyboard {
+		n.runTarget.Store(0)
+		if before != StateArmed || n.armTarget.Load() == 0 {
+			n.armTarget.Store(uintptr(n.foreground()))
+		}
+	} else if snapshot.State != StateRunning {
+		n.runTarget.Store(0)
+		n.armTarget.Store(0)
+	}
+}
 
 func (n *Native) ForegroundIntegrity() IntegrityReport {
 	return checkForegroundIntegrity()
@@ -247,15 +273,46 @@ func (n *Native) safetyMonitor() {
 	defer ticker.Stop()
 	var target windows.HWND
 	var runningSince time.Time
+	var candidate windows.HWND
+	var candidateSince time.Time
 	for {
 		select {
 		case <-n.monitorStop:
 			return
 		case <-ticker.C:
 			snapshot := n.engine.Snapshot()
+			if snapshot.State == StateArmed && snapshot.Config.Enabled && snapshot.Config.Mode != ModeKeyboard {
+				target = 0
+				runningSince = time.Time{}
+				foreground := n.foreground()
+				origin := windows.HWND(n.armTarget.Load())
+				if origin == 0 {
+					n.armTarget.Store(uintptr(foreground))
+					candidate = 0
+					candidateSince = time.Time{}
+				} else if foreground == 0 || foreground == origin || currentProcessWindow(foreground) {
+					candidate = 0
+					candidateSince = time.Time{}
+				} else if foreground != candidate {
+					candidate = foreground
+					candidateSince = time.Now()
+				} else if time.Since(candidateSince) >= mouseTargetStableFor {
+					n.runTarget.Store(uintptr(foreground))
+					n.armTarget.Store(0)
+					if !n.engine.Start() {
+						n.runTarget.Store(0)
+					}
+					candidate = 0
+					candidateSince = time.Time{}
+				}
+				continue
+			}
+			candidate = 0
+			candidateSince = time.Time{}
 			if snapshot.State != StateRunning {
 				target = 0
 				n.runTarget.Store(0)
+				n.armTarget.Store(0)
 				runningSince = time.Time{}
 				continue
 			}
@@ -277,6 +334,17 @@ func (n *Native) safetyMonitor() {
 			}
 		}
 	}
+}
+
+func currentProcessWindow(window windows.HWND) bool {
+	if window == 0 {
+		return false
+	}
+	var processID uint32
+	if _, err := windows.GetWindowThreadProcessId(window, &processID); err != nil {
+		return false
+	}
+	return processID == windows.GetCurrentProcessId()
 }
 
 func (n *Native) hookThread(ready chan<- error) {
@@ -358,12 +426,7 @@ func (n *Native) drain() {
 		}
 		before := n.engine.Snapshot().State
 		n.engine.Handle(event)
-		after := n.engine.Snapshot().State
-		if before != StateRunning && after == StateRunning {
-			n.runTarget.Store(uintptr(n.foreground()))
-		} else if after != StateRunning {
-			n.runTarget.Store(0)
-		}
+		n.updateActivationTargets(before, n.engine.Snapshot())
 	}
 	if n.overflow.Swap(false) {
 		n.engine.Fail(errors.New("physical input event queue overflowed; input enhancement disabled"))

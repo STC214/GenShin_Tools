@@ -82,3 +82,35 @@ func TestCommitOverlaySettingsRestoresMemoryOnSaveFailure(t *testing.T) {
 		t.Fatal("failed overlay save leaked into memory")
 	}
 }
+
+func TestAdjustInputIntervalReachesOneMillisecond(t *testing.T) {
+	interval := 50 * time.Millisecond
+	for range 5 {
+		interval = adjustInputInterval(interval, false)
+	}
+	if interval != 9*time.Millisecond {
+		t.Fatalf("decremented interval = %s, want 9ms", interval)
+	}
+	for range 20 {
+		interval = adjustInputInterval(interval, false)
+	}
+	if interval != time.Millisecond {
+		t.Fatalf("minimum interval = %s, want 1ms", interval)
+	}
+	if got := adjustInputInterval(interval, true); got != 2*time.Millisecond {
+		t.Fatalf("increment from minimum = %s, want 2ms", got)
+	}
+	if got := adjustInputInterval(5*time.Second, true); got != 5*time.Second {
+		t.Fatalf("maximum interval = %s, want 5s", got)
+	}
+}
+
+func TestInputIntervalSymbolsUseTheExpectedDirection(t *testing.T) {
+	const left = 252
+	if inputIntervalIncreaseAt(left+24, left, 96) {
+		t.Fatal("minus symbol was classified as increase")
+	}
+	if !inputIntervalIncreaseAt(left+180, left, 96) {
+		t.Fatal("plus symbol was classified as decrease")
+	}
+}

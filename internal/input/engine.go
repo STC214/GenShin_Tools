@@ -56,11 +56,37 @@ func (e *Engine) Enable(enabled bool) {
 	e.mu.Lock()
 	if !e.closed && e.state != StateFault {
 		e.config.Enabled = true
-		e.state = StateArmed
+		if e.state != StateRunning {
+			e.state = StateArmed
+		}
 	}
 	snapshot := e.snapshotLocked()
 	e.mu.Unlock()
 	e.notify(snapshot)
+}
+
+// Start begins a mouse auto-click session after the native boundary has
+// observed the user switch away from the launcher to the intended target.
+func (e *Engine) Start() bool {
+	e.mu.Lock()
+	if e.closed || !e.config.Enabled || e.state != StateArmed || e.config.Mode == ModeKeyboard {
+		e.mu.Unlock()
+		return false
+	}
+	ctx, generation, config := e.startLocked()
+	snapshot := e.snapshotLocked()
+	e.mu.Unlock()
+	e.notify(snapshot)
+	go e.outputLoop(ctx, generation, config)
+	return true
+}
+
+func (e *Engine) startLocked() (context.Context, uint64, Config) {
+	e.gen++
+	ctx, cancel := context.WithCancel(context.Background())
+	e.cancel = cancel
+	e.state = StateRunning
+	return ctx, e.gen, e.config
 }
 
 func (e *Engine) Handle(event PhysicalEvent) {
@@ -75,19 +101,13 @@ func (e *Engine) Handle(event PhysicalEvent) {
 		e.stop(true)
 		return
 	}
-	trigger := (config.Mode == ModeKeyboard && event.Kind == EventKey && event.Code == config.TriggerKey) ||
-		(config.Mode == ModeMouseLeft && event.Kind == EventMouseLeft) ||
-		(config.Mode == ModeMouseRight && event.Kind == EventMouseRight)
+	trigger := config.Mode == ModeKeyboard && event.Kind == EventKey && event.Code == config.OutputKey
 	if !trigger {
 		e.mu.Unlock()
 		return
 	}
 	if event.Down && e.state == StateArmed {
-		e.gen++
-		generation := e.gen
-		ctx, cancel := context.WithCancel(context.Background())
-		e.cancel = cancel
-		e.state = StateRunning
+		ctx, generation, config := e.startLocked()
 		snapshot := e.snapshotLocked()
 		e.mu.Unlock()
 		e.notify(snapshot)

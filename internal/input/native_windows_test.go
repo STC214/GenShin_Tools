@@ -145,7 +145,7 @@ func TestForegroundChangeStopsRunningEngine(t *testing.T) {
 	if err := engine.Configure(config); err != nil {
 		t.Fatal(err)
 	}
-	engine.Handle(PhysicalEvent{Kind: EventKey, Code: config.TriggerKey, Down: true})
+	engine.Handle(PhysicalEvent{Kind: EventKey, Code: config.OutputKey, Down: true})
 	deadline := time.Now().Add(time.Second)
 	for engine.Snapshot().State != StateRunning && time.Now().Before(deadline) {
 		time.Sleep(time.Millisecond)
@@ -160,4 +160,70 @@ func TestForegroundChangeStopsRunningEngine(t *testing.T) {
 	if snapshot := engine.Snapshot(); snapshot.State != StateDisabled || snapshot.Config.Enabled {
 		t.Fatalf("snapshot after foreground change = %+v", snapshot)
 	}
+}
+
+func TestMouseAutoClickStartsAfterForegroundLeavesLauncher(t *testing.T) {
+	injector := &fakeInjector{}
+	engine, err := NewEngine(injector, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var foreground atomic.Uintptr
+	foreground.Store(100)
+	n := &Native{
+		engine:      engine,
+		monitorStop: make(chan struct{}),
+		monitorDone: make(chan struct{}),
+		foreground:  func() windows.HWND { return windows.HWND(foreground.Load()) },
+	}
+	go n.safetyMonitor()
+	defer func() {
+		close(n.monitorStop)
+		<-n.monitorDone
+		engine.Close()
+	}()
+	config := DefaultConfig()
+	config.Mode = ModeMouseLeft
+	config.Enabled = true
+	config.Interval = 5 * time.Millisecond
+	if err := n.Configure(config); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(150 * time.Millisecond)
+	if snapshot := engine.Snapshot(); snapshot.State != StateArmed {
+		t.Fatalf("mouse mode started over launcher: %+v", snapshot)
+	}
+	if emits, _ := injector.counts(); emits != 0 {
+		t.Fatalf("mouse mode emitted over launcher: %d", emits)
+	}
+	// A real click or Alt+Tab produces physical events while the foreground is
+	// changing. Those events must not replace the launcher origin.
+	foreground.Store(200)
+	n.updateActivationTargets(StateArmed, engine.Snapshot())
+	if origin := n.armTarget.Load(); origin != 100 {
+		t.Fatalf("physical switch event replaced arm origin with %d", origin)
+	}
+	// A transient foreground must not become the click target.
+	foreground.Store(300)
+	time.Sleep(mouseTargetStableFor / 2)
+	foreground.Store(100)
+	time.Sleep(150 * time.Millisecond)
+	if snapshot := engine.Snapshot(); snapshot.State != StateArmed {
+		t.Fatalf("transient foreground started mouse mode: %+v", snapshot)
+	}
+	if emits, _ := injector.counts(); emits != 0 {
+		t.Fatalf("transient foreground produced %d emissions", emits)
+	}
+	foreground.Store(200)
+	deadline := time.Now().Add(time.Second)
+	for engine.Snapshot().State != StateRunning && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if snapshot := engine.Snapshot(); snapshot.State != StateRunning {
+		t.Fatalf("mouse mode did not start over target: %+v", snapshot)
+	}
+	if target := n.runTarget.Load(); target != 200 {
+		t.Fatalf("mouse run target = %d, want 200", target)
+	}
+	n.Enable(false)
 }

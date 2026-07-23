@@ -66,7 +66,7 @@ type Config struct {
 }
 
 func DefaultConfig() Config {
-	return Config{Mode: ModeKeyboard, TriggerKey: 0x77, OutputKey: 'F', StopKey: 0x7B, Interval: 50 * time.Millisecond, IntervalMS: 50}
+	return Config{Mode: ModeKeyboard, TriggerKey: 'F', OutputKey: 'F', StopKey: 0x7B, Interval: 50 * time.Millisecond, IntervalMS: 50}
 }
 
 func (c Config) Normalized() (Config, error) {
@@ -76,20 +76,23 @@ func (c Config) Normalized() (Config, error) {
 	if c.Interval == 0 {
 		c.Interval = time.Duration(c.IntervalMS) * time.Millisecond
 	}
-	if c.Interval < 10*time.Millisecond || c.Interval > 5*time.Second {
-		return Config{}, errors.New("interval must be between 10 and 5000 milliseconds")
+	if c.Interval < time.Millisecond || c.Interval > 5*time.Second {
+		return Config{}, errors.New("interval must be between 1 and 5000 milliseconds")
 	}
 	c.IntervalMS = int(c.Interval / time.Millisecond)
 	if c.StopKey == 0 {
 		return Config{}, errors.New("stop key is required")
 	}
 	if c.Mode == ModeKeyboard {
-		if c.TriggerKey == 0 || c.OutputKey == 0 {
-			return Config{}, errors.New("trigger and output keys are required")
+		if c.OutputKey == 0 {
+			return Config{}, errors.New("repeat key is required")
 		}
-		if c.StopKey == c.TriggerKey || c.StopKey == c.OutputKey {
-			return Config{}, errors.New("stop key must differ from trigger and output keys")
+		if c.StopKey == c.OutputKey {
+			return Config{}, errors.New("stop key must differ from the repeat key")
 		}
+		// TriggerKey is retained in the JSON schema for backward compatibility,
+		// but keyboard repeat now follows the key being repeated.
+		c.TriggerKey = c.OutputKey
 	}
 	return c, nil
 }

@@ -3630,19 +3630,12 @@ func (app *application) inputClick(x, y int) {
 		}
 	case y >= sy(276) && y < sy(316) && config.Mode == input.ModeKeyboard:
 		app.inputNative.Enable(false)
-		app.recording = 1
-	case y >= sy(326) && y < sy(366) && config.Mode == input.ModeKeyboard:
-		app.inputNative.Enable(false)
 		app.recording = 2
-	case y >= sy(376) && y < sy(416):
+	case y >= sy(326) && y < sy(366):
 		app.inputNative.Enable(false)
 		app.recording = 3
-	case y >= sy(426) && y < sy(466):
-		if x < left+int(win32.Scale(200, app.dpi)) {
-			config.Interval -= 10 * time.Millisecond
-		} else {
-			config.Interval += 10 * time.Millisecond
-		}
+	case y >= sy(376) && y < sy(416):
+		config.Interval = adjustInputInterval(config.Interval, inputIntervalIncreaseAt(x, left, app.dpi))
 		config.IntervalMS = int(config.Interval / time.Millisecond)
 		config.Enabled = false
 		if err := app.inputNative.Configure(config); err != nil {
@@ -3657,16 +3650,34 @@ func (app *application) inputClick(x, y int) {
 	win32.Invalidate(app.hwnd)
 }
 
+func adjustInputInterval(interval time.Duration, increase bool) time.Duration {
+	if increase {
+		if interval < 10*time.Millisecond {
+			interval += time.Millisecond
+		} else {
+			interval += 10 * time.Millisecond
+		}
+	} else if interval <= 10*time.Millisecond {
+		interval -= time.Millisecond
+	} else {
+		interval -= 10 * time.Millisecond
+	}
+	return min(max(interval, time.Millisecond), 5*time.Second)
+}
+
+func inputIntervalIncreaseAt(x, left int, dpi uint32) bool {
+	return x >= left+int(win32.Scale(110, dpi))
+}
+
 func (app *application) recordPhysical(event input.PhysicalEvent) {
 	if app.recording == 0 || !event.Down || event.Kind != input.EventKey || app.inputNative == nil {
 		return
 	}
 	config := app.inputNative.Snapshot().Config
 	switch app.recording {
-	case 1:
-		config.TriggerKey = event.Code
 	case 2:
 		config.OutputKey = event.Code
+		config.TriggerKey = event.Code
 	case 3:
 		config.StopKey = event.Code
 	}
@@ -3743,13 +3754,12 @@ func (app *application) paintInput(dc win32.HDC, client win32.Rect, left int32) 
 		draw(name, rect, win32.Color(225, 229, 242))
 	}
 	if config.Mode == input.ModeKeyboard {
-		draw(recordLabel(app.texts, "input.key.trigger", config.TriggerKey, app.recording == 1), row(276, 316, buttonBrush), win32.Color(225, 229, 242))
-		draw(recordLabel(app.texts, "input.key.output", config.OutputKey, app.recording == 2), row(326, 366, buttonBrush), win32.Color(225, 229, 242))
+		draw(recordLabel(app.texts, "input.key.output", config.OutputKey, app.recording == 2), row(276, 316, buttonBrush), win32.Color(225, 229, 242))
 	} else {
-		draw(app.texts.Text("input.mouseTrigger"), staticRow(276, 366, cardBrush), win32.Color(166, 174, 197))
+		draw(app.texts.Text("input.mouseTrigger"), staticRow(276, 316, cardBrush), win32.Color(166, 174, 197))
 	}
-	draw(recordLabel(app.texts, "input.key.stop", config.StopKey, app.recording == 3), row(376, 416, buttonBrush), win32.Color(225, 229, 242))
-	draw(fmt.Sprintf(app.texts.Text("input.interval"), config.IntervalMS), row(426, 466, buttonBrush), win32.Color(225, 229, 242))
+	draw(recordLabel(app.texts, "input.key.stop", config.StopKey, app.recording == 3), row(326, 366, buttonBrush), win32.Color(225, 229, 242))
+	draw(fmt.Sprintf(app.texts.Text("input.interval"), config.IntervalMS), row(376, 416, buttonBrush), win32.Color(225, 229, 242))
 	visibleError := snapshot.LastError
 	if visibleError == "" {
 		visibleError = app.inputUIError

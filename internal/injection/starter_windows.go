@@ -81,13 +81,10 @@ func (starter Starter) Start(request launch.Request) (launch.Process, error) {
 	defer cancel()
 	var output limitedOutput
 	var runErr error
-	if config.ElevatedHelper {
+	if shouldUseRunAs(config.ElevatedHelper, currentProcessElevated()) {
 		runErr = runElevatedHelper(ctx, starter.HelperPath, requestPath)
 	} else {
-		command := exec.CommandContext(ctx, starter.HelperPath, "--request", requestPath)
-		command.Dir = filepath.Dir(starter.HelperPath)
-		command.Stdout, command.Stderr = &output, &output
-		runErr = command.Run()
+		runErr = runDirectHelper(ctx, starter.HelperPath, requestPath, &output)
 	}
 	if ctx.Err() != nil {
 		return nil, fmt.Errorf("injection helper timeout/cancel: %w", ctx.Err())
@@ -108,6 +105,13 @@ func (starter Starter) Start(request launch.Request) (launch.Process, error) {
 		return nil, err
 	}
 	return &injectedProcess{pid: result.PID, handle: process}, nil
+}
+
+func runDirectHelper(ctx context.Context, helperPath, requestPath string, output io.Writer) error {
+	command := exec.CommandContext(ctx, helperPath, "--request", requestPath)
+	command.Dir = filepath.Dir(helperPath)
+	command.Stdout, command.Stderr = output, output
+	return command.Run()
 }
 
 type injectedProcess struct {

@@ -30,7 +30,7 @@ func (f *fakeInjector) counts() (int, int) {
 	return f.emits, f.releases
 }
 
-func TestKeyboardHoldStartsOnceAndStopsOnRelease(t *testing.T) {
+func TestKeyboardRepeatFollowsTheRepeatedKeyAndStopsOnRelease(t *testing.T) {
 	injector := &fakeInjector{}
 	engine, _ := NewEngine(injector, nil)
 	config := DefaultConfig()
@@ -39,10 +39,10 @@ func TestKeyboardHoldStartsOnceAndStopsOnRelease(t *testing.T) {
 	if err := engine.Configure(config); err != nil {
 		t.Fatal(err)
 	}
-	engine.Handle(PhysicalEvent{Kind: EventKey, Code: config.TriggerKey, Down: true})
-	engine.Handle(PhysicalEvent{Kind: EventKey, Code: config.TriggerKey, Down: true})
+	engine.Handle(PhysicalEvent{Kind: EventKey, Code: config.OutputKey, Down: true})
+	engine.Handle(PhysicalEvent{Kind: EventKey, Code: config.OutputKey, Down: true})
 	time.Sleep(35 * time.Millisecond)
-	engine.Handle(PhysicalEvent{Kind: EventKey, Code: config.TriggerKey, Down: false})
+	engine.Handle(PhysicalEvent{Kind: EventKey, Code: config.OutputKey, Down: false})
 	emits, releases := injector.counts()
 	if emits < 2 || releases == 0 {
 		t.Fatalf("emits=%d releases=%d", emits, releases)
@@ -58,6 +58,64 @@ func TestKeyboardHoldStartsOnceAndStopsOnRelease(t *testing.T) {
 	}
 }
 
+func TestMouseModeWaitsForConfirmedTargetBeforeStarting(t *testing.T) {
+	injector := &fakeInjector{}
+	engine, _ := NewEngine(injector, nil)
+	config := DefaultConfig()
+	config.Mode = ModeMouseLeft
+	config.Enabled = true
+	config.Interval = 5 * time.Millisecond
+	if err := engine.Configure(config); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(20 * time.Millisecond)
+	if emits, _ := injector.counts(); emits != 0 {
+		t.Fatalf("mouse mode emitted before target confirmation: %d", emits)
+	}
+	if snapshot := engine.Snapshot(); snapshot.State != StateArmed {
+		t.Fatalf("mouse mode state before target confirmation = %s, want armed", snapshot.State)
+	}
+	if !engine.Start() {
+		t.Fatal("mouse mode did not start after target confirmation")
+	}
+	deadline := time.Now().Add(250 * time.Millisecond)
+	for {
+		emits, _ := injector.counts()
+		if emits >= 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("mouse mode did not auto-start: snapshot=%+v emits=%d", engine.Snapshot(), emits)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	engine.Enable(false)
+}
+
+func TestOneMillisecondKeyboardCadence(t *testing.T) {
+	injector := &fakeInjector{}
+	engine, _ := NewEngine(injector, nil)
+	config := DefaultConfig()
+	config.Enabled = true
+	config.Interval = time.Millisecond
+	if err := engine.Configure(config); err != nil {
+		t.Fatal(err)
+	}
+	engine.Handle(PhysicalEvent{Kind: EventKey, Code: config.OutputKey, Down: true})
+	deadline := time.Now().Add(250 * time.Millisecond)
+	for {
+		emits, _ := injector.counts()
+		if emits >= 3 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("1ms cadence produced only %d emissions", emits)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	engine.Handle(PhysicalEvent{Kind: EventKey, Code: config.OutputKey, Down: false})
+}
+
 func TestStopKeyDisablesAndReleases(t *testing.T) {
 	injector := &fakeInjector{}
 	engine, _ := NewEngine(injector, nil)
@@ -67,7 +125,7 @@ func TestStopKeyDisablesAndReleases(t *testing.T) {
 	if err := engine.Configure(config); err != nil {
 		t.Fatal(err)
 	}
-	engine.Handle(PhysicalEvent{Kind: EventKey, Code: config.TriggerKey, Down: true})
+	engine.Handle(PhysicalEvent{Kind: EventKey, Code: config.OutputKey, Down: true})
 	engine.Handle(PhysicalEvent{Kind: EventKey, Code: config.StopKey, Down: true})
 	if snapshot := engine.Snapshot(); snapshot.State != StateDisabled || snapshot.Config.Enabled {
 		t.Fatalf("snapshot=%+v", snapshot)
@@ -82,7 +140,7 @@ func TestInjectionFailureEntersFault(t *testing.T) {
 	if err := engine.Configure(config); err != nil {
 		t.Fatal(err)
 	}
-	engine.Handle(PhysicalEvent{Kind: EventKey, Code: config.TriggerKey, Down: true})
+	engine.Handle(PhysicalEvent{Kind: EventKey, Code: config.OutputKey, Down: true})
 	deadline := time.Now().Add(time.Second)
 	for engine.Snapshot().State != StateFault && time.Now().Before(deadline) {
 		time.Sleep(time.Millisecond)
@@ -92,10 +150,15 @@ func TestInjectionFailureEntersFault(t *testing.T) {
 	}
 }
 
-func TestConfigRejectsConflictsAndUnsafeIntervals(t *testing.T) {
+func TestConfigAcceptsOneMillisecondAndRejectsUnsafeIntervals(t *testing.T) {
+	valid := Config{Mode: ModeKeyboard, OutputKey: 'B', StopKey: 'C', Interval: time.Millisecond}
+	if normalized, err := valid.Normalized(); err != nil || normalized.IntervalMS != 1 {
+		t.Fatalf("one millisecond interval rejected: normalized=%+v err=%v", normalized, err)
+	}
 	for _, config := range []Config{
-		{Mode: ModeKeyboard, TriggerKey: 'A', OutputKey: 'B', StopKey: 'A', Interval: 50 * time.Millisecond},
-		{Mode: ModeKeyboard, TriggerKey: 'A', OutputKey: 'B', StopKey: 'C', Interval: time.Millisecond},
+		{Mode: ModeKeyboard, OutputKey: 'B', StopKey: 'B', Interval: 50 * time.Millisecond},
+		{Mode: ModeKeyboard, OutputKey: 'B', StopKey: 'C', Interval: 500 * time.Microsecond},
+		{Mode: ModeKeyboard, OutputKey: 'B', StopKey: 'C', Interval: 5001 * time.Millisecond},
 	} {
 		if _, err := config.Normalized(); err == nil {
 			t.Fatalf("accepted %+v", config)
@@ -113,9 +176,9 @@ func TestRapidTriggerAndEnableDisableStress(t *testing.T) {
 		t.Fatal(err)
 	}
 	for i := 0; i < 1000; i++ {
-		engine.Handle(PhysicalEvent{Kind: EventKey, Code: config.TriggerKey, Down: true})
-		engine.Handle(PhysicalEvent{Kind: EventKey, Code: config.TriggerKey, Down: true})
-		engine.Handle(PhysicalEvent{Kind: EventKey, Code: config.TriggerKey, Down: false})
+		engine.Handle(PhysicalEvent{Kind: EventKey, Code: config.OutputKey, Down: true})
+		engine.Handle(PhysicalEvent{Kind: EventKey, Code: config.OutputKey, Down: true})
+		engine.Handle(PhysicalEvent{Kind: EventKey, Code: config.OutputKey, Down: false})
 	}
 	for i := 0; i < 200; i++ {
 		engine.Enable(true)

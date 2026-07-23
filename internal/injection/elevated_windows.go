@@ -36,6 +36,14 @@ type shellExecuteInfo struct {
 
 var procShellExecuteEx = windows.NewLazySystemDLL("shell32.dll").NewProc("ShellExecuteExW")
 
+func currentProcessElevated() bool {
+	return windows.GetCurrentProcessToken().IsElevated()
+}
+
+func shouldUseRunAs(requested, alreadyElevated bool) bool {
+	return requested && !alreadyElevated
+}
+
 func runElevatedHelper(ctx context.Context, helperPath, requestPath string) error {
 	verb, _ := windows.UTF16PtrFromString("runas")
 	file, err := windows.UTF16PtrFromString(helperPath)

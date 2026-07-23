@@ -237,7 +237,7 @@ func TestCapturedNativeEngine(t *testing.T) {
 	intervals := []time.Duration{30 * time.Millisecond, 50 * time.Millisecond, 100 * time.Millisecond, 250 * time.Millisecond}
 	if value := os.Getenv("GENSHINTOOLS_INPUT_INTERVAL_MS"); value != "" {
 		milliseconds, err := strconv.Atoi(value)
-		if err != nil || milliseconds < 10 || milliseconds > 5000 {
+		if err != nil || milliseconds < 1 || milliseconds > 5000 {
 			t.Fatalf("invalid GENSHINTOOLS_INPUT_INTERVAL_MS %q", value)
 		}
 		intervals = []time.Duration{time.Duration(milliseconds) * time.Millisecond}
@@ -285,7 +285,7 @@ func TestCapturedNativeEngine(t *testing.T) {
 				event := PhysicalEvent{Down: true}
 				switch mode {
 				case ModeKeyboard:
-					event.Kind, event.Code = EventKey, config.TriggerKey
+					event.Kind, event.Code = EventKey, config.OutputKey
 				case ModeMouseLeft:
 					event.Kind = EventMouseLeft
 				case ModeMouseRight:

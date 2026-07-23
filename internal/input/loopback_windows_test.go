@@ -220,7 +220,7 @@ func TestNativeEngineLoopback(t *testing.T) {
 		intervalsToTest := []time.Duration{30 * time.Millisecond, 50 * time.Millisecond, 100 * time.Millisecond, 250 * time.Millisecond}
 		if value := os.Getenv("GENSHINTOOLS_INPUT_INTERVAL_MS"); value != "" {
 			milliseconds, parseErr := strconv.Atoi(value)
-			if parseErr != nil || milliseconds < 10 || milliseconds > 5000 {
+			if parseErr != nil || milliseconds < 1 || milliseconds > 5000 {
 				results <- []result{{err: fmt.Errorf("invalid GENSHINTOOLS_INPUT_INTERVAL_MS %q", value)}}
 				win32.PostMessage(hwnd, win32.WM_CLOSE, 0, 0)
 				return
@@ -246,7 +246,7 @@ func TestNativeEngineLoopback(t *testing.T) {
 				event := PhysicalEvent{Down: true}
 				switch mode {
 				case ModeKeyboard:
-					event.Kind, event.Code = EventKey, config.TriggerKey
+					event.Kind, event.Code = EventKey, config.OutputKey
 				case ModeMouseLeft:
 					event.Kind = EventMouseLeft
 				case ModeMouseRight:
