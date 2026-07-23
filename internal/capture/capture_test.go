@@ -85,6 +85,17 @@ func TestConfigRejectsInputPhysicalKeyConflict(t *testing.T) {
 	if !config.ConflictsWith(0x77, 'F', 0x7B) {
 		t.Fatal("F12 conflict was not detected")
 	}
+	config.VirtualKey = 0x21
+	if !config.ConflictsWith(0x200 | 0x100 | 0x21) {
+		t.Fatal("encoded Page Up conflict was not detected")
+	}
+	if !config.ConflictsWith(0x200 | 0x69) {
+		t.Fatal("Num 9/Page Up alias conflict was not detected")
+	}
+	config.VirtualKey = 0x69
+	if !config.ConflictsWith(0x200 | 0x100 | 0x21) {
+		t.Fatal("Page Up/Num 9 reverse alias conflict was not detected")
+	}
 }
 
 func TestHotkeyStringUsesKeyboardLabel(t *testing.T) {

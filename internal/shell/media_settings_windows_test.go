@@ -9,6 +9,7 @@ import (
 
 	"genshintools/internal/capture"
 	"genshintools/internal/config"
+	"genshintools/internal/input"
 	"genshintools/internal/localization"
 	"genshintools/internal/paths"
 )
@@ -35,6 +36,40 @@ func newMediaSettingsTestApp(t *testing.T, configPath string) *application {
 		t.Fatal(err)
 	}
 	return app
+}
+
+func TestRecordedInputKeyRollsBackWhenSettingsCannotBeSaved(t *testing.T) {
+	native, err := input.NewNative(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(native.Close)
+	settings := config.Default()
+	if err := native.Configure(settings.Input); err != nil {
+		t.Fatal(err)
+	}
+	// Make the aggregate settings invalid after startup so the atomic save
+	// fails without relying on filesystem permissions.
+	settings.Shell.Language = "invalid-language"
+	app := &application{
+		settings:    settings,
+		layout:      paths.Layout{Config: filepath.Join(t.TempDir(), "config.json")},
+		texts:       localization.New(localization.EN, ""),
+		inputNative: native,
+		recording:   4,
+	}
+	beforeNative := native.Snapshot().Config
+	beforeSettings := app.settings.Input
+	app.recordPhysical(input.PhysicalEvent{Kind: input.EventKey, Code: input.EncodeKeyCode('A', false), Down: true})
+	if after := native.Snapshot().Config; after != beforeNative {
+		t.Fatalf("native input was not rolled back: got %+v want %+v", after, beforeNative)
+	}
+	if app.settings.Input != beforeSettings {
+		t.Fatalf("in-memory input settings were not rolled back: got %+v want %+v", app.settings.Input, beforeSettings)
+	}
+	if app.inputUIError == "" {
+		t.Fatal("save failure was not exposed in the input UI")
+	}
 }
 
 func TestCommitCaptureSettingsCommitsAfterSave(t *testing.T) {

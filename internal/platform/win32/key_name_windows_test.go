@@ -26,3 +26,21 @@ func TestKeyNameHandlesAmbiguousLegacyScanCodes(t *testing.T) {
 		}
 	}
 }
+
+func TestKeyNameDistinguishesNavigationBlockAndKeypad(t *testing.T) {
+	tests := map[uint32]string{
+		0x200 | 0x100 | 0x21: "Page Up",
+		0x200 | 0x100 | 0x22: "Page Down",
+		0x200 | 0x21:         "Num 9",
+		0x200 | 0x22:         "Num 3",
+		0x200 | 0x60:         "Num 0",
+		0x200 | 0x69:         "Num 9",
+		0x200 | 0x100 | 0x0d: "Num Enter",
+		0x200 | 0x6f:         "Num /",
+	}
+	for key, want := range tests {
+		if got := KeyName(key); got != want {
+			t.Errorf("KeyName(%#x) = %q, want %q", key, got, want)
+		}
+	}
+}

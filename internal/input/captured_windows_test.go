@@ -282,6 +282,10 @@ func TestCapturedNativeEngine(t *testing.T) {
 					measurements = append(measurements, capturedResult{mode: mode, expected: interval, err: err})
 					break
 				}
+				if mode != ModeKeyboard && !native.engine.Start() {
+					measurements = append(measurements, capturedResult{mode: mode, expected: interval, err: fmt.Errorf("confirmed mouse target did not start engine")})
+					break
+				}
 				event := PhysicalEvent{Down: true}
 				switch mode {
 				case ModeKeyboard:

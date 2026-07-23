@@ -7,17 +7,18 @@ import (
 )
 
 type Engine struct {
-	mu       sync.Mutex
-	emitMu   sync.Mutex
-	config   Config
-	state    State
-	gen      uint64
-	count    uint64
-	lastErr  string
-	cancel   context.CancelFunc
-	injector Injector
-	onChange func(Snapshot)
-	closed   bool
+	mu         sync.Mutex
+	emitMu     sync.Mutex
+	config     Config
+	state      State
+	gen        uint64
+	count      uint64
+	lastErr    string
+	cancel     context.CancelFunc
+	injector   Injector
+	onChange   func(Snapshot)
+	closed     bool
+	toggleHeld map[uint32]bool
 }
 
 func NewEngine(injector Injector, onChange func(Snapshot)) (*Engine, error) {
@@ -25,7 +26,7 @@ func NewEngine(injector Injector, onChange func(Snapshot)) (*Engine, error) {
 		return nil, fmt.Errorf("injector is required")
 	}
 	config, _ := DefaultConfig().Normalized()
-	return &Engine{config: config, state: StateDisabled, injector: injector, onChange: onChange}, nil
+	return &Engine{config: config, state: StateDisabled, injector: injector, onChange: onChange, toggleHeld: map[uint32]bool{}}, nil
 }
 
 func (e *Engine) Configure(config Config) error {
@@ -36,6 +37,7 @@ func (e *Engine) Configure(config Config) error {
 	e.stop(false)
 	e.mu.Lock()
 	e.config = normalized
+	clear(e.toggleHeld)
 	if normalized.Enabled {
 		e.state = StateArmed
 	} else {
@@ -91,17 +93,45 @@ func (e *Engine) startLocked() (context.Context, uint64, Config) {
 
 func (e *Engine) Handle(event PhysicalEvent) {
 	e.mu.Lock()
-	if e.closed || !e.config.Enabled || e.state == StateFault {
+	if event.Kind == EventKey && !event.Down {
+		if _, toggle := e.config.ToggleMode(event.Code); toggle {
+			delete(e.toggleHeld, event.Code)
+			e.mu.Unlock()
+			return
+		}
+	}
+	if e.closed || e.state == StateFault {
 		e.mu.Unlock()
 		return
 	}
 	config := e.config
-	if event.Kind == EventKey && event.Down && event.Code == config.StopKey {
+	if event.Kind == EventKey && event.Down && SameKey(event.Code, config.StopKey) {
 		e.mu.Unlock()
 		e.stop(true)
 		return
 	}
-	trigger := config.Mode == ModeKeyboard && event.Kind == EventKey && event.Code == config.OutputKey
+	if event.Kind == EventKey && event.Down {
+		if mode, toggle := config.ToggleMode(event.Code); toggle {
+			if e.toggleHeld[event.Code] {
+				e.mu.Unlock()
+				return
+			}
+			e.toggleHeld[event.Code] = true
+			disable := config.Enabled && config.Mode == mode
+			e.mu.Unlock()
+			if disable {
+				e.stop(true)
+			} else {
+				e.activateMode(mode)
+			}
+			return
+		}
+	}
+	if !config.Enabled {
+		e.mu.Unlock()
+		return
+	}
+	trigger := config.Mode == ModeKeyboard && event.Kind == EventKey && SameKey(event.Code, config.OutputKey)
 	if !trigger {
 		e.mu.Unlock()
 		return
@@ -120,6 +150,22 @@ func (e *Engine) Handle(event PhysicalEvent) {
 		return
 	}
 	e.mu.Unlock()
+}
+
+func (e *Engine) activateMode(mode Mode) {
+	e.stop(false)
+	e.mu.Lock()
+	if e.closed || e.state == StateFault {
+		e.mu.Unlock()
+		return
+	}
+	e.config.Mode = mode
+	e.config.Enabled = true
+	e.state = StateArmed
+	e.lastErr = ""
+	snapshot := e.snapshotLocked()
+	e.mu.Unlock()
+	e.notify(snapshot)
 }
 
 func (e *Engine) outputLoop(ctx context.Context, generation uint64, config Config) {

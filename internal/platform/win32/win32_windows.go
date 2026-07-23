@@ -940,6 +940,43 @@ func KeyName(virtualKey uint32) string {
 	if virtualKey == 0 {
 		return "Unset"
 	}
+	physicalIdentity := virtualKey&0x200 != 0
+	encodedExtended := virtualKey&0x100 != 0
+	virtualKey &= 0xff
+	if encodedExtended && virtualKey == VK_RETURN {
+		return "Num Enter"
+	}
+	if virtualKey >= 0x60 && virtualKey <= 0x69 {
+		return fmt.Sprintf("Num %d", virtualKey-0x60)
+	}
+	switch virtualKey {
+	case 0x6a:
+		return "Num *"
+	case 0x6b:
+		return "Num +"
+	case 0x6d:
+		return "Num -"
+	case 0x6e:
+		return "Num ."
+	case 0x6f:
+		return "Num /"
+	}
+	if physicalIdentity && !encodedExtended {
+		if name, ok := map[uint32]string{
+			0x21: "Num 9", 0x22: "Num 3", 0x23: "Num 1",
+			0x24: "Num 7", 0x25: "Num 4", 0x26: "Num 8",
+			0x27: "Num 6", 0x28: "Num 2", 0x2d: "Num 0",
+			0x2e: "Num .", 0x0c: "Num 5",
+		}[virtualKey]; ok {
+			return name
+		}
+	}
+	switch virtualKey {
+	case 0x21:
+		return "Page Up"
+	case 0x22:
+		return "Page Down"
+	}
 	// These keys have ambiguous legacy scan-code encodings. In particular,
 	// MAPVK_VK_TO_VSC_EX returns E1 1D for Pause, but GetKeyNameTextW only has
 	// one extended-key bit and consequently identifies that value as Right Ctrl.
@@ -956,7 +993,7 @@ func KeyName(virtualKey uint32) string {
 	scan, _, _ := procMapVirtualKeyExW.Call(uintptr(virtualKey), 4, layout) // MAPVK_VK_TO_VSC_EX
 	if scan != 0 {
 		parameter := (scan & 0xff) << 16
-		if scan&0xff00 != 0 {
+		if encodedExtended || scan&0xff00 != 0 {
 			parameter |= 1 << 24
 		}
 		buffer := make([]uint16, 128)

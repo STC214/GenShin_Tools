@@ -243,6 +243,10 @@ func TestNativeEngineLoopback(t *testing.T) {
 					all = append(all, result{mode: mode, err: configureErr})
 					break
 				}
+				if mode != ModeKeyboard && !native.engine.Start() {
+					all = append(all, result{mode: mode, err: fmt.Errorf("confirmed mouse target did not start engine")})
+					break
+				}
 				event := PhysicalEvent{Down: true}
 				switch mode {
 				case ModeKeyboard:

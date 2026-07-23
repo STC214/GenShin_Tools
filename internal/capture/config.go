@@ -47,11 +47,56 @@ func (config Config) Normalized() (Config, error) {
 
 func (config Config) ConflictsWith(keys ...uint32) bool {
 	for _, key := range keys {
-		if key != 0 && key == config.VirtualKey {
+		// Input enhancement retains the physical extended-key bit above the
+		// Win32 virtual-key byte. RegisterHotKey only accepts the byte, so both
+		// the navigation block and its keypad alias must be treated as a
+		// conflict with the same screenshot hotkey.
+		virtualKey := key & 0xff
+		if virtualKey != 0 && hotkeyVirtualKeysConflict(virtualKey, config.VirtualKey) {
 			return true
 		}
 	}
 	return false
+}
+
+func hotkeyVirtualKeysConflict(left, right uint32) bool {
+	if left == right {
+		return true
+	}
+	leftAlias := keypadNavigationAlias(left)
+	rightAlias := keypadNavigationAlias(right)
+	return leftAlias != 0 && leftAlias == right ||
+		rightAlias != 0 && rightAlias == left ||
+		leftAlias != 0 && leftAlias == rightAlias
+}
+
+func keypadNavigationAlias(virtualKey uint32) uint32 {
+	switch virtualKey {
+	case 0x60:
+		return 0x2d // Num 0 -> Insert
+	case 0x61:
+		return 0x23 // Num 1 -> End
+	case 0x62:
+		return 0x28 // Num 2 -> Down
+	case 0x63:
+		return 0x22 // Num 3 -> Page Down
+	case 0x64:
+		return 0x25 // Num 4 -> Left
+	case 0x65:
+		return 0x0c // Num 5 -> Clear
+	case 0x66:
+		return 0x27 // Num 6 -> Right
+	case 0x67:
+		return 0x24 // Num 7 -> Home
+	case 0x68:
+		return 0x26 // Num 8 -> Up
+	case 0x69:
+		return 0x21 // Num 9 -> Page Up
+	case 0x6e:
+		return 0x2e // Num . -> Delete
+	default:
+		return 0
+	}
 }
 
 func (config Config) HotkeyString() string {

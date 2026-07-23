@@ -924,6 +924,9 @@ func (app *application) handleMessage(hwnd win32.HWND, message uint32, wParam, l
 				win32.Invalidate(hwnd)
 				return 0
 			}
+			if app.selected == 6 {
+				app.cancelInputRecording()
+			}
 			app.selected = selected
 			app.updateLaunchControlVisibility()
 			win32.Invalidate(hwnd)
@@ -985,6 +988,9 @@ func (app *application) handleMessage(hwnd win32.HWND, message uint32, wParam, l
 				if app.selected == 8 && app.pluginTargetMode && !app.flushFufuEdits() {
 					return 0
 				}
+				if app.selected == 6 {
+					app.cancelInputRecording()
+				}
 				app.selected--
 				app.updateLaunchControlVisibility()
 				win32.Invalidate(hwnd)
@@ -993,6 +999,9 @@ func (app *application) handleMessage(hwnd win32.HWND, message uint32, wParam, l
 			if app.selected < len(navigation)-1 {
 				if app.selected == 8 && app.pluginTargetMode && !app.flushFufuEdits() {
 					return 0
+				}
+				if app.selected == 6 {
+					app.cancelInputRecording()
 				}
 				app.selected++
 				app.updateLaunchControlVisibility()
@@ -1494,7 +1503,13 @@ func (app *application) applyCaptureHotkey() error {
 	if !app.settings.Capture.Enabled {
 		return nil
 	}
-	if app.settings.Capture.ConflictsWith(app.settings.Input.TriggerKey, app.settings.Input.OutputKey, app.settings.Input.StopKey) {
+	if app.settings.Capture.ConflictsWith(
+		app.settings.Input.OutputKey,
+		app.settings.Input.StopKey,
+		app.settings.Input.KeyboardToggleKey,
+		app.settings.Input.MouseLeftToggleKey,
+		app.settings.Input.MouseRightToggleKey,
+	) {
 		return errors.New(app.texts.Text("media.error.hotkeyConflict"))
 	}
 	if err := win32.RegisterHotKey(app.hwnd, captureHotkeyID, app.settings.Capture.Modifiers, app.settings.Capture.VirtualKey); err != nil {
@@ -1661,7 +1676,11 @@ func (app *application) mediaClick(_, y int) {
 		for range presets {
 			key := presets[index]
 			index = (index + 1) % len(presets)
-			if key != app.settings.Input.TriggerKey && key != app.settings.Input.OutputKey && key != app.settings.Input.StopKey {
+			if !input.SameKey(key, app.settings.Input.OutputKey) &&
+				!input.SameKey(key, app.settings.Input.StopKey) &&
+				!input.SameKey(key, app.settings.Input.KeyboardToggleKey) &&
+				!input.SameKey(key, app.settings.Input.MouseLeftToggleKey) &&
+				!input.SameKey(key, app.settings.Input.MouseRightToggleKey) {
 				next.VirtualKey = key
 				break
 			}
@@ -3578,19 +3597,29 @@ func (app *application) stopInputForSystemEvent(reason string) {
 	if app.inputNative == nil {
 		return
 	}
+	app.cancelInputRecording()
 	app.inputNative.Enable(false)
 	app.settings.Input = app.inputNative.Snapshot().Config
 	app.settings.Input.Enabled = false
-	app.saveInputSettings()
+	_ = app.saveInputSettings()
 	app.logger.Info("input enhancement stopped", map[string]any{"reason": reason})
 }
 
-func (app *application) saveInputSettings() {
+func (app *application) cancelInputRecording() {
+	app.recording = 0
+	if app.inputNative != nil {
+		app.inputNative.SetCaptureMode(false)
+	}
+}
+
+func (app *application) saveInputSettings() error {
 	settings := app.settings
 	settings.Input.Enabled = false
 	if err := config.Save(app.layout.Config, settings); err != nil {
 		app.logger.Error("save input settings", map[string]any{"error": err.Error()})
+		return err
 	}
+	return nil
 }
 
 func (app *application) inputClick(x, y int) {
@@ -3605,10 +3634,13 @@ func (app *application) inputClick(x, y int) {
 	sy := func(value int32) int { return int(win32.Scale(value, app.dpi)) }
 	switch {
 	case y >= sy(170) && y < sy(216):
+		app.inputNative.SetCaptureMode(false)
 		app.recording = 0
 		app.inputUIError = ""
 		app.inputNative.Enable(!config.Enabled)
 	case y >= sy(226) && y < sy(266):
+		app.inputNative.SetCaptureMode(false)
+		app.recording = 0
 		mode := -1
 		modeWidth := win32.Scale(132, app.dpi)
 		for index := 0; index <= int(input.ModeMouseRight); index++ {
@@ -3630,11 +3662,27 @@ func (app *application) inputClick(x, y int) {
 		}
 	case y >= sy(276) && y < sy(316) && config.Mode == input.ModeKeyboard:
 		app.inputNative.Enable(false)
+		app.inputNative.SetCaptureMode(true)
 		app.recording = 2
 	case y >= sy(326) && y < sy(366):
 		app.inputNative.Enable(false)
-		app.recording = 3
+		app.inputNative.SetCaptureMode(true)
+		app.recording = 4
 	case y >= sy(376) && y < sy(416):
+		app.inputNative.Enable(false)
+		app.inputNative.SetCaptureMode(true)
+		app.recording = 5
+	case y >= sy(426) && y < sy(466):
+		app.inputNative.Enable(false)
+		app.inputNative.SetCaptureMode(true)
+		app.recording = 6
+	case y >= sy(476) && y < sy(516):
+		app.inputNative.Enable(false)
+		app.inputNative.SetCaptureMode(true)
+		app.recording = 3
+	case y >= sy(526) && y < sy(566):
+		app.inputNative.SetCaptureMode(false)
+		app.recording = 0
 		config.Interval = adjustInputInterval(config.Interval, inputIntervalIncreaseAt(x, left, app.dpi))
 		config.IntervalMS = int(config.Interval / time.Millisecond)
 		config.Enabled = false
@@ -3646,7 +3694,9 @@ func (app *application) inputClick(x, y int) {
 		}
 	}
 	app.settings.Input = app.inputNative.Snapshot().Config
-	app.saveInputSettings()
+	if err := app.saveInputSettings(); err != nil {
+		app.inputUIError = err.Error()
+	}
 	win32.Invalidate(app.hwnd)
 }
 
@@ -3674,16 +3724,24 @@ func (app *application) recordPhysical(event input.PhysicalEvent) {
 		return
 	}
 	config := app.inputNative.Snapshot().Config
+	previousConfig := config
+	previousSettings := app.settings.Input
 	switch app.recording {
 	case 2:
 		config.OutputKey = event.Code
 		config.TriggerKey = event.Code
 	case 3:
 		config.StopKey = event.Code
+	case 4:
+		config.KeyboardToggleKey = event.Code
+	case 5:
+		config.MouseLeftToggleKey = event.Code
+	case 6:
+		config.MouseRightToggleKey = event.Code
 	}
 	config.Enabled = false
 	app.recording = 0
-	if event.Code == app.settings.Capture.VirtualKey {
+	if app.settings.Capture.ConflictsWith(event.Code) {
 		app.inputUIError = app.texts.Text("input.error.captureConflict")
 		win32.Invalidate(app.hwnd)
 		return
@@ -3696,7 +3754,15 @@ func (app *application) recordPhysical(event input.PhysicalEvent) {
 	}
 	app.inputUIError = ""
 	app.settings.Input = app.inputNative.Snapshot().Config
-	app.saveInputSettings()
+	if err := app.saveInputSettings(); err != nil {
+		app.settings.Input = previousSettings
+		if restoreErr := app.inputNative.Configure(previousConfig); restoreErr != nil {
+			app.logger.Error("restore input settings after save failure", map[string]any{"error": restoreErr.Error()})
+		}
+		app.inputUIError = err.Error()
+		win32.Invalidate(app.hwnd)
+		return
+	}
 	win32.Invalidate(app.hwnd)
 }
 
@@ -3758,16 +3824,19 @@ func (app *application) paintInput(dc win32.HDC, client win32.Rect, left int32) 
 	} else {
 		draw(app.texts.Text("input.mouseTrigger"), staticRow(276, 316, cardBrush), win32.Color(166, 174, 197))
 	}
-	draw(recordLabel(app.texts, "input.key.stop", config.StopKey, app.recording == 3), row(326, 366, buttonBrush), win32.Color(225, 229, 242))
-	draw(fmt.Sprintf(app.texts.Text("input.interval"), config.IntervalMS), row(376, 416, buttonBrush), win32.Color(225, 229, 242))
+	draw(recordLabel(app.texts, "input.key.toggleKeyboard", config.KeyboardToggleKey, app.recording == 4), row(326, 366, buttonBrush), win32.Color(225, 229, 242))
+	draw(recordLabel(app.texts, "input.key.toggleMouseLeft", config.MouseLeftToggleKey, app.recording == 5), row(376, 416, buttonBrush), win32.Color(225, 229, 242))
+	draw(recordLabel(app.texts, "input.key.toggleMouseRight", config.MouseRightToggleKey, app.recording == 6), row(426, 466, buttonBrush), win32.Color(225, 229, 242))
+	draw(recordLabel(app.texts, "input.key.stop", config.StopKey, app.recording == 3), row(476, 516, buttonBrush), win32.Color(225, 229, 242))
+	draw(fmt.Sprintf(app.texts.Text("input.interval"), config.IntervalMS), row(526, 566, buttonBrush), win32.Color(225, 229, 242))
 	visibleError := snapshot.LastError
 	if visibleError == "" {
 		visibleError = app.inputUIError
 	}
 	if visibleError != "" {
-		draw(fmt.Sprintf(app.texts.Text("input.error"), visibleError), staticRow(476, 516, cardBrush), win32.Color(255, 126, 126))
+		draw(fmt.Sprintf(app.texts.Text("input.error"), visibleError), staticRow(576, 616, cardBrush), win32.Color(255, 126, 126))
 	} else {
-		draw(fmt.Sprintf(app.texts.Text("input.outputCount"), snapshot.OutputCount), staticRow(476, 516, cardBrush), win32.Color(145, 154, 180))
+		draw(fmt.Sprintf(app.texts.Text("input.outputCount"), snapshot.OutputCount), staticRow(576, 616, cardBrush), win32.Color(145, 154, 180))
 	}
 }
 

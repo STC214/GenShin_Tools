@@ -28,6 +28,7 @@ const (
 	wMRButtonDown = 0x0204
 	wMRButtonUp   = 0x0205
 
+	llkhfExtended = 0x01
 	llkhfInjected = 0x10
 	llmhfInjected = 0x01
 
@@ -108,6 +109,8 @@ type Native struct {
 	closed         atomic.Bool
 	overflow       atomic.Bool
 	safetyDisabled atomic.Bool
+	capturing      atomic.Bool
+	captureKey     atomic.Uint32
 	runTarget      atomic.Uintptr
 	armTarget      atomic.Uintptr
 
@@ -237,6 +240,18 @@ func (n *Native) SetObserver(observer func(PhysicalEvent)) {
 	n.observerMu.Lock()
 	n.observer = observer
 	n.observerMu.Unlock()
+}
+
+// SetCaptureMode makes physical keyboard events observable by the UI without
+// allowing the same key press to toggle or trigger input enhancement.
+func (n *Native) SetCaptureMode(capturing bool) {
+	if capturing {
+		n.captureKey.Store(0)
+		n.capturing.Store(true)
+		return
+	}
+	n.capturing.Store(false)
+	n.captureKey.Store(0)
 }
 
 func (n *Native) Close() {
@@ -424,9 +439,40 @@ func (n *Native) drain() {
 		if observer != nil {
 			observer(event)
 		}
-		before := n.engine.Snapshot().State
+		if n.capturing.Load() {
+			if event.Kind == EventKey {
+				key := NormalizeKeyCode(event.Code)
+				captured := n.captureKey.Load()
+				if event.Down && captured == 0 {
+					n.captureKey.CompareAndSwap(0, key)
+				} else if !event.Down && captured != 0 && SameKey(key, captured) {
+					// Keep all physical input suppressed through key-up. This
+					// prevents keyboard autorepeat after the first down event
+					// from immediately triggering the newly recorded shortcut.
+					n.capturing.Store(false)
+					n.captureKey.Store(0)
+				}
+			}
+			continue
+		}
+		before := n.engine.Snapshot()
 		n.engine.Handle(event)
-		n.updateActivationTargets(before, n.engine.Snapshot())
+		after := n.engine.Snapshot()
+		if event.Kind == EventKey && event.Down {
+			if mode, toggle := before.Config.ToggleMode(event.Code); toggle && mode != ModeKeyboard && after.State == StateArmed && after.Config.Enabled && after.Config.Mode == mode {
+				target := n.foreground()
+				if target != 0 && !currentProcessWindow(target) {
+					n.runTarget.Store(uintptr(target))
+					n.armTarget.Store(0)
+					if n.engine.Start() {
+						after = n.engine.Snapshot()
+					} else {
+						n.runTarget.Store(0)
+					}
+				}
+			}
+		}
+		n.updateActivationTargets(before.State, after)
 	}
 	if n.overflow.Swap(false) {
 		n.engine.Fail(errors.New("physical input event queue overflowed; input enhancement disabled"))
@@ -493,7 +539,7 @@ func handleKeyboardHook(data *keyboardHook, message uintptr) {
 		return
 	}
 	if n := activeNative.Load(); n != nil {
-		n.enqueue(PhysicalEvent{Kind: EventKey, Code: data.VirtualKey, Down: down})
+		n.enqueue(PhysicalEvent{Kind: EventKey, Code: EncodeKeyCode(data.VirtualKey, data.Flags&llkhfExtended != 0), Down: down})
 	}
 }
 
@@ -619,6 +665,8 @@ func releaseInput(config Config) (winInput, error) {
 }
 
 func keyboardInput(virtualKey uint32, up bool) (winInput, error) {
+	extended := KeyIsExtended(virtualKey)
+	virtualKey = VirtualKey(virtualKey)
 	foreground, _, _ := procGetForegroundWindow.Call()
 	threadID, _, _ := procGetWindowThreadProcessID.Call(foreground, 0)
 	layout, _, _ := procGetKeyboardLayout.Call(threadID)
@@ -627,14 +675,14 @@ func keyboardInput(virtualKey uint32, up bool) (winInput, error) {
 		return winInput{}, fmt.Errorf("MapVirtualKeyExW returned no scan code for virtual key 0x%02X", virtualKey)
 	}
 	flags := uint32(keyeventfScanCode)
-	if scan&0xff00 == 0xe000 || scan&0xff00 == 0xe100 {
+	if extended || scan&0xff00 == 0xe000 || scan&0xff00 == 0xe100 {
 		flags |= keyeventfExtendedKey
 	}
 	if up {
 		flags |= keyeventfKeyUp
 	}
 	value := winInput{Type: inputKeyboard}
-	*(*uint16)(unsafe.Pointer(&value.Data[2])) = uint16(scan)
+	*(*uint16)(unsafe.Pointer(&value.Data[2])) = uint16(scan & 0xff)
 	*(*uint32)(unsafe.Pointer(&value.Data[4])) = flags
 	*(*uintptr)(unsafe.Pointer(&value.Data[16])) = injectionMarker
 	return value, nil

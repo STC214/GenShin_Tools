@@ -132,6 +132,70 @@ func TestStopKeyDisablesAndReleases(t *testing.T) {
 	}
 }
 
+func TestIndependentToggleKeysSelectAndDisableTheirOwnModes(t *testing.T) {
+	injector := &fakeInjector{}
+	engine, _ := NewEngine(injector, nil)
+	config := DefaultConfig()
+	if err := engine.Configure(config); err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		key  uint32
+		mode Mode
+	}{
+		{config.KeyboardToggleKey, ModeKeyboard},
+		{config.MouseLeftToggleKey, ModeMouseLeft},
+		{config.MouseRightToggleKey, ModeMouseRight},
+	}
+	for _, test := range tests {
+		engine.Handle(PhysicalEvent{Kind: EventKey, Code: test.key, Down: true})
+		snapshot := engine.Snapshot()
+		if !snapshot.Config.Enabled || snapshot.Config.Mode != test.mode || snapshot.State != StateArmed {
+			t.Fatalf("toggle %x selected %+v, want enabled armed %s", test.key, snapshot, test.mode)
+		}
+		engine.Handle(PhysicalEvent{Kind: EventKey, Code: test.key, Down: true})
+		if snapshot = engine.Snapshot(); !snapshot.Config.Enabled || snapshot.Config.Mode != test.mode {
+			t.Fatalf("held toggle %x changed state: %+v", test.key, snapshot)
+		}
+		engine.Handle(PhysicalEvent{Kind: EventKey, Code: test.key, Down: false})
+		engine.Handle(PhysicalEvent{Kind: EventKey, Code: test.key, Down: true})
+		if snapshot = engine.Snapshot(); snapshot.Config.Enabled || snapshot.State != StateDisabled {
+			t.Fatalf("second toggle %x did not disable its mode: %+v", test.key, snapshot)
+		}
+		engine.Handle(PhysicalEvent{Kind: EventKey, Code: test.key, Down: false})
+	}
+}
+
+func TestToggleAndStopKeysMustAllBeDistinct(t *testing.T) {
+	config := DefaultConfig()
+	config.MouseRightToggleKey = config.MouseLeftToggleKey
+	if _, err := config.Normalized(); err == nil {
+		t.Fatal("accepted duplicate mouse toggle keys")
+	}
+	config = DefaultConfig()
+	config.OutputKey = config.KeyboardToggleKey
+	if _, err := config.Normalized(); err == nil {
+		t.Fatal("accepted repeat key matching keyboard toggle")
+	}
+}
+
+func TestPhysicalNavigationAndKeypadIdentitiesRemainDistinct(t *testing.T) {
+	pageUp := EncodeKeyCode(0x21, true)
+	num9 := EncodeKeyCode(0x21, false)
+	if SameKey(pageUp, num9) {
+		t.Fatal("Page Up and keypad 9 collapsed to the same physical key")
+	}
+	if got := NormalizeKeyCode(0x21); got != pageUp {
+		t.Fatalf("legacy Page Up normalized to %#x, want %#x", got, pageUp)
+	}
+	if got := NormalizeKeyCode(num9); got != num9 {
+		t.Fatalf("keypad 9 normalized to %#x, want %#x", got, num9)
+	}
+	if num9 != EncodeKeyCode(0x69, false) {
+		t.Fatalf("Num Lock changed keypad 9 identity: off=%#x on=%#x", num9, EncodeKeyCode(0x69, false))
+	}
+}
+
 func TestInjectionFailureEntersFault(t *testing.T) {
 	injector := &fakeInjector{failAt: 1}
 	engine, _ := NewEngine(injector, nil)
