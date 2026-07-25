@@ -138,6 +138,48 @@ func TestCaptureModeObservesButDoesNotTriggerShortcut(t *testing.T) {
 	}
 }
 
+func TestCaptureModeSuppressesGlobalStopFromHookAndPolling(t *testing.T) {
+	injector := &fakeInjector{}
+	engine, err := NewEngine(injector, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config := DefaultConfig()
+	config.Enabled = true
+	if err := engine.Configure(config); err != nil {
+		t.Fatal(err)
+	}
+	pressed := make(map[uint32]bool)
+	n := &Native{
+		engine:     engine,
+		wake:       make(chan struct{}, 1),
+		foreground: func() windows.HWND { return 0 },
+		keyDown:    func(code uint32) bool { return pressed[NormalizeKeyCode(code)] },
+	}
+	states := make(map[uint32]bool)
+	n.pollKeyboardOnce(states)
+	n.SetCaptureMode(true)
+
+	pressed[config.StopKey] = true
+	n.pollKeyboardOnce(states)
+	n.enqueue(PhysicalEvent{Kind: EventKey, Code: config.StopKey, Down: true})
+	n.drain()
+	if snapshot := engine.Snapshot(); !snapshot.Config.Enabled || snapshot.State != StateArmed {
+		t.Fatalf("recorded global stop reached engine: %+v", snapshot)
+	}
+
+	n.enqueue(PhysicalEvent{Kind: EventKey, Code: config.StopKey, Down: false})
+	n.drain()
+	pressed[config.StopKey] = false
+	n.pollKeyboardOnce(states)
+	if n.capturing.Load() {
+		t.Fatal("global-stop recording did not finish on key-up")
+	}
+	if snapshot := engine.Snapshot(); !snapshot.Config.Enabled || snapshot.State != StateArmed {
+		t.Fatalf("global stop fired while recording completed: %+v", snapshot)
+	}
+}
+
 func TestCancellingCaptureImmediatelyRestoresShortcuts(t *testing.T) {
 	injector := &fakeInjector{}
 	engine, err := NewEngine(injector, nil)
@@ -159,6 +201,198 @@ func TestCancellingCaptureImmediatelyRestoresShortcuts(t *testing.T) {
 	n.drain()
 	if snapshot := engine.Snapshot(); !snapshot.Config.Enabled || snapshot.Config.Mode != ModeKeyboard {
 		t.Fatalf("shortcut remained suppressed after capture cancellation: %+v", snapshot)
+	}
+}
+
+func TestKeyboardPollingFallbackDrivesToggleHoldAndRelease(t *testing.T) {
+	injector := &fakeInjector{}
+	engine, err := NewEngine(injector, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config := DefaultConfig()
+	config.Interval = 5 * time.Millisecond
+	if err := engine.Configure(config); err != nil {
+		t.Fatal(err)
+	}
+	pressed := make(map[uint32]bool)
+	n := &Native{
+		engine:     engine,
+		foreground: func() windows.HWND { return 0 },
+		keyDown:    func(code uint32) bool { return pressed[NormalizeKeyCode(code)] },
+	}
+	states := make(map[uint32]bool)
+	n.pollKeyboardOnce(states) // establish the initial all-up state
+
+	pressed[config.KeyboardToggleKey] = true
+	n.pollKeyboardOnce(states)
+	if snapshot := engine.Snapshot(); !snapshot.Config.Enabled || snapshot.Config.Mode != ModeKeyboard || snapshot.State != StateArmed {
+		t.Fatalf("poll toggle snapshot = %+v", snapshot)
+	}
+	pressed[config.KeyboardToggleKey] = false
+	n.pollKeyboardOnce(states)
+
+	pressed[config.OutputKey] = true
+	n.pollKeyboardOnce(states)
+	deadline := time.Now().Add(250 * time.Millisecond)
+	for {
+		if emits, _ := injector.counts(); emits >= 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("polled hold produced no repeated output: snapshot=%+v", engine.Snapshot())
+		}
+		time.Sleep(time.Millisecond)
+	}
+	pressed[config.OutputKey] = false
+	n.pollKeyboardOnce(states)
+	if snapshot := engine.Snapshot(); snapshot.State != StateArmed || !snapshot.Config.Enabled {
+		t.Fatalf("polled release snapshot = %+v", snapshot)
+	}
+	before, _ := injector.counts()
+	time.Sleep(20 * time.Millisecond)
+	after, _ := injector.counts()
+	if after != before {
+		t.Fatalf("polled release left late output: %d -> %d", before, after)
+	}
+}
+
+func TestHookConfirmedRepeatHoldOutranksInjectedPollingUp(t *testing.T) {
+	injector := &fakeInjector{}
+	engine, err := NewEngine(injector, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config := DefaultConfig()
+	config.Enabled = true
+	config.Interval = 5 * time.Millisecond
+	if err := engine.Configure(config); err != nil {
+		t.Fatal(err)
+	}
+	pressed := map[uint32]bool{config.OutputKey: true}
+	n := &Native{
+		engine:     engine,
+		foreground: func() windows.HWND { return 0 },
+		keyDown:    func(code uint32) bool { return pressed[NormalizeKeyCode(code)] },
+	}
+	states := make(map[uint32]bool)
+	n.pollKeyboardOnce(states)
+	n.processPhysicalEvent(PhysicalEvent{Kind: EventKey, Code: config.OutputKey, Down: true})
+
+	// SendInput emits an up after every generated key press. On affected game
+	// input paths GetAsyncKeyState exposes that injected up even though the
+	// user is still physically holding the trigger.
+	pressed[config.OutputKey] = false
+	n.pollKeyboardOnce(states)
+	deadline := time.Now().Add(250 * time.Millisecond)
+	for {
+		if snapshot := engine.Snapshot(); snapshot.State != StateRunning || !snapshot.Config.Enabled {
+			t.Fatalf("polling up cancelled hook-confirmed hold: %+v", snapshot)
+		}
+		if emits, _ := injector.counts(); emits >= 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("repeat did not continue after injected polling up: %+v", engine.Snapshot())
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	n.processPhysicalEvent(PhysicalEvent{Kind: EventKey, Code: config.OutputKey, Down: false})
+	if snapshot := engine.Snapshot(); snapshot.State != StateArmed || !snapshot.Config.Enabled {
+		t.Fatalf("real hook up did not stop repeat: %+v", snapshot)
+	}
+}
+
+func TestHookOwnershipClearsWhenInputSessionStopsOrReconfigures(t *testing.T) {
+	injector := &fakeInjector{}
+	engine, err := NewEngine(injector, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := &Native{engine: engine, foreground: func() windows.HWND { return 0 }}
+	config := DefaultConfig()
+	config.Enabled = true
+	if err := n.Configure(config); err != nil {
+		t.Fatal(err)
+	}
+	n.processPhysicalEvent(PhysicalEvent{Kind: EventKey, Code: config.OutputKey, Down: true})
+	if !n.hookDown[config.OutputKey] {
+		t.Fatal("repeat key was not hook-owned")
+	}
+	n.Enable(false)
+	if len(n.hookDown) != 0 {
+		t.Fatalf("disabled session retained hook state: %#v", n.hookDown)
+	}
+
+	n.processPhysicalEvent(PhysicalEvent{Kind: EventKey, Code: config.OutputKey, Down: true})
+	if !n.hookDown[config.OutputKey] {
+		t.Fatal("repeat key was not tracked before reconfigure")
+	}
+	if err := n.Configure(config); err != nil {
+		t.Fatal(err)
+	}
+	if len(n.hookDown) != 0 {
+		t.Fatalf("reconfigured session retained hook state: %#v", n.hookDown)
+	}
+}
+
+func TestKeyboardPollingFallbackAndHookDoNotDoubleToggle(t *testing.T) {
+	injector := &fakeInjector{}
+	engine, err := NewEngine(injector, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config := DefaultConfig()
+	if err := engine.Configure(config); err != nil {
+		t.Fatal(err)
+	}
+	pressed := make(map[uint32]bool)
+	n := &Native{
+		engine:     engine,
+		foreground: func() windows.HWND { return 0 },
+		keyDown:    func(code uint32) bool { return pressed[NormalizeKeyCode(code)] },
+	}
+	states := make(map[uint32]bool)
+	n.pollKeyboardOnce(states)
+	n.processPhysicalEvent(PhysicalEvent{Kind: EventKey, Code: config.KeyboardToggleKey, Down: true})
+	pressed[config.KeyboardToggleKey] = true
+	n.pollKeyboardOnce(states)
+	if snapshot := engine.Snapshot(); !snapshot.Config.Enabled || snapshot.Config.Mode != ModeKeyboard {
+		t.Fatalf("hook plus poll double-toggled feature: %+v", snapshot)
+	}
+	n.processPhysicalEvent(PhysicalEvent{Kind: EventKey, Code: config.KeyboardToggleKey, Down: false})
+	pressed[config.KeyboardToggleKey] = false
+	n.pollKeyboardOnce(states)
+}
+
+func TestKeyboardPollingFallbackStartsMouseModeInExternalForeground(t *testing.T) {
+	injector := &fakeInjector{}
+	engine, err := NewEngine(injector, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config := DefaultConfig()
+	config.Interval = 5 * time.Millisecond
+	if err := engine.Configure(config); err != nil {
+		t.Fatal(err)
+	}
+	pressed := make(map[uint32]bool)
+	n := &Native{
+		engine:     engine,
+		foreground: func() windows.HWND { return windows.HWND(0x1234) },
+		keyDown:    func(code uint32) bool { return pressed[NormalizeKeyCode(code)] },
+	}
+	states := make(map[uint32]bool)
+	n.pollKeyboardOnce(states)
+	pressed[config.MouseRightToggleKey] = true
+	n.pollKeyboardOnce(states)
+	defer engine.Close()
+	if snapshot := engine.Snapshot(); snapshot.State != StateRunning || snapshot.Config.Mode != ModeMouseRight {
+		t.Fatalf("polled mouse toggle snapshot = %+v", snapshot)
+	}
+	if target := n.runTarget.Load(); target != 0x1234 {
+		t.Fatalf("polled mouse target = %#x", target)
 	}
 }
 
@@ -300,12 +534,53 @@ func TestForegroundChangeStopsRunningEngine(t *testing.T) {
 	n.runTarget.Store(1)
 	time.Sleep(150 * time.Millisecond)
 	foreground.Store(2)
-	deadline = time.Now().Add(time.Second)
+	deadline = time.Now().Add(2 * time.Second)
 	for engine.Snapshot().State != StateDisabled && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	if snapshot := engine.Snapshot(); snapshot.State != StateDisabled || snapshot.Config.Enabled {
 		t.Fatalf("snapshot after foreground change = %+v", snapshot)
+	}
+}
+
+func TestTransientForegroundChangeDoesNotStopRunningMouseMode(t *testing.T) {
+	injector := &fakeInjector{}
+	engine, err := NewEngine(injector, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var foreground atomic.Uintptr
+	foreground.Store(1)
+	n := &Native{
+		engine:      engine,
+		monitorStop: make(chan struct{}),
+		monitorDone: make(chan struct{}),
+		foreground:  func() windows.HWND { return windows.HWND(foreground.Load()) },
+	}
+	config := DefaultConfig()
+	config.Mode = ModeMouseLeft
+	config.Enabled = true
+	config.Interval = 5 * time.Millisecond
+	if err := n.Configure(config); err != nil {
+		t.Fatal(err)
+	}
+	if !engine.Start() {
+		t.Fatal("mouse engine did not start")
+	}
+	n.updateActivationTargets(StateArmed, engine.Snapshot())
+	go n.safetyMonitor()
+	defer func() {
+		close(n.monitorStop)
+		<-n.monitorDone
+		engine.Close()
+	}()
+	time.Sleep(150 * time.Millisecond)
+	foreground.Store(2)
+	time.Sleep(foregroundLossGrace / 2)
+	foreground.Store(1)
+	time.Sleep(200 * time.Millisecond)
+	if snapshot := engine.Snapshot(); snapshot.State != StateRunning || !snapshot.Config.Enabled {
+		t.Fatalf("transient foreground change stopped mouse mode: %+v", snapshot)
 	}
 }
 

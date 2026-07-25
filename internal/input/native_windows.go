@@ -47,6 +47,8 @@ const (
 
 	nativeQueueSize      = 256
 	mouseTargetStableFor = 300 * time.Millisecond
+	keyboardPollInterval = 5 * time.Millisecond
+	foregroundLossGrace  = 750 * time.Millisecond
 )
 
 // injectionMarker is deliberately non-zero, uncommon, and limited to 32 bits.
@@ -94,6 +96,7 @@ type winInput struct {
 type Native struct {
 	engine    *Engine
 	lifecycle sync.Mutex
+	physical  sync.Mutex
 
 	events      [nativeQueueSize]PhysicalEvent
 	head        atomic.Uint32
@@ -103,6 +106,7 @@ type Native struct {
 	workerDone  chan struct{}
 	monitorStop chan struct{}
 	monitorDone chan struct{}
+	pollDone    chan struct{}
 
 	threadID       atomic.Uint32
 	started        atomic.Bool
@@ -119,6 +123,12 @@ type Native struct {
 	observerMu       sync.RWMutex
 	observer         func(PhysicalEvent)
 	foreground       func() windows.HWND
+	keyDown          func(uint32) bool
+	// hookDown tracks keys currently held according to WH_KEYBOARD_LL. It is
+	// protected by physical. GetAsyncKeyState also observes our SendInput
+	// output on some games/Windows builds, so its "up" result must not cancel a
+	// real hook-confirmed hold of the repeat key.
+	hookDown map[uint32]bool
 }
 
 var activeNative atomic.Pointer[Native]
@@ -137,6 +147,7 @@ var (
 	procGetForegroundWindow      = inputUser32.NewProc("GetForegroundWindow")
 	procGetWindowThreadProcessID = inputUser32.NewProc("GetWindowThreadProcessId")
 	procGetKeyboardLayout        = inputUser32.NewProc("GetKeyboardLayout")
+	procGetAsyncKeyState         = inputUser32.NewProc("GetAsyncKeyState")
 	procGetModuleHandleW         = inputKernel32.NewProc("GetModuleHandleW")
 )
 
@@ -147,7 +158,10 @@ func NewNative(onChange func(Snapshot)) (*Native, error) {
 		workerDone:  make(chan struct{}),
 		monitorStop: make(chan struct{}),
 		monitorDone: make(chan struct{}),
+		pollDone:    make(chan struct{}),
 		foreground:  windows.GetForegroundWindow,
+		keyDown:     asyncKeyDown,
+		hookDown:    make(map[uint32]bool),
 	}
 	injector, err := newSendInputInjector()
 	if err != nil {
@@ -185,6 +199,7 @@ func (n *Native) Start() error {
 	}
 	go n.eventWorker()
 	go n.safetyMonitor()
+	go n.keyboardPoller()
 	return nil
 }
 
@@ -205,12 +220,18 @@ func (n *Native) runHookThread(ready chan<- error) {
 func (n *Native) Configure(config Config) error {
 	before := n.engine.Snapshot().State
 	err := n.engine.Configure(config)
+	if err == nil {
+		n.clearHookState()
+	}
 	n.updateActivationTargets(before, n.engine.Snapshot())
 	return err
 }
 func (n *Native) Enable(enabled bool) {
 	before := n.engine.Snapshot().State
 	n.engine.Enable(enabled)
+	if !enabled {
+		n.clearHookState()
+	}
 	n.updateActivationTargets(before, n.engine.Snapshot())
 }
 func (n *Native) Snapshot() Snapshot { return n.engine.Snapshot() }
@@ -245,6 +266,8 @@ func (n *Native) SetObserver(observer func(PhysicalEvent)) {
 // SetCaptureMode makes physical keyboard events observable by the UI without
 // allowing the same key press to toggle or trigger input enhancement.
 func (n *Native) SetCaptureMode(capturing bool) {
+	n.physical.Lock()
+	defer n.physical.Unlock()
 	if capturing {
 		n.captureKey.Store(0)
 		n.capturing.Store(true)
@@ -273,8 +296,69 @@ func (n *Native) Close() {
 		<-n.done
 		<-n.workerDone
 		<-n.monitorDone
+		<-n.pollDone
 	}
 	n.engine.Close()
+}
+
+// keyboardPoller is a fallback for protected game input paths that do not
+// deliver physical keyboard transitions to WH_KEYBOARD_LL. Hook events remain
+// the primary path; Engine's held-key state makes duplicate hook/poll edges
+// idempotent when both sources are available.
+func (n *Native) keyboardPoller() {
+	defer close(n.pollDone)
+	defer func() {
+		if recover() != nil {
+			n.engine.Fail(errors.New("panic in keyboard state poller"))
+		}
+	}()
+	ticker := time.NewTicker(keyboardPollInterval)
+	defer ticker.Stop()
+	states := make(map[uint32]bool, 5)
+	for {
+		select {
+		case <-n.monitorStop:
+			return
+		case <-ticker.C:
+			n.pollKeyboardOnce(states)
+		}
+	}
+}
+
+func (n *Native) pollKeyboardOnce(states map[uint32]bool) {
+	config := n.engine.Snapshot().Config
+	keys := []uint32{
+		config.OutputKey,
+		config.StopKey,
+		config.KeyboardToggleKey,
+		config.MouseLeftToggleKey,
+		config.MouseRightToggleKey,
+	}
+	live := make(map[uint32]bool, len(keys))
+	for _, code := range keys {
+		code = NormalizeKeyCode(code)
+		if !ValidKeyCode(code) || live[code] {
+			continue
+		}
+		live[code] = true
+		down := n.keyDown(code)
+		previous, initialized := states[code]
+		states[code] = down
+		if !initialized || down == previous {
+			continue
+		}
+		n.dispatchPolledEvent(PhysicalEvent{Kind: EventKey, Code: code, Down: down})
+	}
+	for code := range states {
+		if !live[code] {
+			delete(states, code)
+		}
+	}
+}
+
+func asyncKeyDown(code uint32) bool {
+	state, _, _ := procGetAsyncKeyState.Call(uintptr(VirtualKey(code)))
+	return state&0x8000 != 0
 }
 
 func (n *Native) safetyMonitor() {
@@ -290,6 +374,8 @@ func (n *Native) safetyMonitor() {
 	var runningSince time.Time
 	var candidate windows.HWND
 	var candidateSince time.Time
+	var targetProcessID uint32
+	var foregroundLostSince time.Time
 	for {
 		select {
 		case <-n.monitorStop:
@@ -298,7 +384,9 @@ func (n *Native) safetyMonitor() {
 			snapshot := n.engine.Snapshot()
 			if snapshot.State == StateArmed && snapshot.Config.Enabled && snapshot.Config.Mode != ModeKeyboard {
 				target = 0
+				targetProcessID = 0
 				runningSince = time.Time{}
+				foregroundLostSince = time.Time{}
 				foreground := n.foreground()
 				origin := windows.HWND(n.armTarget.Load())
 				if origin == 0 {
@@ -326,9 +414,11 @@ func (n *Native) safetyMonitor() {
 			candidateSince = time.Time{}
 			if snapshot.State != StateRunning {
 				target = 0
+				targetProcessID = 0
 				n.runTarget.Store(0)
 				n.armTarget.Store(0)
 				runningSince = time.Time{}
+				foregroundLostSince = time.Time{}
 				continue
 			}
 			foreground := n.foreground()
@@ -337,13 +427,22 @@ func (n *Native) safetyMonitor() {
 				if target == 0 {
 					continue
 				}
+				targetProcessID = windowProcessID(target)
 				runningSince = time.Now()
+				foregroundLostSince = time.Time{}
 				continue
 			}
-			if !n.safetyDisabled.Load() && (foreground == 0 || foreground != target) {
-				n.engine.Enable(false)
+			sameTarget := foreground != 0 && (foreground == target ||
+				targetProcessID != 0 && windowProcessID(foreground) == targetProcessID)
+			if !n.safetyDisabled.Load() && !sameTarget {
+				if foregroundLostSince.IsZero() {
+					foregroundLostSince = time.Now()
+				} else if time.Since(foregroundLostSince) >= foregroundLossGrace {
+					n.engine.Enable(false)
+				}
 				continue
 			}
+			foregroundLostSince = time.Time{}
 			if time.Since(runningSince) > 30*time.Minute {
 				n.engine.Fail(errors.New("continuous input exceeded the 30-minute safety limit"))
 			}
@@ -351,15 +450,19 @@ func (n *Native) safetyMonitor() {
 	}
 }
 
-func currentProcessWindow(window windows.HWND) bool {
+func windowProcessID(window windows.HWND) uint32 {
 	if window == 0 {
-		return false
+		return 0
 	}
 	var processID uint32
 	if _, err := windows.GetWindowThreadProcessId(window, &processID); err != nil {
-		return false
+		return 0
 	}
-	return processID == windows.GetCurrentProcessId()
+	return processID
+}
+
+func currentProcessWindow(window windows.HWND) bool {
+	return windowProcessID(window) == windows.GetCurrentProcessId()
 }
 
 func (n *Native) hookThread(ready chan<- error) {
@@ -439,6 +542,8 @@ func (n *Native) drain() {
 		if observer != nil {
 			observer(event)
 		}
+		n.physical.Lock()
+		n.noteHookEventLocked(event)
 		if n.capturing.Load() {
 			if event.Kind == EventKey {
 				key := NormalizeKeyCode(event.Code)
@@ -453,30 +558,94 @@ func (n *Native) drain() {
 					n.captureKey.Store(0)
 				}
 			}
+			n.physical.Unlock()
 			continue
 		}
-		before := n.engine.Snapshot()
-		n.engine.Handle(event)
-		after := n.engine.Snapshot()
-		if event.Kind == EventKey && event.Down {
-			if mode, toggle := before.Config.ToggleMode(event.Code); toggle && mode != ModeKeyboard && after.State == StateArmed && after.Config.Enabled && after.Config.Mode == mode {
-				target := n.foreground()
-				if target != 0 && !currentProcessWindow(target) {
-					n.runTarget.Store(uintptr(target))
-					n.armTarget.Store(0)
-					if n.engine.Start() {
-						after = n.engine.Snapshot()
-					} else {
-						n.runTarget.Store(0)
-					}
-				}
-			}
-		}
-		n.updateActivationTargets(before.State, after)
+		n.processPhysicalEventLocked(event)
+		n.physical.Unlock()
 	}
 	if n.overflow.Swap(false) {
 		n.engine.Fail(errors.New("physical input event queue overflowed; input enhancement disabled"))
 	}
+}
+
+func (n *Native) dispatchPolledEvent(event PhysicalEvent) {
+	n.physical.Lock()
+	defer n.physical.Unlock()
+	if n.capturing.Load() {
+		return
+	}
+	// A physical hook down is authoritative until its matching hook up. This
+	// prevents an injected repeat-key up from the polling fallback ending the
+	// user's still-held keyboard repeat trigger.
+	if event.Kind == EventKey && n.hookDown != nil && n.hookDown[NormalizeKeyCode(event.Code)] {
+		return
+	}
+	n.processPhysicalEventLocked(event)
+}
+
+func (n *Native) processPhysicalEvent(event PhysicalEvent) {
+	n.physical.Lock()
+	defer n.physical.Unlock()
+	if n.capturing.Load() {
+		return
+	}
+	n.noteHookEventLocked(event)
+	n.processPhysicalEventLocked(event)
+}
+
+func (n *Native) noteHookEventLocked(event PhysicalEvent) {
+	if event.Kind != EventKey {
+		return
+	}
+	if n.hookDown == nil {
+		n.hookDown = make(map[uint32]bool)
+	}
+	code := NormalizeKeyCode(event.Code)
+	if event.Down {
+		n.hookDown[code] = true
+	} else {
+		delete(n.hookDown, code)
+	}
+}
+
+func (n *Native) clearHookState() {
+	n.physical.Lock()
+	defer n.physical.Unlock()
+	n.clearHookStateLocked()
+}
+
+func (n *Native) clearHookStateLocked() {
+	if n.hookDown != nil {
+		clear(n.hookDown)
+	}
+}
+
+func (n *Native) processPhysicalEventLocked(event PhysicalEvent) {
+	before := n.engine.Snapshot()
+	n.engine.Handle(event)
+	after := n.engine.Snapshot()
+	// Hook ownership belongs to one enabled input session only. Clearing it on
+	// a stop prevents a missing key-up from suppressing polling after a later
+	// reconfigure or re-enable.
+	if before.State == StateRunning && after.State != StateRunning {
+		n.clearHookStateLocked()
+	}
+	if event.Kind == EventKey && event.Down {
+		if mode, toggle := before.Config.ToggleMode(event.Code); toggle && mode != ModeKeyboard && after.State == StateArmed && after.Config.Enabled && after.Config.Mode == mode {
+			target := n.foreground()
+			if target != 0 && !currentProcessWindow(target) {
+				n.runTarget.Store(uintptr(target))
+				n.armTarget.Store(0)
+				if n.engine.Start() {
+					after = n.engine.Snapshot()
+				} else {
+					n.runTarget.Store(0)
+				}
+			}
+		}
+	}
+	n.updateActivationTargets(before.State, after)
 }
 
 func (n *Native) enqueue(event PhysicalEvent) {

@@ -58,6 +58,53 @@ func TestKeyboardRepeatFollowsTheRepeatedKeyAndStopsOnRelease(t *testing.T) {
 	}
 }
 
+func TestUnrelatedKeysDoNotInterruptKeyboardRepeatOrMouseClick(t *testing.T) {
+	for _, mode := range []Mode{ModeKeyboard, ModeMouseLeft, ModeMouseRight} {
+		t.Run(mode.String(), func(t *testing.T) {
+			injector := &fakeInjector{}
+			engine, err := NewEngine(injector, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			config := DefaultConfig()
+			config.Mode = mode
+			config.Enabled = true
+			config.Interval = 5 * time.Millisecond
+			if err := engine.Configure(config); err != nil {
+				t.Fatal(err)
+			}
+			if mode == ModeKeyboard {
+				engine.Handle(PhysicalEvent{Kind: EventKey, Code: config.OutputKey, Down: true})
+			} else if !engine.Start() {
+				t.Fatal("mouse mode did not start")
+			}
+			deadline := time.Now().Add(250 * time.Millisecond)
+			for {
+				if emits, _ := injector.counts(); emits >= 2 {
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatalf("mode did not emit: %+v", engine.Snapshot())
+				}
+				time.Sleep(time.Millisecond)
+			}
+			before, _ := injector.counts()
+			engine.Handle(PhysicalEvent{Kind: EventKey, Code: 'A', Down: true})
+			engine.Handle(PhysicalEvent{Kind: EventKey, Code: 'A', Down: false})
+			time.Sleep(20 * time.Millisecond)
+			after, _ := injector.counts()
+			if snapshot := engine.Snapshot(); snapshot.State != StateRunning || after <= before {
+				t.Fatalf("unrelated key interrupted %s: before=%d after=%d snapshot=%+v", mode, before, after, snapshot)
+			}
+			if mode == ModeKeyboard {
+				engine.Handle(PhysicalEvent{Kind: EventKey, Code: config.OutputKey, Down: false})
+			} else {
+				engine.Enable(false)
+			}
+		})
+	}
+}
+
 func TestMouseModeWaitsForConfirmedTargetBeforeStarting(t *testing.T) {
 	injector := &fakeInjector{}
 	engine, _ := NewEngine(injector, nil)

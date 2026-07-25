@@ -38,13 +38,13 @@
 
 ## 候选包
 
-- 文件：`artifacts/release/GenshinTools-0.9.1-windows-amd64-portable.zip`
-- 大小：7,749,739 bytes
-- SHA-256：`efa8daff86c5fe525ced074a95dca03eb533559c06f6b543547e1bf9cc1dafbe`
+- 文件：`artifacts/release/GenshinTools-0.9.5-windows-amd64-portable.zip`
+- 大小：7,754,060 bytes
+- SHA-256：`5fc20ff4d204a52e63bc1057e6004b134689ff23fd2b2d539613b01ffa62bc81`
 - ZIP 条目：14 个，仅包含 `release.json`、三个 Release EXE、`build-info.json`、项目 MIT 许可证、第三方通知、许可证政策和 `LICENSES/` 文本。
 - 明确不含：Debug EXE、`data/`、日志、缓存、staging、测试夹具和源码。
 
-便携 ZIP 使用固定条目顺序和时间戳。版本 `0.9.1` 的三个成品 EXE 均为 Windows GUI 子系统，不会创建控制台窗口；包内 `release.json`、文件长度和 SHA-256 已重新核对。相同源码、提交身份、显式构建时间和工具链可复现相同包；任一输入改变都会按设计改变 `build-info.json` 和包哈希。
+便携 ZIP 使用固定条目顺序和时间戳。版本 `0.9.5` 在游戏前台键盘状态轮询兜底基础上，令热键录制与 hook/轮询事件串行化，录制全局停止键时不会实际触发停止；鼠标连点的前台安全监控改为识别同一游戏进程，并为临时 HWND 切换增加 750ms 宽限；当原始 hook 已确认重复键仍按住时，轮询不会被程序自身的模拟抬起覆盖，因此同时按其他键不会中止键盘连按。hook 按键归属会在停止、禁用与重配时清除，不会跨输入会话残留；注入辅助进程权限探针不再复制 race 测试 EXE，完整普通与 race 门禁均已通过。三个成品 EXE 均为 Windows GUI 子系统，不会创建控制台窗口；包内 `release.json`、文件长度和 SHA-256 已重新核对。相同源码、提交身份、显式构建时间和工具链可复现相同包；任一输入改变都会按设计改变 `build-info.json` 和包哈希。
 
 ## 尚未关闭的人工门禁
 

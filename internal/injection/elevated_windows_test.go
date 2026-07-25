@@ -58,20 +58,16 @@ func TestDirectHelperProcessInheritsParentElevationState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	helper := filepath.Join(t.TempDir(), "GenshinTools-injector.exe")
-	data, err := os.ReadFile(source)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(helper, data, 0o700); err != nil {
-		t.Fatal(err)
-	}
 	result := filepath.Join(t.TempDir(), "helper-result.txt")
 	t.Setenv(directHelperProbeEnvironment, "1")
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	var output limitedOutput
-	if err := runDirectHelper(ctx, helper, result, &output); err != nil {
+	// The helper protocol only requires an executable process. Re-running this
+	// test binary exercises the same direct-launch path without copying a race
+	// instrumented EXE into TempDir, which can intermittently fail under AV or
+	// concurrent test load.
+	if err := runDirectHelper(ctx, source, result, &output); err != nil {
 		t.Fatalf("run direct helper: %v; output=%s", err, output.String())
 	}
 	got, err := os.ReadFile(result)
