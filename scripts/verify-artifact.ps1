@@ -29,11 +29,19 @@ function Get-PESubsystem {
     return [BitConverter]::ToUInt16($Bytes, $PEOffset + 24 + 68)
 }
 
+function Get-PEMachine {
+    param([Parameter(Mandatory)] [string]$Path)
+    $Bytes = [IO.File]::ReadAllBytes($Path)
+    $PEOffset = [BitConverter]::ToInt32($Bytes, 0x3c)
+    return [BitConverter]::ToUInt16($Bytes, $PEOffset + 4)
+}
+
 $Expected = @(
-    @{ Path = (Join-Path $DistDirectory 'GenshinTools-debug.exe'); Subsystem = 3; Name = 'console' }
-    @{ Path = (Join-Path $DistDirectory 'GenshinTools.exe'); Subsystem = 2; Name = 'windows-gui' }
-    @{ Path = (Join-Path $DistDirectory 'GenshinTools-injector.exe'); Subsystem = 2; Name = 'windows-gui injection-helper' }
-    @{ Path = (Join-Path $DistDirectory 'GenshinTools-updater.exe'); Subsystem = 2; Name = 'windows-gui update-helper' }
+    @{ Path = (Join-Path $DistDirectory 'GenshinTools-debug.exe'); Subsystem = 3; Machine = 0x8664; Name = 'console x64'; Elevation = 'requireAdministrator' }
+    @{ Path = (Join-Path $DistDirectory 'GenshinTools.exe'); Subsystem = 2; Machine = 0x8664; Name = 'windows-gui x64'; Elevation = 'requireAdministrator' }
+    @{ Path = (Join-Path $DistDirectory 'GenshinTools-injector.exe'); Subsystem = 2; Machine = 0x8664; Name = 'windows-gui injection-helper x64'; Elevation = 'asInvoker' }
+    @{ Path = (Join-Path $DistDirectory 'GenshinTools-input.exe'); Subsystem = 2; Machine = 0x014c; Name = 'windows-gui input-helper x86'; Elevation = 'asInvoker' }
+    @{ Path = (Join-Path $DistDirectory 'GenshinTools-updater.exe'); Subsystem = 2; Machine = 0x8664; Name = 'windows-gui update-helper x64'; Elevation = 'asInvoker' }
 )
 
 Add-Type -AssemblyName System.Drawing
@@ -52,12 +60,20 @@ foreach ($Item in $Expected) {
     if ($Subsystem -ne $Item.Subsystem) {
         throw "$($Item.Path) subsystem is $Subsystem, expected $($Item.Subsystem) ($($Item.Name))"
     }
+    $Machine = Get-PEMachine -Path $Item.Path
+    if ($Machine -ne $Item.Machine) {
+        throw "$($Item.Path) PE machine is 0x$($Machine.ToString('X4')), expected 0x$($Item.Machine.ToString('X4')) ($($Item.Name))"
+    }
     $Icon = [Drawing.Icon]::ExtractAssociatedIcon($Item.Path)
     if ($null -eq $Icon -or $Icon.Width -le 0 -or $Icon.Height -le 0) {
         throw "$($Item.Path) has no extractable application icon"
     }
     $Icon.Dispose()
-    Write-Host "Verified $([IO.Path]::GetFileName($Item.Path)): FileVersion=$($Info.FileVersion), ProductVersion=$($Info.ProductVersion), Subsystem=$Subsystem, Icon=ok"
+    $PEText = [Text.Encoding]::UTF8.GetString([IO.File]::ReadAllBytes($Item.Path))
+    if (-not $PEText.Contains("requestedExecutionLevel level=`"$($Item.Elevation)`"")) {
+        throw "$($Item.Path) does not embed expected execution level $($Item.Elevation)"
+    }
+    Write-Host "Verified $([IO.Path]::GetFileName($Item.Path)): FileVersion=$($Info.FileVersion), ProductVersion=$($Info.ProductVersion), Machine=0x$($Machine.ToString('X4')), Subsystem=$Subsystem, Elevation=$($Item.Elevation), Icon=ok"
 }
 
 $HelperPath = Join-Path $DistDirectory 'GenshinTools-injector.exe'
@@ -101,3 +117,35 @@ if ($BuildInfo.version -ne $Version -or $BuildInfo.target -ne 'windows/amd64') {
     throw "Unexpected build-info.json contents"
 }
 Write-Host "Verified portable data layout and build-info.json"
+
+$AHKRuntimePath = Join-Path $DistDirectory 'AHK_F.exe'
+$AHKScriptPath = Join-Path $DistDirectory 'AHK_F.ahk'
+$AHKSourcePath = Join-Path $DistDirectory 'SOURCES\AutoHotkey-v1.1.37.02-source.zip'
+$AHKLicensePath = Join-Path $DistDirectory 'LICENSES\AutoHotkey-GPL-2.0.txt'
+$ExpectedAHKRuntimeHash = 'ba35b8b4346b79b8bb4f97360025cb6befaf501b03149a3b5fef8f07bdf265c7'
+$ExpectedAHKScriptHash = 'ce1e29cf5ca21dd0fa99840db895c9eea66e76721c0238d33bcb1e072d17ea4b'
+$ExpectedAHKSourceHash = '2b1d94e5d9b94b6a6dc3a2565bc65e74fef93ac2c34bb57fe182ffb4ab20fe92'
+foreach ($Path in @($AHKRuntimePath, $AHKScriptPath, $AHKSourcePath, $AHKLicensePath)) {
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        throw "Missing bundled AutoHotkey artifact: $Path"
+    }
+}
+if ((Get-FileHash -Algorithm SHA256 -LiteralPath $AHKRuntimePath).Hash.ToLowerInvariant() -ne $ExpectedAHKRuntimeHash) {
+    throw 'Bundled AHK_F.exe does not match the audited AutoHotkey v1.1.37.02 x86 runtime'
+}
+if ((Get-FileHash -Algorithm SHA256 -LiteralPath $AHKScriptPath).Hash.ToLowerInvariant() -ne $ExpectedAHKScriptHash) {
+    throw 'Bundled AHK_F.ahk does not match the audited project script'
+}
+if ((Get-FileHash -Algorithm SHA256 -LiteralPath $AHKSourcePath).Hash.ToLowerInvariant() -ne $ExpectedAHKSourceHash) {
+    throw 'Bundled AutoHotkey corresponding source archive has an unexpected hash'
+}
+if ((Get-PEMachine -Path $AHKRuntimePath) -ne 0x014c -or (Get-PESubsystem -Path $AHKRuntimePath) -ne 2) {
+    throw 'Bundled AHK_F.exe is not the expected x86 Windows GUI executable'
+}
+$AHKScript = Get-Content -LiteralPath $AHKScriptPath -Raw -Encoding UTF8
+foreach ($Marker in @('#SingleInstance Force', 'Process, Exist', 'WinGet, activePID, PID, A', 'ExitApp')) {
+    if (-not $AHKScript.Contains($Marker)) {
+        throw "Bundled AHK script is missing audited lifecycle marker: $Marker"
+    }
+}
+Write-Host 'Verified bundled AutoHotkey runtime, project script, GPL license and complete corresponding source'

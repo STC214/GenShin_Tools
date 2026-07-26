@@ -19,11 +19,19 @@ $GoCache = Join-Path $ProjectRoot '.cache\go-build'
 $GoTemp = Join-Path $ProjectRoot '.tmp\go'
 $IconPath = Join-Path $ProjectRoot 'assets\app.ico'
 $ManifestPath = Join-Path $ProjectRoot 'assets\app.manifest'
+$HelperManifestPath = Join-Path $ProjectRoot 'assets\helper.manifest'
+$InputHelperManifestPath = Join-Path $ProjectRoot 'assets\input-helper.manifest'
+$BundledAHKRoot = Join-Path $ProjectRoot 'third_party\autohotkey'
+$BundledAHKRuntimeHash = 'ba35b8b4346b79b8bb4f97360025cb6befaf501b03149a3b5fef8f07bdf265c7'
+$BundledAHKScriptHash = 'ce1e29cf5ca21dd0fa99840db895c9eea66e76721c0238d33bcb1e072d17ea4b'
+$BundledAHKSourceHash = '2b1d94e5d9b94b6a6dc3a2565bc65e74fef93ac2c34bb57fe182ffb4ab20fe92'
 $ResourcePath = Join-Path $ProjectRoot 'cmd\genshin-tools\app.syso'
 $HelperResourcePath = Join-Path $ProjectRoot 'cmd\injection-helper\app.syso'
+$InputHelperResourcePath = Join-Path $ProjectRoot 'cmd\input-helper\app.syso'
 $UpdaterResourcePath = Join-Path $ProjectRoot 'cmd\updater\app.syso'
 $GeneratedRC = Join-Path $BuildDir 'app.generated.rc'
 $HelperGeneratedRC = Join-Path $BuildDir 'injector.generated.rc'
+$InputHelperGeneratedRC = Join-Path $BuildDir 'input.generated.rc'
 $UpdaterGeneratedRC = Join-Path $BuildDir 'updater.generated.rc'
 
 function Invoke-Checked {
@@ -138,6 +146,8 @@ try {
 
     $IconRCPath = (Resolve-Path -LiteralPath $IconPath).Path.Replace('\', '/')
     $ManifestRCPath = (Resolve-Path -LiteralPath $ManifestPath).Path.Replace('\', '/')
+    $HelperManifestRCPath = (Resolve-Path -LiteralPath $HelperManifestPath).Path.Replace('\', '/')
+    $InputHelperManifestRCPath = (Resolve-Path -LiteralPath $InputHelperManifestPath).Path.Replace('\', '/')
     $ResourceText = @"
 #include <windows.h>
 
@@ -174,14 +184,17 @@ BEGIN
 END
 "@
     [IO.File]::WriteAllText($GeneratedRC, $ResourceText, [Text.UTF8Encoding]::new($false))
-    $HelperResourceText = $ResourceText.Replace('VALUE "FileDescription", "Genshin Tools\0"', 'VALUE "FileDescription", "Genshin Tools Injection Helper\0"').Replace('VALUE "InternalName", "GenshinTools\0"', 'VALUE "InternalName", "GenshinTools-injector\0"').Replace('VALUE "OriginalFilename", "GenshinTools.exe\0"', 'VALUE "OriginalFilename", "GenshinTools-injector.exe\0"')
+    $HelperResourceText = $ResourceText.Replace($ManifestRCPath, $HelperManifestRCPath).Replace('VALUE "FileDescription", "Genshin Tools\0"', 'VALUE "FileDescription", "Genshin Tools Injection Helper\0"').Replace('VALUE "InternalName", "GenshinTools\0"', 'VALUE "InternalName", "GenshinTools-injector\0"').Replace('VALUE "OriginalFilename", "GenshinTools.exe\0"', 'VALUE "OriginalFilename", "GenshinTools-injector.exe\0"')
     [IO.File]::WriteAllText($HelperGeneratedRC, $HelperResourceText, [Text.UTF8Encoding]::new($false))
-    $UpdaterResourceText = $ResourceText.Replace('VALUE "FileDescription", "Genshin Tools\0"', 'VALUE "FileDescription", "Genshin Tools Update Helper\0"').Replace('VALUE "InternalName", "GenshinTools\0"', 'VALUE "InternalName", "GenshinTools-updater\0"').Replace('VALUE "OriginalFilename", "GenshinTools.exe\0"', 'VALUE "OriginalFilename", "GenshinTools-updater.exe\0"')
+    $InputHelperResourceText = $ResourceText.Replace($ManifestRCPath, $InputHelperManifestRCPath).Replace('VALUE "FileDescription", "Genshin Tools\0"', 'VALUE "FileDescription", "Genshin Tools x86 Input Helper\0"').Replace('VALUE "InternalName", "GenshinTools\0"', 'VALUE "InternalName", "GenshinTools-input\0"').Replace('VALUE "OriginalFilename", "GenshinTools.exe\0"', 'VALUE "OriginalFilename", "GenshinTools-input.exe\0"')
+    [IO.File]::WriteAllText($InputHelperGeneratedRC, $InputHelperResourceText, [Text.UTF8Encoding]::new($false))
+    $UpdaterResourceText = $ResourceText.Replace($ManifestRCPath, $HelperManifestRCPath).Replace('VALUE "FileDescription", "Genshin Tools\0"', 'VALUE "FileDescription", "Genshin Tools Update Helper\0"').Replace('VALUE "InternalName", "GenshinTools\0"', 'VALUE "InternalName", "GenshinTools-updater\0"').Replace('VALUE "OriginalFilename", "GenshinTools.exe\0"', 'VALUE "OriginalFilename", "GenshinTools-updater.exe\0"')
     [IO.File]::WriteAllText($UpdaterGeneratedRC, $UpdaterResourceText, [Text.UTF8Encoding]::new($false))
 
     $Windres = (Get-Command windres -ErrorAction Stop).Source
     Invoke-Checked -Command $Windres -Arguments @('--input', $GeneratedRC, '--output', $ResourcePath, '--output-format', 'coff')
     Invoke-Checked -Command $Windres -Arguments @('--input', $HelperGeneratedRC, '--output', $HelperResourcePath, '--output-format', 'coff')
+    Invoke-Checked -Command $Windres -Arguments @('--target=pe-i386', '--input', $InputHelperGeneratedRC, '--output', $InputHelperResourcePath, '--output-format', 'coff')
     Invoke-Checked -Command $Windres -Arguments @('--input', $UpdaterGeneratedRC, '--output', $UpdaterResourcePath, '--output-format', 'coff')
 
     $Configurations = if ($Configuration -eq 'Both') { @('Debug', 'Release') } else { @($Configuration) }
@@ -222,6 +235,24 @@ END
     Invoke-Checked -Command 'go' -Arguments @('build', '-trimpath', '-buildvcs=false', '-ldflags', ($HelperLdFlags -join ' '), '-o', $HelperOutput, './cmd/injection-helper')
     $BuiltFiles += $HelperOutput
 
+    $InputHelperLdFlags = @(
+        "-X genshintools/internal/buildinfo.Version=$Version"
+        "-X genshintools/internal/buildinfo.Commit=$Commit"
+        "-X genshintools/internal/buildinfo.BuildTimeUTC=$BuildTimeUtc"
+        "-X genshintools/internal/buildinfo.Configuration=input-helper-x86"
+        '-H=windowsgui'
+        '-s'
+        '-w'
+    )
+    $InputHelperOutput = Join-Path $DistDir 'GenshinTools-input.exe'
+    $env:GOARCH = '386'
+    try {
+        Invoke-Checked -Command 'go' -Arguments @('build', '-trimpath', '-buildvcs=false', '-ldflags', ($InputHelperLdFlags -join ' '), '-o', $InputHelperOutput, './cmd/input-helper')
+    } finally {
+        $env:GOARCH = 'amd64'
+    }
+    $BuiltFiles += $InputHelperOutput
+
     $UpdaterLdFlags = @(
         "-X genshintools/internal/buildinfo.Version=$Version"
         "-X genshintools/internal/buildinfo.Commit=$Commit"
@@ -242,6 +273,24 @@ END
     Copy-Item -LiteralPath (Join-Path $ProjectRoot 'LICENSE') -Destination $DistDir -Force
     Copy-Item -LiteralPath (Join-Path $ProjectRoot 'LICENSE_POLICY.md') -Destination $DistDir -Force
     Copy-Item -LiteralPath (Join-Path $ProjectRoot 'LICENSES') -Destination $DistDir -Recurse -Force
+    $BundledAHKRuntime = Join-Path $BundledAHKRoot 'AHK_F.exe'
+    $BundledAHKScript = Join-Path $BundledAHKRoot 'AHK_F.ahk'
+    $BundledAHKSource = Join-Path $BundledAHKRoot 'AutoHotkey-v1.1.37.02-source.zip'
+    $BundledAHKLicense = Join-Path $BundledAHKRoot 'LICENSE-GPL-2.0.txt'
+    if ((Get-FileHash -Algorithm SHA256 $BundledAHKRuntime).Hash.ToLowerInvariant() -ne $BundledAHKRuntimeHash) {
+        throw 'bundled AutoHotkey runtime hash does not match the audited v1.1.37.02 x86 binary'
+    }
+    if ((Get-FileHash -Algorithm SHA256 $BundledAHKScript).Hash.ToLowerInvariant() -ne $BundledAHKScriptHash) {
+        throw 'bundled AutoHotkey script hash does not match the audited project source'
+    }
+    if ((Get-FileHash -Algorithm SHA256 $BundledAHKSource).Hash.ToLowerInvariant() -ne $BundledAHKSourceHash) {
+        throw 'bundled AutoHotkey source archive hash does not match the audited v1.1.37.02 source'
+    }
+    New-Item -ItemType Directory -Force -Path (Join-Path $DistDir 'SOURCES') | Out-Null
+    Copy-Item -LiteralPath $BundledAHKRuntime -Destination (Join-Path $DistDir 'AHK_F.exe') -Force
+    Copy-Item -LiteralPath $BundledAHKScript -Destination (Join-Path $DistDir 'AHK_F.ahk') -Force
+    Copy-Item -LiteralPath $BundledAHKSource -Destination (Join-Path $DistDir 'SOURCES\AutoHotkey-v1.1.37.02-source.zip') -Force
+    Copy-Item -LiteralPath $BundledAHKLicense -Destination (Join-Path $DistDir 'LICENSES\AutoHotkey-GPL-2.0.txt') -Force
 
     $BuildInfo = [ordered]@{
         product       = 'Genshin Tools'

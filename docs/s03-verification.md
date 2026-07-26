@@ -9,10 +9,12 @@
 - 独立 `LockOSThread` 钩子线程、`WH_KEYBOARD_LL`、`WH_MOUSE_LL` 和 `GetMessageW` 消息循环。
 - 钩子回调只执行 injected/`dwExtraInfo` 过滤和固定 256 项 SPSC 环形队列写入，不等待、不记录日志、不执行状态机。
 - `Disabled / Armed / Running / Stopping / Fault` 单一状态机，generation 阻断旧输出循环。
-- 键盘扫描码完整 down/up、鼠标左/右键完整 down/up；注入事件不会自激。
+- 键盘主路径为独立 x86 worker：同一 worker 进程安装低级键盘 hook、维护每个物理连发键的 held 状态，并调用带 AHK ignore-level 标记的 `keybd_event` 输出平衡的 down/up；主 x64 进程扫描码成对 `SendInput` 只作末级降级。鼠标采用与 QuickInput 一致的单事件 `SendInput`。
+- 仅当配置的物理触发键位于已核验游戏前台时，worker 才吞掉该键的 down/up，以免游戏同时收到持续物理 down 和合成重复；其他键和其他窗口始终放行。切出游戏暂停输出但保留 held 循环，其他按键不会取消任何连发键。
+- 快捷键全键盘轮询明确排除鼠标左右键、中键和 XButton 虚拟键，点击“设置”遗留的鼠标按下状态不会再被保存为 `Unknown key`。
 - `MapVirtualKeyExW` 按当前前台线程键盘布局转换，并处理扩展扫描码。
 - 高分辨率 waitable timer；不支持高分辨率标志的旧系统回退普通 waitable timer。
-- `SendInput` 逐次检查接收数量；部分成功时立即补发防御性 up 并进入故障态。
+- 键盘和鼠标均检查 `SendInput` 接收数量；键盘若成对提交失败会补发防御性 up，鼠标逐边沿失败同样补发 up，随后进入故障态。
 - 当前进程与前台进程 integrity level 检测；UIPI 高权限阻断显示明确错误。
 - 前台窗口改变、锁屏/解锁、休眠/恢复、退出和配置切换均停止输出。
 - 连续运行 30 分钟硬保护，防止物理松开事件永久丢失后无限输出。
@@ -35,7 +37,7 @@
 | 快速物理边沿 1000 次 | 通过，无延迟输出 |
 | 启用/禁用 200 次 | 通过，最终 Disabled |
 | 原生钩子安装/卸载 200 次 | 通过 |
-| 真实 `SendInput` 钩子捕获 | 键盘/左键/右键各 100 组，down/up 全部相等；事件在测试钩子中吞掉，不污染桌面应用 |
+| 真实 Win32 输出捕获 | 低级钩子捕获 0.9.5 基线扫描码键盘事件与 QuickInput 形态左键/右键；各 100 组 down/up 全部相等，不污染桌面应用 |
 | 完整引擎节拍矩阵 | 键盘/左键/右键 × 30/50/100/250ms，全部 down/up 成对且平均节拍在容差内 |
 | 前台窗口变化保护 | 通过，运行态自动转 Disabled |
 | 整项目回归 | 通过 |

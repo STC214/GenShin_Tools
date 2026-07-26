@@ -15,6 +15,58 @@ func TestWinInputLayout(t *testing.T) {
 	}
 }
 
+func TestBaselineKeyboardInputUsesScanCodeAndProjectMarker(t *testing.T) {
+	down, err := scanCodeKeyboardInput(EncodeKeyCode('F', false), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	up, err := scanCodeKeyboardInput(EncodeKeyCode('F', false), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if down.Type != inputKeyboard || up.Type != inputKeyboard {
+		t.Fatalf("input types = %d/%d, want keyboard", down.Type, up.Type)
+	}
+	if virtualKey := *(*uint16)(unsafe.Pointer(&down.Data[0])); virtualKey != 0 {
+		t.Fatalf("scan-code input virtual key = %#x, want zero", virtualKey)
+	}
+	downScan := *(*uint16)(unsafe.Pointer(&down.Data[2]))
+	upScan := *(*uint16)(unsafe.Pointer(&up.Data[2]))
+	if downScan == 0 || upScan != downScan {
+		t.Fatalf("scan codes = %#x/%#x", downScan, upScan)
+	}
+	downFlags := *(*uint32)(unsafe.Pointer(&down.Data[4]))
+	upFlags := *(*uint32)(unsafe.Pointer(&up.Data[4]))
+	if downFlags != keyeventfScanCode || upFlags != keyeventfScanCode|keyeventfKeyUp {
+		t.Fatalf("keyboard flags = %#x/%#x", downFlags, upFlags)
+	}
+	if marker := *(*uintptr)(unsafe.Pointer(&down.Data[16])); marker != injectionMarker {
+		t.Fatalf("down marker = %#x, want %#x", marker, injectionMarker)
+	}
+	if marker := *(*uintptr)(unsafe.Pointer(&up.Data[16])); marker != injectionMarker {
+		t.Fatalf("up marker = %#x, want %#x", marker, injectionMarker)
+	}
+}
+
+func TestBaselineKeyboardInputPreservesExtendedKeyIdentity(t *testing.T) {
+	pageUp, err := scanCodeKeyboardInput(EncodeKeyCode(0x21, true), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keypadNine, err := scanCodeKeyboardInput(EncodeKeyCode(0x21, false), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pageUpFlags := *(*uint32)(unsafe.Pointer(&pageUp.Data[4]))
+	keypadFlags := *(*uint32)(unsafe.Pointer(&keypadNine.Data[4]))
+	if pageUpFlags&keyeventfExtendedKey == 0 {
+		t.Fatalf("PageUp flags = %#x, want extended", pageUpFlags)
+	}
+	if keypadFlags&keyeventfExtendedKey != 0 {
+		t.Fatalf("keypad 9 flags = %#x, want non-extended", keypadFlags)
+	}
+}
+
 func TestRawInputLayoutsAndPhysicalKeyboardTranslation(t *testing.T) {
 	if size := unsafe.Sizeof(rawInputDevice{}); size != 16 {
 		t.Fatalf("sizeof(RAWINPUTDEVICE) = %d, want 16", size)
@@ -76,56 +128,39 @@ func TestNativeQueueSupportsConcurrentHookAndRawInputProducers(t *testing.T) {
 	}
 }
 
-func TestKeyboardPairUsesScanCodeMarkerAndKeyUp(t *testing.T) {
-	config := DefaultConfig()
-	pair, err := inputPair(config)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if pair[0].Type != inputKeyboard || pair[1].Type != inputKeyboard {
-		t.Fatal("wrong input type")
-	}
-	for i := range pair {
-		if scan := *(*uint16)(unsafe.Pointer(&pair[i].Data[2])); scan == 0 {
-			t.Fatal("missing scan code")
-		}
-		if marker := *(*uintptr)(unsafe.Pointer(&pair[i].Data[16])); marker != injectionMarker {
-			t.Fatalf("marker = %#x", marker)
+func TestPressDurationAndSeparatedPressRelease(t *testing.T) {
+	for _, test := range []struct {
+		interval time.Duration
+		want     time.Duration
+	}{
+		{time.Millisecond, time.Millisecond},
+		{10 * time.Millisecond, 5 * time.Millisecond},
+		{100 * time.Millisecond, 50 * time.Millisecond},
+		{time.Second, 50 * time.Millisecond},
+	} {
+		if got := pressDuration(test.interval); got != test.want {
+			t.Fatalf("pressDuration(%s) = %s, want %s", test.interval, got, test.want)
 		}
 	}
-	downFlags := *(*uint32)(unsafe.Pointer(&pair[0].Data[4]))
-	upFlags := *(*uint32)(unsafe.Pointer(&pair[1].Data[4]))
-	if downFlags&keyeventfScanCode == 0 || downFlags&keyeventfKeyUp != 0 {
-		t.Fatalf("down flags = %#x", downFlags)
-	}
-	if upFlags&keyeventfScanCode == 0 || upFlags&keyeventfKeyUp == 0 {
-		t.Fatalf("up flags = %#x", upFlags)
-	}
-}
-
-func TestKeyboardInputPreservesExtendedNavigationAndKeypadIdentity(t *testing.T) {
-	pageUp, err := keyboardInput(EncodeKeyCode(0x21, true), false)
+	var sequence []string
+	var paused time.Duration
+	err := emitPressRelease(
+		func() error { sequence = append(sequence, "down"); return nil },
+		func() error { sequence = append(sequence, "up"); return nil },
+		7*time.Millisecond,
+		func(duration time.Duration) {
+			sequence = append(sequence, "hold")
+			paused = duration
+		},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	num9, err := keyboardInput(EncodeKeyCode(0x21, false), false)
-	if err != nil {
-		t.Fatal(err)
+	if got := len(sequence); got != 3 || sequence[0] != "down" || sequence[1] != "hold" || sequence[2] != "up" {
+		t.Fatalf("press-release sequence = %v", sequence)
 	}
-	pageUpFlags := *(*uint32)(unsafe.Pointer(&pageUp.Data[4]))
-	num9Flags := *(*uint32)(unsafe.Pointer(&num9.Data[4]))
-	if pageUpFlags&keyeventfExtendedKey == 0 {
-		t.Fatalf("Page Up flags = %#x, missing extended-key flag", pageUpFlags)
-	}
-	if num9Flags&keyeventfExtendedKey != 0 {
-		t.Fatalf("keypad 9 flags = %#x, unexpectedly extended", num9Flags)
-	}
-	numEnter, err := keyboardInput(EncodeKeyCode(0x0d, true), false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if flags := *(*uint32)(unsafe.Pointer(&numEnter.Data[4])); flags&keyeventfExtendedKey == 0 {
-		t.Fatalf("keypad Enter flags = %#x, missing extended-key flag", flags)
+	if paused != 7*time.Millisecond {
+		t.Fatalf("hold duration = %s", paused)
 	}
 }
 
@@ -302,6 +337,34 @@ func TestCaptureModeRecordsKeyDownBeforeFirstPollingScan(t *testing.T) {
 	n.pollKeyboardOnce(states)
 	if n.capturing.Load() {
 		t.Fatal("first-scan capture did not finish on key-up")
+	}
+}
+
+func TestCapturePollingIgnoresMouseButtonHeldBySettingsClick(t *testing.T) {
+	injector := &fakeInjector{}
+	engine, err := NewEngine(injector, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pressed := map[uint32]bool{
+		NormalizeKeyCode(0x01): true, // VK_LBUTTON from the settings click.
+		NormalizeKeyCode('A'):  true,
+	}
+	var recorded uint32
+	n := &Native{
+		engine:  engine,
+		keyDown: func(code uint32) bool { return pressed[NormalizeKeyCode(code)] },
+		observer: func(event PhysicalEvent) {
+			if event.Kind == EventKey && event.Down {
+				recorded = event.Code
+			}
+		},
+	}
+	states := make(map[uint32]bool)
+	n.SetCaptureMode(true)
+	n.pollKeyboardOnce(states)
+	if !SameKey(recorded, 'A') || !SameKey(n.captureKey.Load(), 'A') {
+		t.Fatalf("settings click was captured as a key: recorded=%#x capture=%#x", recorded, n.captureKey.Load())
 	}
 }
 
@@ -619,25 +682,19 @@ func TestMouseModeWaitsForConfiguredGameProcess(t *testing.T) {
 	}
 }
 
-func TestMousePairAndDefensiveRelease(t *testing.T) {
-	config := DefaultConfig()
-	config.Mode = ModeMouseLeft
-	pair, err := inputPair(config)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := *(*uint32)(unsafe.Pointer(&pair[0].Data[12])); got != mouseeventfLeftDown {
+func TestQuickInputCompatibleMouseEvents(t *testing.T) {
+	down := mouseInput(mouseeventfLeftDown)
+	up := mouseInput(mouseeventfLeftUp)
+	if got := *(*uint32)(unsafe.Pointer(&down.Data[12])); got != mouseeventfLeftDown {
 		t.Fatalf("down = %#x", got)
 	}
-	if got := *(*uint32)(unsafe.Pointer(&pair[1].Data[12])); got != mouseeventfLeftUp {
+	if got := *(*uint32)(unsafe.Pointer(&up.Data[12])); got != mouseeventfLeftUp {
 		t.Fatalf("up = %#x", got)
 	}
-	release, err := releaseInput(config)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := *(*uint32)(unsafe.Pointer(&release.Data[12])); got != mouseeventfLeftUp {
-		t.Fatalf("release = %#x", got)
+	for _, event := range []winInput{down, up} {
+		if got := *(*uintptr)(unsafe.Pointer(&event.Data[24])); got != quickInputExtraInfo {
+			t.Fatalf("mouse extra info = %#x, want %#x", got, quickInputExtraInfo)
+		}
 	}
 }
 
@@ -681,6 +738,47 @@ func TestInjectedCallbacksAreIgnored(t *testing.T) {
 	handleMouseHook(&mouse, wMLButtonDown)
 	if n.head.Load() != 0 {
 		t.Fatalf("injected events queued: %d", n.head.Load())
+	}
+}
+
+func TestKeyboardRepeatPreservesPhysicalTriggerInConfiguredGame(t *testing.T) {
+	n, err := NewNative(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var foreground atomic.Uintptr
+	foreground.Store(77)
+	n.foreground = func() windows.HWND { return windows.HWND(foreground.Load()) }
+	n.windowPID = func(window windows.HWND) uint32 { return uint32(window) }
+	n.SetGameProcesses([]GameProcess{{PID: 77, CreationTime: 1}})
+	config := DefaultConfig()
+	config.Enabled = true
+	if err := n.Configure(config); err != nil {
+		t.Fatal(err)
+	}
+	activeNative.Store(n)
+	defer activeNative.Store(nil)
+	if suppressed := handleKeyboardHook(&keyboardHook{VirtualKey: 'F'}, wMKeyDown); suppressed {
+		t.Fatal("physical repeat trigger was suppressed in the configured game")
+	}
+	if n.head.Load() != 1 {
+		t.Fatalf("physical trigger was not queued for the repeat engine: %d", n.head.Load())
+	}
+	if suppressed := handleKeyboardHook(&keyboardHook{VirtualKey: 'A'}, wMKeyDown); suppressed {
+		t.Fatal("unrelated physical key was suppressed")
+	}
+	foreground.Store(88)
+	if suppressed := handleKeyboardHook(&keyboardHook{VirtualKey: 'F'}, wMKeyDown); suppressed {
+		t.Fatal("repeat trigger was suppressed outside the configured game")
+	}
+	foreground.Store(77)
+	n.Enable(false)
+	if suppressed := handleKeyboardHook(&keyboardHook{VirtualKey: 'F'}, wMKeyDown); suppressed {
+		t.Fatal("disabled repeat trigger was suppressed")
+	}
+	n.Enable(true)
+	if suppressed := handleKeyboardHook(&keyboardHook{VirtualKey: 'F', Flags: llkhfInjected, ExtraInfo: injectionMarker}, wMKeyDown); suppressed {
+		t.Fatal("synthetic repeat output was suppressed")
 	}
 }
 

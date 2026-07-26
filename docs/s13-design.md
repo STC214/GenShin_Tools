@@ -14,7 +14,7 @@ S13 不增加产品功能，而是把 S00–S12 作为一个整体重新验证�
 2. 清洁构建 Debug、GUI Release、注入 helper 和 updater。
 3. 核验 VERSIONINFO、PE subsystem、图标和便携目录。
 4. Win32 单实例、托盘、恢复和短时关闭压力。
-5. 被吞掉的真实 `SendInput` 键盘/左键/右键矩阵和 hook 生命周期。
+5. 被吞掉的 0.9.5 基线扫描码键盘、QuickInput 形态左键/右键矩阵和 hook 生命周期。
 6. 纯启动真实子进程夹具与注入/helper 回归。
 7. 只读 Sophon schema 在线审计。
 8. 生成确定性候选 ZIP，重新通过 S12 staging 解析器打开，并输出 SHA-256 sidecar。

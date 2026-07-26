@@ -152,6 +152,8 @@ type application struct {
 	injectionAuditTask      uint64
 	injectionLaunchTask     uint64
 	injectionLaunching      bool
+	injectionInputTools     []input.ExternalCompatibilityTool
+	inputCompatibilityTask  uint64
 	pluginLayout            plugins.Layout
 	pluginState             plugins.State
 	pluginItems             []plugins.Item
@@ -191,6 +193,13 @@ type application struct {
 	cpuWarning              atomic.Pointer[cpuWarningConfig]
 	editBrush               win32.HBRUSH
 	sessionNotifications    bool
+	ahkManaged              atomic.Bool
+	ahkActive               atomic.Bool
+	ahkBundled              atomic.Bool
+	ahkStarting             atomic.Bool
+	ahkWithGame             atomic.Bool
+	ahkPID                  atomic.Uint32
+	bundledAHKTask          uint64
 	shutdown                sync.Once
 	cleanExit               bool
 	fatal                   bool
@@ -438,6 +447,7 @@ func Run(layout paths.Layout, build buildinfo.Info) (returnErr error) {
 		hoverButton:         -1,
 	}
 	app.syncStoreSelection()
+	app.ahkWithGame.Store(app.settings.Game.AHKWithGame)
 	app.refreshFufuTarget()
 	app.shellStatus = app.texts.Text("settings.status.ready")
 	app.resourceState.Status = app.texts.Text("resource.status.ready")
@@ -655,6 +665,9 @@ func (app *application) handleMessage(hwnd win32.HWND, message uint32, wParam, l
 			select {
 			case app.inputSnap = <-app.inputUpdates:
 			default:
+				if app.ahkWithGame.Load() {
+					app.scheduleBundledAHK()
+				}
 				app.syncInputScrollbar()
 				win32.Invalidate(hwnd)
 				return 0
@@ -682,6 +695,11 @@ func (app *application) handleMessage(hwnd win32.HWND, message uint32, wParam, l
 					app.gameState = update.state
 					app.syncInputGameProcesses()
 					app.reconcileCaptureOverlay(false)
+					if app.settings.Game.AHKWithGame && len(app.gameState.Running) != 0 {
+						app.scheduleBundledAHK()
+					} else if len(app.gameState.Running) == 0 {
+						app.tasks.Cancel(app.bundledAHKTask)
+					}
 				}
 			default:
 				win32.Invalidate(hwnd)
@@ -695,11 +713,28 @@ func (app *application) handleMessage(hwnd win32.HWND, message uint32, wParam, l
 			case app.launchSnap = <-app.launchUpdates:
 			default:
 				if previous != launch.StateRunning && app.launchSnap.State == launch.StateRunning {
+					injectedLaunch := app.injectionLaunching
+					keepForAHKManagement := app.settings.Game.AHKWithGame || (injectedLaunch && capturedAHKTool(app.injectionInputTools))
 					if app.injectionLaunching {
 						app.injectionStatus = fmt.Sprintf(app.texts.Text("injection.status.launchSuccess"), app.launchSnap.PID)
 						app.injectionLaunching = false
 					}
-					app.applyPostLaunch(app.launchSnap.PostBehavior)
+					if injectedLaunch {
+						app.scheduleInputCompatibilityRestart()
+					}
+					if app.settings.Game.AHKWithGame {
+						app.scheduleBundledAHK()
+					}
+					postBehavior := app.launchSnap.PostBehavior
+					if keepForAHKManagement && postBehavior == launch.PostExit {
+						// Keep the launcher resident until the managed AHK has
+						// started, and retain crash-restart/status management.
+						// The bundled script still owns the PID/foreground
+						// checks if the launcher is later closed from the tray.
+						postBehavior = launch.PostMinimize
+						app.logger.Info("kept launcher resident for managed AutoHotkey foreground state", nil)
+					}
+					app.applyPostLaunch(postBehavior)
 					app.scheduleBetterGI()
 				}
 				win32.Invalidate(hwnd)
@@ -809,6 +844,7 @@ func (app *application) handleMessage(hwnd win32.HWND, message uint32, wParam, l
 					if update.err != "" {
 						app.injectionStatus = update.err
 						app.injectionLaunching = false
+						app.injectionInputTools = nil
 					} else if update.status != "" {
 						app.injectionStatus = update.status
 					}
@@ -1459,7 +1495,30 @@ func (app *application) paint(hwnd win32.HWND) {
 }
 
 func (app *application) startInput() error {
-	native, err := input.NewNative(func(snapshot input.Snapshot) {
+	var lastLoggedState atomic.Uint32
+	var native *input.Native
+	lastLoggedState.Store(^uint32(0))
+	var err error
+	native, err = input.NewNative(func(snapshot input.Snapshot) {
+		if lastLoggedState.Swap(uint32(snapshot.State)) != uint32(snapshot.State) {
+			keyboardBackend := "paired scan-code SendInput fallback"
+			keyboardWorkerPID := 0
+			workerActive := native != nil && native.KeyboardWorkerActive()
+			if workerActive {
+				keyboardBackend = "x86 AHK-compatible keybd_event worker"
+				keyboardWorkerPID = native.KeyboardWorkerPID()
+			}
+			app.logger.Info("input enhancement state changed", map[string]any{
+				"state":                           snapshot.State.String(),
+				"mode":                            snapshot.Config.Mode.String(),
+				"enabled":                         snapshot.Config.Enabled,
+				"outputCount":                     snapshot.OutputCount,
+				"lastError":                       snapshot.LastError,
+				"keyboardBackend":                 keyboardBackend,
+				"keyboardWorkerPID":               keyboardWorkerPID,
+				"physicalTriggerSuppressionArmed": workerActive,
+			})
+		}
 		select {
 		case app.inputUpdates <- snapshot:
 		default:
@@ -2310,6 +2369,10 @@ func (app *application) startInjectionLaunch() {
 	app.tasks.Cancel(app.injectionLaunchTask)
 	candidate := *app.gameState.Candidate
 	app.injectionStatus = app.texts.Text("injection.status.starting")
+	app.injectionInputTools = nil
+	if !app.settings.Game.AHKWithGame {
+		app.injectionInputTools = input.CaptureExternalCompatibilityTools()
+	}
 	app.injectionLaunching = true
 	texts := app.texts
 	app.injectionLaunchTask = app.tasks.Run(func(ctx context.Context, id uint64) {
@@ -3738,6 +3801,33 @@ func (app *application) saveInputSettings() error {
 	return nil
 }
 
+func (app *application) setAHKWithGame(enabled bool) {
+	next := app.settings
+	next.Game.AHKWithGame = enabled
+	if err := config.Save(app.layout.Config, next); err != nil {
+		app.inputUIError = err.Error()
+		app.logger.Error("save AHK game lifecycle setting", map[string]any{"error": err.Error()})
+		win32.Invalidate(app.hwnd)
+		return
+	}
+	app.settings = next
+	app.ahkWithGame.Store(enabled)
+	app.inputUIError = ""
+	if enabled {
+		app.scheduleBundledAHK()
+	} else {
+		app.tasks.Cancel(app.bundledAHKTask)
+		if app.ahkBundled.Load() {
+			processID := app.ahkPID.Load()
+			path := filepath.Join(app.layout.Root, "AHK_F.exe")
+			if err := input.StopExternalCompatibilityTool(processID, path); err != nil {
+				app.logger.Error("stop bundled AHK after disabling lifecycle option", map[string]any{"error": err.Error(), "pid": processID})
+			}
+		}
+	}
+	win32.Invalidate(app.hwnd)
+}
+
 func (app *application) inputClick(x, y int) {
 	if app.inputNative == nil {
 		return
@@ -3837,6 +3927,13 @@ func (app *application) inputClick(x, y int) {
 		} else {
 			app.inputUIError = ""
 			persistedChange = true
+		}
+	case y >= sy(612) && y < sy(648):
+		clientRight := win32.GetClientRect(app.hwnd).Right - win32.Scale(42, app.dpi)
+		_, optionRect, _ := inputFooterRects(int32(left), clientRight, app.dpi)
+		if pointInButton(optionRect, int32(x), int32(y)) {
+			app.setAHKWithGame(!app.settings.Game.AHKWithGame)
+			return
 		}
 	}
 	if persistedChange {
@@ -4068,11 +4165,42 @@ func (app *application) paintInput(dc win32.HDC, client win32.Rect, left int32) 
 	if visibleError == "" {
 		visibleError = app.inputUIError
 	}
-	if visibleError != "" {
-		draw(fmt.Sprintf(app.texts.Text("input.error"), visibleError), staticRow(612, 648, cardBrush), win32.Color(255, 126, 126))
-	} else {
-		draw(fmt.Sprintf(app.texts.Text("input.outputCount"), snapshot.OutputCount), staticRow(612, 648, cardBrush), win32.Color(145, 154, 180))
+	outputRect, optionRect, ahkRect := inputFooterRects(left, right, app.dpi)
+	app.paintStaticSurface(dc, outputRect, cardBrush)
+	optionBrush := buttonBrush
+	if app.settings.Game.AHKWithGame {
+		optionBrush = greenBrush
 	}
+	app.paintButtonSurface(dc, optionRect, optionBrush)
+	app.paintStaticSurface(dc, ahkRect, cardBrush)
+	if visibleError != "" {
+		draw(fmt.Sprintf(app.texts.Text("input.error"), visibleError), outputRect, win32.Color(255, 126, 126))
+	} else {
+		draw(fmt.Sprintf(app.texts.Text("input.outputCount"), snapshot.OutputCount), outputRect, win32.Color(145, 154, 180))
+	}
+	draw(fmt.Sprintf(app.texts.Text("input.ahk.withGame"), onOffText(app.texts.Language(), app.settings.Game.AHKWithGame)), optionRect, win32.Color(225, 229, 242))
+	ahkText := app.texts.Text("input.ahk.unmanaged")
+	ahkColor := win32.Color(145, 154, 180)
+	if app.ahkManaged.Load() {
+		ahkText = app.texts.Text("input.ahk.inactive")
+		ahkColor = win32.Color(238, 92, 104)
+		if app.ahkActive.Load() {
+			ahkText = app.texts.Text("input.ahk.active")
+			ahkColor = win32.Color(75, 201, 132)
+		}
+	}
+	draw(ahkText, ahkRect, ahkColor)
+}
+
+func inputFooterRects(left, right int32, dpi uint32) (output, option, status win32.Rect) {
+	gap := win32.Scale(6, dpi)
+	width := right - left
+	first := left + width*2/5
+	second := left + width*4/5
+	top, bottom := win32.Scale(612, dpi), win32.Scale(648, dpi)
+	return win32.Rect{Left: left, Top: top, Right: first - gap, Bottom: bottom},
+		win32.Rect{Left: first, Top: top, Right: second - gap, Bottom: bottom},
+		win32.Rect{Left: second, Top: top, Right: right, Bottom: bottom}
 }
 
 func inputStateText(texts localization.Catalog, state input.State) string {
@@ -4313,6 +4441,230 @@ func (app *application) applyPostLaunch(behavior launch.PostBehavior) {
 	case launch.PostExit:
 		app.requestShutdown()
 	}
+}
+
+func (app *application) scheduleInputCompatibilityRestart() {
+	tools := append([]input.ExternalCompatibilityTool(nil), app.injectionInputTools...)
+	app.injectionInputTools = nil
+	app.tasks.Cancel(app.inputCompatibilityTask)
+	logger := app.logger
+	native := app.inputNative
+	app.inputCompatibilityTask = app.tasks.Run(func(ctx context.Context, _ uint64) {
+		// StateRunning only means the suspended game process was resumed. Wait
+		// until a verified game window is actually foreground and stable before
+		// reinstalling hooks, so asynchronous plugin initialization has reached
+		// the player's input phase.
+		if native == nil || !waitForStableGameForeground(ctx, native.GameForeground, 1500*time.Millisecond) {
+			return
+		}
+		if err := native.RefreshKeyboardBackend(); err != nil {
+			logger.Error("refresh built-in keyboard backend after injection", map[string]any{"error": err.Error()})
+		} else {
+			logger.Info("refreshed built-in keyboard backend after injection", map[string]any{"keyboardWorkerPID": native.KeyboardWorkerPID()})
+		}
+		results := input.RestartExternalCompatibilityTools(tools)
+		var managedAHK *input.ExternalToolRestartResult
+		for _, result := range results {
+			fields := map[string]any{"path": result.Path, "oldPIDs": result.OldPIDs, "newPID": result.NewPID}
+			if result.Error != nil {
+				fields["error"] = result.Error.Error()
+				logger.Error("restart pre-injection input compatibility tool", fields)
+			} else {
+				logger.Info("restarted pre-injection input compatibility tool", fields)
+				if strings.EqualFold(filepath.Base(result.Path), "AHK_F.exe") {
+					saved := result
+					managedAHK = &saved
+				}
+			}
+		}
+		if managedAHK != nil {
+			app.manageExternalAHK(ctx, native, *managedAHK)
+		}
+	})
+}
+
+func (app *application) scheduleBundledAHK() {
+	native := app.inputNative
+	if native == nil || !app.ahkWithGame.Load() || len(native.GameProcessIDs()) == 0 ||
+		app.ahkManaged.Load() || !app.ahkStarting.CompareAndSwap(false, true) {
+		return
+	}
+	app.tasks.Cancel(app.bundledAHKTask)
+	runtimePath := filepath.Join(app.layout.Root, "AHK_F.exe")
+	scriptPath := filepath.Join(app.layout.Root, "AHK_F.ahk")
+	app.bundledAHKTask = app.tasks.Run(func(ctx context.Context, _ uint64) {
+		defer func() {
+			app.ahkStarting.Store(false)
+			if app.ahkWithGame.Load() && len(native.GameProcessIDs()) != 0 {
+				// Reconcile a rapid off/on toggle which canceled this task
+				// while its replacement process was still in health checking.
+				win32.PostMessage(app.hwnd, messageInput, 0, 0)
+			}
+		}()
+		for {
+			processIDs := native.GameProcessIDs()
+			if len(processIDs) == 0 {
+				return
+			}
+			result := input.StartBundledAHK(runtimePath, scriptPath, processIDs)
+			fields := map[string]any{"path": result.Path, "newPID": result.NewPID, "gamePIDs": processIDs}
+			if result.Error != nil {
+				fields["error"] = result.Error.Error()
+				app.logger.Error("start bundled AHK with game", fields)
+			} else {
+				app.logger.Info("started bundled AHK with game", fields)
+				if ctx.Err() != nil {
+					// Disabling the option or closing the game must also cover
+					// the one-second health-check window. Launcher shutdown is
+					// different: the script remains responsible for a live
+					// game PID after the UI exits.
+					if !app.ahkWithGame.Load() || len(native.GameProcessIDs()) == 0 {
+						if err := input.StopExternalCompatibilityTool(result.NewPID, result.Path); err != nil {
+							app.logger.Error("stop bundled AHK after canceled startup", map[string]any{"error": err.Error(), "pid": result.NewPID})
+						}
+					}
+					return
+				}
+				app.manageBundledAHK(ctx, native, result)
+			}
+			if ctx.Err() != nil || !app.ahkWithGame.Load() || len(native.GameProcessIDs()) == 0 {
+				return
+			}
+			// AHK should live for the entire verified game lifetime. If it is
+			// closed or crashes while the game remains alive, retry without
+			// waiting for another game-discovery UI update.
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(time.Second):
+			}
+		}
+	})
+}
+
+func (app *application) manageBundledAHK(ctx context.Context, native *input.Native, tool input.ExternalToolRestartResult) {
+	active := native.GameForeground()
+	app.ahkPID.Store(tool.NewPID)
+	app.ahkBundled.Store(true)
+	app.ahkActive.Store(active)
+	app.ahkManaged.Store(true)
+	win32.PostMessage(app.hwnd, messageInput, 0, 0)
+	defer func() {
+		app.ahkManaged.Store(false)
+		app.ahkActive.Store(false)
+		app.ahkBundled.Store(false)
+		app.ahkPID.Store(0)
+		win32.PostMessage(app.hwnd, messageInput, 0, 0)
+	}()
+
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if !input.ExternalCompatibilityToolRunning(tool.NewPID, tool.Path) {
+			app.logger.Info("bundled AHK exited with game", map[string]any{"path": tool.Path, "pid": tool.NewPID})
+			return
+		}
+		desiredActive := native.GameForeground()
+		if desiredActive != active {
+			active = desiredActive
+			app.ahkActive.Store(active)
+			app.logger.Info("bundled AHK foreground state changed", map[string]any{"active": active, "pid": tool.NewPID})
+			win32.PostMessage(app.hwnd, messageInput, 0, 0)
+		}
+		select {
+		case <-ctx.Done():
+			// The project-owned script independently follows the supplied game
+			// PIDs, so it remains correct if the launcher exits first.
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+func (app *application) manageExternalAHK(ctx context.Context, native *input.Native, tool input.ExternalToolRestartResult) {
+	active := true // A freshly restarted AHK script starts with hotkeys enabled.
+	var lastToggleErrorLog time.Time
+	app.ahkPID.Store(tool.NewPID)
+	app.ahkActive.Store(active)
+	app.ahkManaged.Store(true)
+	win32.PostMessage(app.hwnd, messageInput, 0, 0)
+	defer func() {
+		// Never leave a user-owned AHK instance suspended merely because this
+		// launcher exits while another window is foreground.
+		if !active && input.ExternalCompatibilityToolRunning(tool.NewPID, tool.Path) {
+			_ = input.ToggleExternalAHKSuspend(tool.NewPID)
+		}
+		app.ahkManaged.Store(false)
+		app.ahkActive.Store(false)
+		app.ahkPID.Store(0)
+		win32.PostMessage(app.hwnd, messageInput, 0, 0)
+	}()
+
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if !input.ExternalCompatibilityToolRunning(tool.NewPID, tool.Path) {
+			app.logger.Error("managed AutoHotkey process exited", map[string]any{"path": tool.Path, "pid": tool.NewPID})
+			return
+		}
+		desiredActive := native.GameForeground()
+		if desiredActive != active {
+			if err := input.ToggleExternalAHKSuspend(tool.NewPID); err != nil {
+				// The hidden AutoHotkey window can briefly disappear while its
+				// tray state is being rebuilt. Keep the known state and retry;
+				// a transient lookup failure must not permanently end management.
+				if time.Since(lastToggleErrorLog) >= 2*time.Second {
+					app.logger.Error("toggle managed AutoHotkey foreground state", map[string]any{"active": desiredActive, "error": err.Error(), "pid": tool.NewPID})
+					lastToggleErrorLog = time.Now()
+				}
+			} else {
+				active = desiredActive
+				app.ahkActive.Store(active)
+				app.logger.Info("managed AutoHotkey foreground state changed", map[string]any{"active": active, "pid": tool.NewPID})
+				win32.PostMessage(app.hwnd, messageInput, 0, 0)
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+func waitForStableGameForeground(ctx context.Context, foreground func() bool, stableFor time.Duration) bool {
+	if foreground == nil || stableFor <= 0 {
+		return false
+	}
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	var since time.Time
+	for {
+		if foreground() {
+			if since.IsZero() {
+				since = time.Now()
+			}
+			if time.Since(since) >= stableFor {
+				return true
+			}
+		} else {
+			since = time.Time{}
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-ticker.C:
+		}
+	}
+}
+
+func capturedAHKTool(tools []input.ExternalCompatibilityTool) bool {
+	for _, tool := range tools {
+		if strings.EqualFold(filepath.Base(tool.Path), "AHK_F.exe") {
+			return true
+		}
+	}
+	return false
 }
 
 func (app *application) scheduleBetterGI() {

@@ -106,7 +106,7 @@ func packageRelease(options options) error {
 }
 
 func collectReleaseFiles(dist, version string) ([]sourceFile, selfupdate.PackageManifest, error) {
-	names := []string{"GenshinTools.exe", "GenshinTools-injector.exe", "GenshinTools-updater.exe", "build-info.json", "LICENSE", "LICENSE_POLICY.md", "THIRD_PARTY_NOTICES.md"}
+	names := []string{"AHK_F.ahk", "AHK_F.exe", "SOURCES/AutoHotkey-v1.1.37.02-source.zip", "GenshinTools.exe", "GenshinTools-injector.exe", "GenshinTools-input.exe", "GenshinTools-updater.exe", "build-info.json", "LICENSE", "LICENSE_POLICY.md", "THIRD_PARTY_NOTICES.md"}
 	licensesRoot := filepath.Join(dist, "LICENSES")
 	if err := rejectReparse(licensesRoot); err != nil {
 		return nil, selfupdate.PackageManifest{}, fmt.Errorf("licenses directory: %w", err)

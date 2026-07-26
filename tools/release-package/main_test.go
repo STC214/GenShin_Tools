@@ -14,15 +14,23 @@ func TestPackageReleaseCreatesVerifiedDeterministicPortableZIP(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(dist, "LICENSES"), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.MkdirAll(filepath.Join(dist, "SOURCES"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	files := map[string]string{
-		"GenshinTools.exe":          "main",
-		"GenshinTools-injector.exe": "injector",
-		"GenshinTools-updater.exe":  "updater",
-		"build-info.json":           `{"version":"1.2.3","target":"windows/amd64"}`,
-		"LICENSE":                   "MIT",
-		"LICENSE_POLICY.md":         "portable release policy",
-		"THIRD_PARTY_NOTICES.md":    "notices",
-		"LICENSES/dependency.txt":   "license",
+		"AHK_F.ahk": "project-owned script source",
+		"AHK_F.exe": "official AutoHotkey runtime",
+		"SOURCES/AutoHotkey-v1.1.37.02-source.zip": "corresponding source",
+		"GenshinTools.exe":                         "main",
+		"GenshinTools-injector.exe":                "injector",
+		"GenshinTools-input.exe":                   "input",
+		"GenshinTools-updater.exe":                 "updater",
+		"build-info.json":                          `{"version":"1.2.3","target":"windows/amd64"}`,
+		"LICENSE":                                  "MIT",
+		"LICENSES/AutoHotkey-GPL-2.0.txt":          "GPL-2.0",
+		"LICENSE_POLICY.md":                        "portable release policy",
+		"THIRD_PARTY_NOTICES.md":                   "notices",
+		"LICENSES/dependency.txt":                  "license",
 	}
 	for name, data := range files {
 		path := filepath.Join(dist, filepath.FromSlash(name))

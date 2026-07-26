@@ -4,6 +4,7 @@
 *.mod text eol=lf
 *.sum text eol=lf
 *.ps1 text eol=lf
+*.ahk text eol=lf
 *.md text eol=lf
 *.json text eol=lf
 *.manifest text eol=lf
@@ -16,4 +17,3 @@ VERSION text eol=lf
 *.dll binary
 *.syso binary
 *.zip binary
-

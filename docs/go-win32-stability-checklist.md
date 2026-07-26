@@ -68,13 +68,13 @@
 |---|---|---|---:|
 | D01 | hook 线程无消息循环或线程退出，连点偶尔完全无效 | 独立 LockOSThread + GetMessage + 健康心跳 | P0 |
 | D02 | hook callback 太慢，被系统静默移除 | O(1)、不分配/不等待/不 I/O；延迟统计 | P0 |
-| D03 | 自己的 SendInput 再触发 hook，指数级连点 | injected 标志 + 自定义 extra-info 双过滤 | P0 |
-| D04 | 键 down 未发送 up，游戏/系统出现粘键 | 成对批量 SendInput；所有停止路径防御性 release | P0 |
+| D03 | 自己模拟的输入再触发 hook，指数级连点 | injected 标志过滤；鼠标额外核对 QuickInput 兼容标记 | P0 |
+| D04 | 键 down 未发送 up，游戏/系统出现粘键 | down/up 分次发送并保留可见保持时间；所有停止路径防御性 release | P0 |
 | D05 | 自动重复 WM_KEYDOWN 反复启动输出 goroutine | 物理按下边沿 + 状态机幂等 | P0 |
 | D06 | 松开事件丢失（切焦点、睡眠、hook 重装），持续输出 | foreground/session/power 变化停机；停止热键；最大故障保护 | P0 |
 | D07 | 固定忙循环占满 CPU 或 0ms 配置失控 | 间隔下限；waitable timer；CPU soak test | P0 |
 | D08 | VirtualKey→扫描码不正确，布局或扩展键失效 | MapVirtualKeyEx；扩展键 flag；多布局测试 | P1 |
-| D09 | `SendInput` 部分成功或被 UIPI 阻止但未报告 | 检查返回数；权限检测；故障态 | P0 |
+| D09 | 鼠标 `SendInput` 被 UIPI 阻止但未报告 | 逐事件检查返回数；完整性级别检测；故障态 | P0 |
 | D10 | 普通程序向管理员游戏注入失败 | 检测 integrity level，提示同级权限重启 | P0 |
 | D11 | 停止键与目标键/触发键冲突 | 配置时拒绝或要求确认；冲突测试 | P1 |
 | D12 | 鼠标模式把程序注入的 up 当成物理松开 | injected 过滤；物理状态独立记录 | P0 |
@@ -83,6 +83,9 @@
 | D15 | RDP、锁屏、切用户、休眠后状态错误 | session/power 通知统一停止并重新武装 | P0 |
 | D16 | 杀进程前无法释放正在按下的虚拟键 | 正常退出强制 release；异常退出后下次启动提示（OS 通常会清状态但不依赖它） | P0 |
 | D17 | hook ready 前线程消息队列尚未建立，立即 Close 的 WM_QUIT 丢失并永久等待 | ready 前 `PeekMessage` 建队列；Start/Close 生命周期锁；并发回归 | P0 |
+| D18 | 物理触发键持续 down 与合成重复同时进入游戏，或 hook 安装早于注入模块 | x86 worker 仅在已核验游戏前台吞掉配置触发键，以 AHK 标记的 `keybd_event` 替换，并在注入完成且游戏前台稳定后重装 hook | P0 |
+| D19 | 中权限主程序关闭高权限 AHK 后无法重启，或被 UIPI 阻止发送 Suspend | Release 主程序声明 `requireAdministrator`；AHK 替代实例先启动并通过存活/路径校验后才清理旧实例，提升取消时保留原 AHK | P0 |
+| D19 | 点击“设置”后鼠标左键被全键盘轮询录成 Unknown key | 录制轮询排除所有鼠标虚拟键；鼠标按住+键盘按下回归 | P0 |
 
 ## E. GDI、DWM、DPI 与窗口资源
 

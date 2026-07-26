@@ -92,10 +92,11 @@ func (e *Engine) Start() bool {
 	snapshot := e.snapshotLocked()
 	e.mu.Unlock()
 	e.notify(snapshot)
+	firstDue := time.Now().Add(config.Interval)
 	if !e.emit(generation, config) {
 		return false
 	}
-	go e.outputLoop(ctx, generation, config)
+	go e.outputLoop(ctx, generation, config, firstDue)
 	return true
 }
 
@@ -165,8 +166,9 @@ func (e *Engine) Handle(event PhysicalEvent) {
 		snapshot := e.snapshotLocked()
 		e.mu.Unlock()
 		e.notify(snapshot)
+		firstDue := time.Now().Add(config.Interval)
 		if e.emitKey(generation, config, key) {
-			go e.outputLoop(ctx, generation, config)
+			go e.outputLoop(ctx, generation, config, firstDue)
 		}
 		return
 	}
@@ -203,7 +205,7 @@ func (e *Engine) activateMode(mode Mode) {
 	e.notify(snapshot)
 }
 
-func (e *Engine) outputLoop(ctx context.Context, generation uint64, config Config) {
+func (e *Engine) outputLoop(ctx context.Context, generation uint64, config Config, firstDue time.Time) {
 	defer func() {
 		if value := recover(); value != nil {
 			e.Fail(fmt.Errorf("panic in input output loop: %v", value))
@@ -212,7 +214,11 @@ func (e *Engine) outputLoop(ctx context.Context, generation uint64, config Confi
 	// The press edge already emitted synchronously. Use a lightweight,
 	// cancellable first interval so a short tap never creates a Windows
 	// waitable timer or a blocked OS thread.
-	delay := time.NewTimer(config.Interval)
+	delayDuration := time.Until(firstDue)
+	if delayDuration < 0 {
+		delayDuration = 0
+	}
+	delay := time.NewTimer(delayDuration)
 	select {
 	case <-ctx.Done():
 		if !delay.Stop() {
@@ -224,15 +230,19 @@ func (e *Engine) outputLoop(ctx context.Context, generation uint64, config Confi
 		return
 	case <-delay.C:
 	}
-	if !e.emit(generation, config) {
-		return
-	}
+	// Arm the periodic cadence before emitting the second press. Native
+	// injection deliberately holds each press for a short time, so anchoring
+	// the cadence here keeps Interval as the press-to-press period instead of
+	// accidentally adding that hold duration to every cycle.
 	timer, err := newCadence(ctx, config.Interval)
 	if err != nil {
 		e.Fail(fmt.Errorf("create input cadence: %w", err))
 		return
 	}
 	defer timer.Close()
+	if !e.emit(generation, config) {
+		return
+	}
 	for {
 		ready, err := timer.Wait()
 		if err != nil {

@@ -41,7 +41,8 @@ type capturedResult struct {
 func capturedKeyboardCallback(code int, message, dataPointer uintptr) uintptr {
 	if code >= 0 {
 		data := (*keyboardHook)(unsafe.Pointer(dataPointer))
-		if data != nil && data.ExtraInfo == injectionMarker {
+		if data != nil && data.Flags&llkhfInjected != 0 &&
+			(data.ExtraInfo == injectionMarker || data.ExtraInfo == autoHotkeyKeyIgnoreLevel0) {
 			switch message {
 			case wMKeyDown, wMSysKeyDown:
 				capturedInput.keyDown.Add(1)
@@ -59,7 +60,7 @@ func capturedKeyboardCallback(code int, message, dataPointer uintptr) uintptr {
 func capturedMouseCallback(code int, message, dataPointer uintptr) uintptr {
 	if code >= 0 {
 		data := (*mouseHook)(unsafe.Pointer(dataPointer))
-		if data != nil && data.ExtraInfo == injectionMarker {
+		if data != nil && data.Flags&llmhfInjected != 0 && data.ExtraInfo == quickInputExtraInfo {
 			switch message {
 			case wMLButtonDown:
 				capturedInput.leftDown.Add(1)
@@ -98,6 +99,17 @@ func resetCapturedInput() {
 }
 
 func capturedFixtureWindowProcedure(hwnd uintptr, message uint32, wParam, lParam uintptr) uintptr {
+	if wParam == 'F' {
+		switch message {
+		case wMKeyDown, wMSysKeyDown:
+			capturedInput.keyDown.Add(1)
+			recordCapturedTime()
+			return 0
+		case wMKeyUp, wMSysKeyUp:
+			capturedInput.keyUp.Add(1)
+			return 0
+		}
+	}
 	return win32.DefWindowProc(win32.HWND(hwnd), message, wParam, lParam)
 }
 
@@ -164,7 +176,7 @@ func installCaptureHooks(t *testing.T) func() {
 
 func runCaptureMessageLoop(t *testing.T) {
 	t.Helper()
-	var msg message
+	var msg win32.Msg
 	for {
 		value, _, callErr := procGetMessageW.Call(uintptr(unsafe.Pointer(&msg)), 0, 0, 0)
 		result := int32(value)
@@ -174,12 +186,40 @@ func runCaptureMessageLoop(t *testing.T) {
 		if result == -1 {
 			t.Fatalf("capture GetMessageW: %v", normalizeCallError(callErr))
 		}
+		win32.TranslateMessage(&msg)
+		win32.DispatchMessage(&msg)
 	}
 }
 
-func TestCapturedSendInputPairs(t *testing.T) {
+func TestCapturedMonolithicKeyboardWorkerOutput(t *testing.T) {
 	if os.Getenv("GENSHINTOOLS_INPUT_CAPTURE") != "1" {
-		t.Skip("set GENSHINTOOLS_INPUT_CAPTURE=1 to run swallowed SendInput capture")
+		t.Skip("set GENSHINTOOLS_INPUT_CAPTURE=1 to run swallowed worker output capture")
+	}
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	closeForeground := installCapturedForegroundWindow(t)
+	defer closeForeground()
+	cleanup := installCaptureHooks(t)
+	defer cleanup()
+	resetCapturedInput()
+	threadID := windows.GetCurrentThreadId()
+	go func() {
+		worker := &keyboardWorkerRuntime{done: make(chan struct{})}
+		for index := 0; index < 5; index++ {
+			worker.emitKey(EncodeKeyCode('F', false))
+		}
+		procPostThreadMessageW.Call(uintptr(threadID), wMQuit, 0, 0)
+	}()
+	runCaptureMessageLoop(t)
+	down, up := capturedInput.keyDown.Load(), capturedInput.keyUp.Load()
+	if down != 5 || up != 5 {
+		t.Fatalf("AHK-compatible worker delivered down/up = %d/%d, want five balanced pairs", down, up)
+	}
+}
+
+func TestCapturedNativePressReleasePairs(t *testing.T) {
+	if os.Getenv("GENSHINTOOLS_INPUT_CAPTURE") != "1" {
+		t.Skip("set GENSHINTOOLS_INPUT_CAPTURE=1 to run swallowed native input capture")
 	}
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
@@ -298,7 +338,15 @@ func TestCapturedNativeEngine(t *testing.T) {
 				native.enqueue(event)
 				time.Sleep(duration)
 				event.Down = false
-				native.enqueue(event)
+				if mode == ModeKeyboard {
+					native.enqueue(event)
+				} else {
+					// Mouse modes are toggle-driven; a physical button-up is
+					// deliberately unrelated to their lifetime. Stop the
+					// engine explicitly and wait for any in-flight separated
+					// up edge before taking the measurement.
+					native.engine.Enable(false)
+				}
 				time.Sleep(150 * time.Millisecond)
 				measurement := capturedMeasurement(mode, interval)
 				measurements = append(measurements, measurement)

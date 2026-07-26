@@ -326,7 +326,7 @@ func decodePackageManifest(data []byte, expectedVersion string) (PackageManifest
 			return PackageManifest{}, errors.New("release.json files exceed 512 MiB")
 		}
 	}
-	for _, required := range []string{"build-info.json", "genshintools-injector.exe", "genshintools-updater.exe", "genshintools.exe", "license", "license_policy.md", "third_party_notices.md"} {
+	for _, required := range []string{"ahk_f.ahk", "ahk_f.exe", "sources/autohotkey-v1.1.37.02-source.zip", "build-info.json", "genshintools-injector.exe", "genshintools-input.exe", "genshintools-updater.exe", "genshintools.exe", "license", "licenses/autohotkey-gpl-2.0.txt", "license_policy.md", "third_party_notices.md"} {
 		if !seen[required] {
 			return PackageManifest{}, fmt.Errorf("release.json is missing required file %q", required)
 		}
@@ -352,7 +352,9 @@ func safeReleasePath(name string) (string, error) {
 
 func allowedReleasePath(name string) bool {
 	switch name {
-	case "GenshinTools.exe", "GenshinTools-injector.exe", "GenshinTools-updater.exe", "build-info.json", "LICENSE", "THIRD_PARTY_NOTICES.md", "LICENSE_POLICY.md":
+	case "AHK_F.ahk", "AHK_F.exe", "SOURCES/AutoHotkey-v1.1.37.02-source.zip",
+		"GenshinTools.exe", "GenshinTools-injector.exe", "GenshinTools-input.exe", "GenshinTools-updater.exe",
+		"build-info.json", "LICENSE", "THIRD_PARTY_NOTICES.md", "LICENSE_POLICY.md":
 		return true
 	}
 	if !strings.HasPrefix(name, "LICENSES/") || strings.Count(name, "/") != 1 {

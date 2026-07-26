@@ -135,6 +135,21 @@ func TestInputRepeatHitTestExcludesSpacingAndScrollbarGap(t *testing.T) {
 	}
 }
 
+func TestInputFooterRectsReserveIndependentAHKOptionAndStatus(t *testing.T) {
+	output, option, status := inputFooterRects(252, 1000, 96)
+	if output.Left != 252 || status.Right != 1000 {
+		t.Fatalf("footer does not span content: output=%+v status=%+v", output, status)
+	}
+	if output.Right >= option.Left || option.Right >= status.Left {
+		t.Fatalf("footer controls overlap or have no gaps: output=%+v option=%+v status=%+v", output, option, status)
+	}
+	for _, rect := range []win32.Rect{output, option, status} {
+		if rect.Bottom <= rect.Top || rect.Right <= rect.Left {
+			t.Fatalf("invalid footer rectangle: %+v", rect)
+		}
+	}
+}
+
 func TestInputPageMinimumHeightAlsoAppliesToRestoredBounds(t *testing.T) {
 	got := enforceMinimumWindowSize(config.WindowConfig{Width: 320, Height: 560})
 	if got.Width != minimumWindowWidth || got.Height != minimumWindowHeight {

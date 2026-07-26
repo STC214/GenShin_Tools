@@ -63,6 +63,11 @@ const (
 // Keeping one 32-bit marker makes self-injected filtering consistent for both.
 const injectionMarker uintptr = 0x47544F4C // "GTOL"
 
+// QuickInput tags its mouse events with 214. Matching that public user-mode
+// event shape is intentional. Keyboard output keeps the project's separate
+// marker used by the known-good scan-code SendInput baseline.
+const quickInputExtraInfo uintptr = 214
+
 type point struct{ X, Y int32 }
 
 type message struct {
@@ -129,6 +134,16 @@ type GameProcess struct {
 	CreationTime int64
 }
 
+type hookTargetSnapshot struct {
+	configured bool
+	processes  map[uint32]struct{}
+}
+
+type keyboardSuppressionSnapshot struct {
+	active bool
+	keys   map[uint32]struct{}
+}
+
 type Native struct {
 	engine    *Engine
 	lifecycle sync.Mutex
@@ -157,6 +172,9 @@ type Native struct {
 	runTarget      atomic.Uintptr
 	armTarget      atomic.Uintptr
 	rawRegistered  atomic.Bool
+	hookTargets    atomic.Pointer[hookTargetSnapshot]
+	suppression    atomic.Pointer[keyboardSuppressionSnapshot]
+	keyboardWorker *keyboardWorkerController
 
 	keyboardCallback uintptr
 	mouseCallback    uintptr
@@ -186,12 +204,15 @@ var (
 	procGetMessageW              = inputUser32.NewProc("GetMessageW")
 	procPeekMessageW             = inputUser32.NewProc("PeekMessageW")
 	procPostThreadMessageW       = inputUser32.NewProc("PostThreadMessageW")
+	procPostMessageW             = inputUser32.NewProc("PostMessageW")
 	procSendInput                = inputUser32.NewProc("SendInput")
+	procKeybdEvent               = inputUser32.NewProc("keybd_event")
 	procMapVirtualKeyExW         = inputUser32.NewProc("MapVirtualKeyExW")
-	procGetForegroundWindow      = inputUser32.NewProc("GetForegroundWindow")
 	procGetWindowThreadProcessID = inputUser32.NewProc("GetWindowThreadProcessId")
 	procGetKeyboardLayout        = inputUser32.NewProc("GetKeyboardLayout")
 	procGetAsyncKeyState         = inputUser32.NewProc("GetAsyncKeyState")
+	procEnumWindows              = inputUser32.NewProc("EnumWindows")
+	procGetClassNameW            = inputUser32.NewProc("GetClassNameW")
 	procRegisterRawInputDevices  = inputUser32.NewProc("RegisterRawInputDevices")
 	procGetRawInputData          = inputUser32.NewProc("GetRawInputData")
 	procGetModuleHandleW         = inputKernel32.NewProc("GetModuleHandleW")
@@ -219,7 +240,15 @@ func NewNative(onChange func(Snapshot)) (*Native, error) {
 	injector.allowed = func() bool {
 		return n.isGameWindowFast(n.foreground())
 	}
-	engine, err := NewEngine(injector, onChange)
+	n.keyboardWorker = newKeyboardWorkerController()
+	injector.externalKeyboard = n.keyboardWorker.Active
+	engine, err := NewEngine(injector, func(snapshot Snapshot) {
+		n.publishKeyboardSuppression(snapshot)
+		n.syncKeyboardWorker(snapshot)
+		if onChange != nil {
+			onChange(snapshot)
+		}
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -287,6 +316,40 @@ func (n *Native) Enable(enabled bool) {
 	n.updateActivationTargets(before, n.engine.Snapshot())
 }
 func (n *Native) Snapshot() Snapshot { return n.engine.Snapshot() }
+func (n *Native) KeyboardWorkerActive() bool {
+	return n != nil && n.keyboardWorker != nil && n.keyboardWorker.Active()
+}
+func (n *Native) KeyboardWorkerPID() int {
+	if n == nil || n.keyboardWorker == nil {
+		return 0
+	}
+	return n.keyboardWorker.PID()
+}
+
+// RefreshKeyboardBackend reinstalls the x86 worker hook after injected modules
+// have completed their own hook setup.
+func (n *Native) RefreshKeyboardBackend() error {
+	if n == nil || n.keyboardWorker == nil {
+		return errors.New("keyboard worker is unavailable")
+	}
+	return n.keyboardWorker.Restart()
+}
+
+func (n *Native) GameForeground() bool {
+	return n != nil && n.foreground != nil && n.isGameWindowFast(n.foreground())
+}
+
+func (n *Native) GameProcessIDs() []uint32 {
+	targets := n.hookTargets.Load()
+	if targets == nil || !targets.configured {
+		return nil
+	}
+	processes := make([]uint32, 0, len(targets.processes))
+	for processID := range targets.processes {
+		processes = append(processes, processID)
+	}
+	return processes
+}
 
 // RegisterRawKeyboard adds an INPUTSINK physical keyboard path to the launcher
 // window. Raw events with a real device handle remain distinguishable from
@@ -349,17 +412,68 @@ func (n *Native) handleRawKeyboard(keyboard rawKeyboard) {
 // process is discovered again.
 func (n *Native) SetGameProcesses(processes []GameProcess) {
 	n.targetsMu.Lock()
-	defer n.targetsMu.Unlock()
 	if n.gameProcesses == nil {
 		n.gameProcesses = make(map[uint32]int64)
 	}
 	clear(n.gameProcesses)
+	hookProcesses := make(map[uint32]struct{}, len(processes))
 	for _, process := range processes {
 		if process.PID != 0 && process.CreationTime > 0 {
 			n.gameProcesses[process.PID] = process.CreationTime
+			hookProcesses[process.PID] = struct{}{}
 		}
 	}
 	n.targetsConfigured = true
+	n.targetsMu.Unlock()
+	n.hookTargets.Store(&hookTargetSnapshot{configured: true, processes: hookProcesses})
+	if n.engine != nil {
+		n.syncKeyboardWorker(n.engine.Snapshot())
+	}
+}
+
+func (n *Native) syncKeyboardWorker(snapshot Snapshot) {
+	if n.keyboardWorker == nil {
+		return
+	}
+	n.targetsMu.RLock()
+	processes := make([]uint32, 0, len(n.gameProcesses))
+	for processID := range n.gameProcesses {
+		processes = append(processes, processID)
+	}
+	n.targetsMu.RUnlock()
+	_ = n.keyboardWorker.Configure(keyboardWorkerRequest{
+		Enabled:       snapshot.Config.Enabled && snapshot.Config.Mode == ModeKeyboard,
+		RepeatKeys:    snapshot.Config.RepeatKeys.Slice(),
+		IntervalMS:    snapshot.Config.IntervalMS,
+		GameProcesses: processes,
+	})
+}
+
+func (n *Native) publishKeyboardSuppression(snapshot Snapshot) {
+	// The x86 worker owns both the physical hook and AHK-compatible output, so
+	// it suppresses only configured trigger keys inside the verified game.
+	// The x64 hook must not suppress the same event a second time.
+	n.suppression.Store(&keyboardSuppressionSnapshot{})
+}
+
+func (n *Native) shouldSuppressKeyboard(code uint32) bool {
+	policy := n.suppression.Load()
+	if policy == nil || !policy.active {
+		return false
+	}
+	if _, ok := policy.keys[NormalizeKeyCode(code)]; !ok {
+		return false
+	}
+	targets := n.hookTargets.Load()
+	if targets == nil || !targets.configured {
+		return false
+	}
+	foreground := n.foreground()
+	if foreground == 0 || n.windowPID == nil {
+		return false
+	}
+	_, allowed := targets.processes[n.windowPID(foreground)]
+	return allowed
 }
 
 func (n *Native) isGameWindow(window windows.HWND) bool {
@@ -494,6 +608,7 @@ func (n *Native) Close() {
 		<-n.pollDone
 	}
 	n.engine.Close()
+	n.keyboardWorker.Close()
 }
 
 // keyboardPoller is a fallback for protected game input paths that do not
@@ -536,7 +651,9 @@ func (n *Native) pollKeyboardOnce(states map[uint32]bool) {
 		// poll every virtual key so the UI can still accept the next key.
 		keys = keys[:0]
 		for virtualKey := uint32(1); virtualKey <= 0xfe; virtualKey++ {
-			keys = append(keys, NormalizeKeyCode(virtualKey))
+			if capturePollingKeyboardKey(virtualKey) {
+				keys = append(keys, NormalizeKeyCode(virtualKey))
+			}
 		}
 	}
 	captureFirstScan := capturing && n.pollCaptureNew.Swap(false)
@@ -568,6 +685,19 @@ func (n *Native) pollKeyboardOnce(states map[uint32]bool) {
 		if !live[code] {
 			delete(states, code)
 		}
+	}
+}
+
+func capturePollingKeyboardKey(virtualKey uint32) bool {
+	switch virtualKey {
+	case 0x01, // VK_LBUTTON
+		0x02, // VK_RBUTTON
+		0x04, // VK_MBUTTON
+		0x05, // VK_XBUTTON1
+		0x06: // VK_XBUTTON2
+		return false
+	default:
+		return true
 	}
 }
 
@@ -912,7 +1042,9 @@ func keyboardHookCallback(code int, wParam, lParam uintptr) (result uintptr) {
 		}
 	}()
 	if code >= 0 {
-		handleKeyboardHook((*keyboardHook)(unsafe.Pointer(lParam)), wParam)
+		if handleKeyboardHook((*keyboardHook)(unsafe.Pointer(lParam)), wParam) {
+			return 1
+		}
 	}
 	result, _, _ = procCallNextHookEx.Call(0, uintptr(code), wParam, lParam)
 	return result
@@ -934,18 +1066,21 @@ func mouseHookCallback(code int, wParam, lParam uintptr) (result uintptr) {
 	return result
 }
 
-func handleKeyboardHook(data *keyboardHook, message uintptr) {
+func handleKeyboardHook(data *keyboardHook, message uintptr) bool {
 	if data == nil || data.Flags&llkhfInjected != 0 || data.ExtraInfo == injectionMarker {
-		return
+		return false
 	}
 	down := message == wMKeyDown || message == wMSysKeyDown
 	up := message == wMKeyUp || message == wMSysKeyUp
 	if !down && !up {
-		return
+		return false
 	}
 	if n := activeNative.Load(); n != nil {
-		n.enqueue(PhysicalEvent{Kind: EventKey, Code: EncodeKeyCode(data.VirtualKey, data.Flags&llkhfExtended != 0), Down: down})
+		code := EncodeKeyCode(data.VirtualKey, data.Flags&llkhfExtended != 0)
+		n.enqueue(PhysicalEvent{Kind: EventKey, Code: code, Down: down})
+		return false
 	}
+	return false
 }
 
 func handleMouseHook(data *mouseHook, message uintptr) {
@@ -971,12 +1106,13 @@ func handleMouseHook(data *mouseHook, message uintptr) {
 }
 
 type sendInputInjector struct {
-	selfRID      uint32
-	mu           sync.Mutex
-	lastCheck    time.Time
-	lastReport   IntegrityReport
-	allowed      func() bool
-	needsRelease atomic.Bool
+	selfRID          uint32
+	mu               sync.Mutex
+	lastCheck        time.Time
+	lastReport       IntegrityReport
+	allowed          func() bool
+	needsRelease     atomic.Bool
+	externalKeyboard func() bool
 }
 
 func newSendInputInjector() (*sendInputInjector, error) {
@@ -997,18 +1133,46 @@ func (s *sendInputInjector) Emit(config Config) error {
 	if s.allowed != nil && !s.allowed() {
 		return errOutputTargetLost
 	}
-	inputs, err := inputPair(config)
+	if config.Mode == ModeKeyboard {
+		if s.externalKeyboard != nil && s.externalKeyboard() {
+			return nil
+		}
+		return s.emitBaselineKeyboard(config)
+	}
+	down, up, err := s.pressFunctions(config)
 	if err != nil {
 		return err
 	}
 	s.needsRelease.Store(true)
-	if err := sendInputs(inputs[:]); err != nil {
-		// A partial SendInput can leave only the down half accepted. Always try
-		// the corresponding up before the engine enters Fault.
-		if release, releaseErr := releaseInput(config); releaseErr == nil {
-			if sendInputs([]winInput{release}) == nil {
-				s.needsRelease.Store(false)
-			}
+	if err := emitPressRelease(down, up, pressDuration(config.Interval), time.Sleep); err != nil {
+		// The down edge may already have reached the target. Retry the up edge
+		// once before entering Fault so API failure cannot leave a stuck key or
+		// mouse button.
+		if up() == nil {
+			s.needsRelease.Store(false)
+		}
+		return err
+	}
+	s.needsRelease.Store(false)
+	return nil
+}
+
+// emitBaselineKeyboard deliberately preserves the keyboard output shape from
+// the 0.9.5 build which was confirmed to work in the real game: scan-code
+// KEYBDINPUT down/up in one SendInput call, from the main x64 process.
+func (s *sendInputInjector) emitBaselineKeyboard(config Config) error {
+	down, err := scanCodeKeyboardInput(config.OutputKey, false)
+	if err != nil {
+		return err
+	}
+	up, err := scanCodeKeyboardInput(config.OutputKey, true)
+	if err != nil {
+		return err
+	}
+	s.needsRelease.Store(true)
+	if err := sendInputs([]winInput{down, up}); err != nil {
+		if sendInputs([]winInput{up}) == nil {
+			s.needsRelease.Store(false)
 		}
 		return err
 	}
@@ -1031,56 +1195,40 @@ func (s *sendInputInjector) Release(config Config) error {
 	if !s.needsRelease.Swap(false) {
 		return nil
 	}
-	input, err := releaseInput(config)
+	if config.Mode == ModeKeyboard {
+		up, err := scanCodeKeyboardInput(config.OutputKey, true)
+		if err != nil {
+			return err
+		}
+		return sendInputs([]winInput{up})
+	}
+	_, up, err := s.pressFunctions(config)
 	if err != nil {
 		return err
 	}
-	return sendInputs([]winInput{input})
+	return up()
 }
 
-func inputPair(config Config) ([2]winInput, error) {
-	var result [2]winInput
+func (s *sendInputInjector) pressFunctions(config Config) (down func() error, up func() error, err error) {
 	switch config.Mode {
 	case ModeKeyboard:
-		down, err := keyboardInput(config.OutputKey, false)
-		if err != nil {
-			return result, err
-		}
-		up, err := keyboardInput(config.OutputKey, true)
-		if err != nil {
-			return result, err
-		}
-		result[0], result[1] = down, up
+		return nil, nil, errors.New("keyboard output uses the baseline paired SendInput path")
 	case ModeMouseLeft:
-		result[0] = mouseInput(mouseeventfLeftDown)
-		result[1] = mouseInput(mouseeventfLeftUp)
+		return func() error { return sendInputs([]winInput{mouseInput(mouseeventfLeftDown)}) },
+			func() error { return sendInputs([]winInput{mouseInput(mouseeventfLeftUp)}) }, nil
 	case ModeMouseRight:
-		result[0] = mouseInput(mouseeventfRightDown)
-		result[1] = mouseInput(mouseeventfRightUp)
+		return func() error { return sendInputs([]winInput{mouseInput(mouseeventfRightDown)}) },
+			func() error { return sendInputs([]winInput{mouseInput(mouseeventfRightUp)}) }, nil
 	default:
-		return result, fmt.Errorf("invalid input mode %d", config.Mode)
-	}
-	return result, nil
-}
-
-func releaseInput(config Config) (winInput, error) {
-	switch config.Mode {
-	case ModeKeyboard:
-		return keyboardInput(config.OutputKey, true)
-	case ModeMouseLeft:
-		return mouseInput(mouseeventfLeftUp), nil
-	case ModeMouseRight:
-		return mouseInput(mouseeventfRightUp), nil
-	default:
-		return winInput{}, fmt.Errorf("invalid input mode %d", config.Mode)
+		return nil, nil, fmt.Errorf("invalid input mode %d", config.Mode)
 	}
 }
 
-func keyboardInput(virtualKey uint32, up bool) (winInput, error) {
-	extended := KeyIsExtended(virtualKey)
-	virtualKey = VirtualKey(virtualKey)
-	foreground, _, _ := procGetForegroundWindow.Call()
-	threadID, _, _ := procGetWindowThreadProcessID.Call(foreground, 0)
+func scanCodeKeyboardInput(key uint32, up bool) (winInput, error) {
+	extended := KeyIsExtended(key)
+	virtualKey := VirtualKey(key)
+	foreground := windows.GetForegroundWindow()
+	threadID, _, _ := procGetWindowThreadProcessID.Call(uintptr(foreground), 0)
 	layout, _, _ := procGetKeyboardLayout.Call(threadID)
 	scan, _, _ := procMapVirtualKeyExW.Call(uintptr(virtualKey), mapvkVKToVSCEx, layout)
 	if scan == 0 {
@@ -1100,10 +1248,29 @@ func keyboardInput(virtualKey uint32, up bool) (winInput, error) {
 	return value, nil
 }
 
+func emitPressRelease(down, up func() error, hold time.Duration, pause func(time.Duration)) error {
+	if err := down(); err != nil {
+		return err
+	}
+	pause(hold)
+	return up()
+}
+
+func pressDuration(interval time.Duration) time.Duration {
+	hold := interval / 2
+	if hold < time.Millisecond {
+		return time.Millisecond
+	}
+	if hold > 50*time.Millisecond {
+		return 50 * time.Millisecond
+	}
+	return hold
+}
+
 func mouseInput(flags uint32) winInput {
 	value := winInput{Type: inputMouse}
 	*(*uint32)(unsafe.Pointer(&value.Data[12])) = flags
-	*(*uintptr)(unsafe.Pointer(&value.Data[24])) = injectionMarker
+	*(*uintptr)(unsafe.Pointer(&value.Data[24])) = quickInputExtraInfo
 	return value
 }
 

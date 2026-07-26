@@ -23,7 +23,7 @@ import (
 	"genshintools/internal/shellconfig"
 )
 
-const CurrentSchemaVersion = 9
+const CurrentSchemaVersion = 10
 const maxSettingsBytes = 1 << 20
 
 // Settings contains only stable shell settings in S02. Feature settings are
@@ -60,6 +60,7 @@ type WindowConfig struct {
 type GameConfig struct {
 	Path             string `json:"path"`
 	CustomExecutable string `json:"customExecutable"`
+	AHKWithGame      bool   `json:"ahkWithGame"`
 }
 
 type LoadResult struct {
@@ -167,6 +168,8 @@ func migrateAndValidate(settings *Settings) error {
 	case 8:
 		settings.SchemaVersion = CurrentSchemaVersion
 	case 9:
+		settings.SchemaVersion = CurrentSchemaVersion
+	case 10:
 	default:
 		return fmt.Errorf("unsupported schema version %d", settings.SchemaVersion)
 	}

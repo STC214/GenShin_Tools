@@ -82,7 +82,7 @@ cmd/genshintools/            程序入口、启动参数、进程级恢复
 internal/app/                生命周期、用例编排、状态机
 internal/ui/                 页面模型、UI 消息、暗色主题
 internal/platform/win32/     HWND、消息循环、DWM、COM、托盘、DPI
-internal/input/              全局钩子、SendInput、连点/连按状态机
+internal/input/              全局钩子、Win32 用户态输入输出、连点/连按状态机
 internal/game/               路径发现、配置、进程检测、启动
 internal/resources/          清单、下载、预下载、校验、修复
 internal/server/             官服/B服识别、切换、回滚
@@ -153,14 +153,15 @@ Disabled -> Armed -> Running -> Armed
 - 使用自定义 `dwExtraInfo` 标记本程序注入事件，同时检查 LL hook 的 injected 标志，杜绝自激回路。
 - 键盘输出使用扫描码；正确处理扩展键、左右修饰键、NumPad 和布局映射。
 - 每次输入必须成对发送；停止、panic、退出和配置切换时做防御性 key-up/mouse-up 清理。
-- 检查 `SendInput` 返回数量和 `GetLastError`，失败时停止循环并向 UI 报告，不能静默空转。
+- 键盘由独立 x86 worker 在同一进程内同时拥有低级 hook、物理保持状态和带 AutoHotkey ignore-level 标记的 `keybd_event` 输出循环；仅在已核验游戏前台时吞掉配置的物理触发键并提交平衡的 down/up，其他按键放行。worker 缺失/失败时降级到主进程扫描码成对 `SendInput`。注入完成且游戏前台稳定后重启 worker 以重装 hook。鼠标逐事件提交 down/up。所有路径核验前台游戏进程与完整性级别，失败不能静默空转。
+- 键盘低级 hook 只观察物理边沿，绝不吞掉配置连发键；状态机仍接收物理边沿并输出合成事件，其他按键不会改变当前 held/generation。
 - 高精度节拍使用 waitable timer；不在 hook 回调中 `Sleep`、等待 channel 或写日志。
 - 检测完整性级别。若游戏以更高权限运行，明确提示需以相同权限重启，避免“界面显示运行但游戏收不到输入”。
 - 不吞掉用户真实按键/鼠标事件；停止热键默认仍传给下一个 hook，除非以后有明确的可选设置。
 
 ### 5.4 必过验收
 
-- 捕获钩子中验证键盘、左右键真实 `SendInput` 的 down/up 数量一致，短节拍矩阵无粘键；长跑作为 S13 可选发布回归。
+- 捕获钩子验证 0.9.5 基线扫描码键盘事件和 QuickInput 形态左右键的 down/up 数量一致，短节拍矩阵无粘键；长跑作为 S13 可选发布回归。
 - 1000 次快速按下/松开触发键；任意时刻最多一个输出循环。
 - 连续切换启用/禁用 200 次，goroutine、线程、句柄数回到稳定基线。
 - 运行中按停止键、关闭窗口、退出托盘、切换模式、休眠/唤醒，均在限定时间内停止。

@@ -30,9 +30,10 @@ try {
     Write-Host '[S03] 200 native hook install/uninstall cycles'
     Invoke-GoTest -GoArguments @('-run', 'TestNativeHooksStartAndClose', '-count=200', './internal/input')
 
-    Write-Host '[S03] Direct SendInput keyboard/left/right capture (events swallowed)'
+    Write-Host '[S03] Monolithic keyboard worker, scan-code fallback, and QuickInput-compatible mouse capture'
     $env:GENSHINTOOLS_INPUT_CAPTURE = '1'
-    Invoke-GoTest -GoArguments @('-run', 'TestCapturedSendInputPairs', '-v', './internal/input')
+    Invoke-GoTest -GoArguments @('-run', 'TestCapturedMonolithicKeyboardWorkerOutput', '-v', './internal/input')
+    Invoke-GoTest -GoArguments @('-run', 'TestCapturedNativePressReleasePairs', '-v', './internal/input')
 
     Write-Host '[S03] Full engine captured cadence grid: 30/50/100/250 ms x keyboard/left/right'
     Invoke-GoTest -GoArguments @('-run', 'TestCapturedNativeEngine', '-v', './internal/input')

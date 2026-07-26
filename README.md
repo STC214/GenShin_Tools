@@ -8,6 +8,12 @@
 
 本项目原创代码与文档采用 [MIT License](LICENSE)。第三方依赖、FufuLauncher、商店插件和按需下载的二进制仍分别受其自身许可证约束，详见 [LICENSE_POLICY.md](LICENSE_POLICY.md) 与 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 
+从 1.1.0 起主程序请求管理员权限，以便与游戏和输入工具保持相同完整性级别。Windows 会在主程序启动时显示一次 UAC。
+
+输入增强页提供“AHK随游戏启动/关闭”选项。启用后，程序在发现已核验的原神进程时启动便携包内的 `AHK_F.exe` 与项目自有 `AHK_F.ahk`，游戏进程全部退出后 AHK 自动退出；游戏仍存活而 AHK 意外关闭时会自动重新拉起。热键只在游戏窗口位于前台时生效，切到其他窗口会暂停，界面以绿色/红色显示激活状态。便携包中的 `AHK_F.exe` 是经固定哈希审计的官方 AutoHotkey v1.1.37.02 32 位运行时，不是来源和再分发授权不明的用户工具；对应 GPL-2.0 文本和完整源码包一并随包提供。
+
+内置键盘增强保持现状，不再继续扩展。鼠标 down/up 使用与开源 [QuickInput](https://github.com/ChiyukiGana/Quickinput) 一致的逐事件 `SendInput` 形态。若关闭“AHK随游戏启动/关闭”，注入兼容流程仍可按捕获到的精确 PID、创建时间和完整路径重启用户已经运行的 `AHK_F.exe` 或 `quickinput.exe`，不会模糊匹配或结束其他 AHK/连点工具。
+
 ## FufuLauncher 致敬与引用
 
 本项目是对 [FufuLauncher/FufuLauncher](https://github.com/FufuLauncher/FufuLauncher) 的独立 Go + Win32 重构。衷心感谢 FufuLauncher Dev Team 及其贡献者公开项目、产品思路和插件生态；本项目的范围梳理、上游行为对照以及插件商店协议适配都以该项目为重要参考。
@@ -60,3 +66,6 @@
 - 基线：上游 `master` 固定到已审查的 `5f6af35fcb90807d5db390ed4af58ca09ddd381c`（2026-07-22 UTC）；逐项结论见 `docs/upstream-disposition-2026-07-22.md`。
 - 注入：默认关闭；只接受 `data\injection\modules` 中来源、许可证、SHA-256、PE、文件版本和游戏版本全部匹配的模块，并由独立管理员 helper 重复核验。FuFuPlugin 仅按需下载，不打包进本项目发布物。
 - 插件生态：商店来源固定为 FufuLauncher 官方服务，不提供自定义目录 URL，也不建设或运营独立插件商店。
+
+
+https://github.com/x-wink/flair-bloom

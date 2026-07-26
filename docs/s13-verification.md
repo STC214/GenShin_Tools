@@ -1,6 +1,6 @@
 # S13 发布回归验证记录
 
-更新时间：2026-07-22
+更新时间：2026-07-26
 状态：全量自动发布矩阵、上游 disposition 和项目 MIT 许可证已完成；真实桌面/游戏人工门禁未关闭。
 
 ## 自动矩阵结果
@@ -36,15 +36,195 @@
 
 本机当前会话为单显示器、1920×1080、DPI 96、非高对比度。Release 首页截图在该环境下标题、导航、状态卡和底部资源栏完整，无裁切、重叠或明显错位；窗口退出后无残留进程。截图位于 `artifacts/s13/release-window.png`。此结果不能替代多显示器和 125%/150%/200% DPI 人工矩阵。
 
-## 候选包
+## 1.0.3 输入兼容候选包
 
-- 文件：`artifacts/release/GenshinTools-1.0.0-windows-amd64-portable.zip`
-- 大小：7,773,964 bytes
-- SHA-256：`4b3a1bd79b874d497e32d2c4653d5e456d9b3c0ee873b38343a9ddeb813aec9a`
+- 文件：`artifacts/release/GenshinTools-1.0.3-windows-amd64-portable.zip`
+- 大小：7,778,211 bytes
+- SHA-256：`d0588362301f32fc2f687d86542048f6e16169f8f7d11d90b857232a1722b84f`
 - ZIP 条目：14 个，仅包含 `release.json`、三个 Release EXE、`build-info.json`、项目 MIT 许可证、第三方通知、许可证政策和 `LICENSES/` 文本。
 - 明确不含：Debug EXE、`data/`、日志、缓存、staging、测试夹具和源码。
 
-便携 ZIP 使用固定条目顺序和时间戳。版本 `1.0.0` 使用带真实设备句柄过滤的 Windows Raw Input 作为物理键盘主通道，hook 与轮询作为兼容兜底，Raw Input 与 Hook 通过多生产者安全队列合流，程序自身模拟的抬起不会覆盖用户仍按住的连发键；键盘连发支持最多 16 个独立键位，可在带可见拖动条的自适应滚动列表中添加、重录和逐行删除，同时按住多个连发键时各自独立运行。物理按下沿会同步输出第一组，因此短点按也保证输出，不依赖系统长按延迟；只有仍保持按住的键才会在一个配置间隔后创建高精度周期计时器，避免快速点按造成计时器风暴。旧版单键 `outputKey` 会自动迁移到 `repeatKeys` JSON 列表。快捷键录制具备全键盘轮询兜底，并能接住进入录制后首次轮询前已经按下的按键；输入设置写盘失败会同时回滚运行时与内存配置。每次 `SendInput` 前都会重新核对当前前台 PID，切出游戏立即拒绝下一次输出并干净停用；安全监控继续使用进程创建时间防止 PID 复用。输入页在支持的最小窗口尺寸和高 DPI 下保持所有控件可达，启动恢复和运行时尺寸约束共用同一最小值，滚动条空白与行间距不会触发条目操作。三个成品 EXE 均为 Windows GUI 子系统，不会创建控制台窗口；完整普通与 race 门禁、Raw Input ABI、快速点按压力测试、包内 `release.json`、文件长度和 SHA-256 均已重新核对。相同源码、提交身份、显式构建时间和工具链可复现相同包；任一输入改变都会按设计改变 `build-info.json` 和包哈希。
+便携 ZIP 使用固定条目顺序和时间戳。版本 `1.0.3` 保留带真实设备句柄过滤的 Windows Raw Input 物理键盘主通道以及 hook/轮询兼容兜底；键盘输出改为 AHK 运行端中已确认的目标窗口消息路径，向已核验游戏 HWND 分次投递 `WM_KEYDOWN/WM_KEYUP`，鼠标继续使用 QuickInput 兼容的单事件 `SendInput`，并在 down/up 之间保持 1～50ms。键盘模式还会仅在已核验游戏窗口中抑制原始物理连发键；其他键和其他窗口不拦截。快捷键轮询排除了鼠标虚拟键。运行日志新增输入状态变化、模式、最终输出计数和 Fault 信息。周期计时器锚定按下沿，因此保持时间不会额外累加到用户设置的连发间隔。30/50/100/250ms 三模式真实窗口/钩子捕获矩阵已验证 down/up 配平和节拍；真实原神游戏内效果仍属于人工门禁。
+
+## 1.0.4 键盘后启动工作进程候选包
+
+1.0.3 的实机日志确认物理 F 键、调度器、游戏目标核验和输出计数均正常，但目标窗口消息未被游戏消费。1.0.4 因此撤销该键盘输出路径：
+
+- 鼠标继续保留已通过实机验证的 QuickInput 兼容单事件 `SendInput`。
+- 键盘第一次实际输出时才启动同目录的输入工作进程，确保其创建晚于游戏和注入模块初始化。
+- 工作进程使用虚拟键 `INPUT_KEYBOARD`，按下和抬起分别调用一次 `SendInput`；父进程通过匿名管道逐事件等待确认。
+- 父进程退出或管道断开时工作进程退出；正常关闭会回收管道和子进程；单次确认超过 2 秒或发送失败会回收 helper，并进入既有 Fault 路径。
+- 日志在首次成功输出时记录 `post-launch keyboard input worker active`、工作进程 PID 和后端名称，以支持下一轮实机判定。
+
+自动化测试覆盖工作进程协议、分离的 down/up 命令和虚拟键 `INPUT` 内存形状。真实原神游戏内键盘效果仍属于人工门禁，不能以 UI 输出计数代替。
+
+- 文件：`artifacts/release/GenshinTools-1.0.4-windows-amd64-portable.zip`
+- SHA-256：`9198d0ed33270b0352871bb1958cc6705e10470ea09a2cf8c191d87fd9922671`
+- 条目数：14
+- PE 校验：主程序、输入/注入 helper、更新器均为 Windows GUI 子系统且版本统一为 `1.0.4`
+
+## 1.0.5 AutoHotkey SendEvent 候选包
+
+1.0.4 实机日志记录到后启动工作进程 PID 15324，并成功确认 476 组虚拟键 `SendInput`，但游戏仍未消费。该轮还确认了“游戏先运行、工具后冷启动”的时序已被覆盖。运行中的 `YuanShen.exe` 为 High 完整性，用户以管理员身份启动的工具及其子进程同为 High，因此不是 UIPI 向高完整性目标发送失败。
+
+1.0.5 保留后启动独立工作进程和全部目标核验，将键盘边沿改为老版 AutoHotkey 默认 `SendEvent` 使用的 `keybd_event`：虚拟键、当前前台线程键盘布局映射出的扫描码、扩展键标志以及独立 key-up 标志分别传入。日志同时记录主进程/目标完整性、目标 PID 和是否被 UIPI 阻止。鼠标路径保持不变。
+
+- 文件：`artifacts/release/GenshinTools-1.0.5-windows-amd64-portable.zip`
+- SHA-256：`25b6abb71f4b9db86edff930d38299f43f931a3b8078d49583ab9d822e4aa8d0`
+- 条目数：14
+- PE 校验：主程序、输入/注入 helper、更新器均为 Windows GUI 子系统且版本统一为 `1.0.5`
+
+## 1.0.6 AutoHotkey x86 标记事件候选包
+
+1.0.5 实机日志确认工作进程、游戏目标和权限仍然正常：后启动 helper 输出 1274 组，主程序与游戏均为 High 完整性，但游戏未消费。对官方 Ahk2Exe 与 AutoHotkey 运行时源码以及用户提供的可用二进制继续核对后，确认此前的“裸 `keybd_event`”仍不等价：
+
+- Ahk2Exe 只复制选定的 Base 运行时并嵌入脚本，实际发送逻辑属于 AutoHotkey 运行时。
+- AutoHotkey `SendEvent` 的 `KeyEvent` 会写入非零 `KEY_IGNORE_LEVEL(0)`（`0xFFC3D44D`）到 `dwExtraInfo`。
+- 用户提供的可用 `AHK_Space.exe` 与 `quickinput.exe` 均为 i386，而此前的输入 helper 为 x64。
+
+1.0.6 将输入 worker 从 x64 注入 helper 中拆分为独立的 `GenshinTools-input.exe`：Windows GUI 子系统、x86 PE、独立 x86 manifest；事件使用已在用户运行时二进制中交叉确认的标记。x64 `GenshinTools-injector.exe` 恢复为只负责游戏注入。
+
+- 文件：`artifacts/release/GenshinTools-1.0.6-windows-amd64-portable.zip`
+- SHA-256：`8545e158fecad1adbd0298467eb75adba797ecb6ec6cbcb7735bad04230fd3a4`
+- 条目数：15
+- PE 校验：主程序/注入 helper/更新器为 x64，输入 helper 为 x86；全部为预期子系统且版本统一为 `1.0.6`
+
+## 1.0.7 恢复已知可用键盘基线候选包
+
+用户实机确认早期版本曾能在原神内产生键盘连发，缺陷只是按住连发键时再按其他键会中断。提交历史对照将 `0.9.5`（`81160c5`）确定为最可信的已知可用输出基线。1.0.7 不再继续模仿 AutoHotkey 运行时，而是精确恢复该版本的键盘输出边界，同时保留后来完成的多键状态管理、Raw Input 物理边沿、前台游戏进程核验和安全停止：
+
+- 由主 x64 进程按当前前台线程布局映射扫描码。
+- down/up 使用 `KEYEVENTF_SCANCODE`，保留扩展键身份和项目 `dwExtraInfo` 标记。
+- 一组 down/up 在同一次 `SendInput(2, ...)` 中成对提交，不再经过 x86 worker、`keybd_event` 或分离管道。
+- 不抑制原始物理连发键，保持与已知可用版本一致。
+- 每个按住的连发键仍有独立状态；无关按键不会删除 `repeatHeld`，也不会取消当前 generation。
+
+新增回归测试固定扫描码、扩展键、事件标记和物理键不拦截行为。真实 Windows 捕获中，键盘/左键/右键各 100 组 down/up 全部配平；30/50/100/250ms 三模式完整矩阵通过；`go test ./...` 和输入/外壳 race 测试通过。该结果证明 Windows 已接收预期事件，但真实原神消费结果仍必须由人工门禁确认。
+
+- 文件：`artifacts/release/GenshinTools-1.0.7-windows-amd64-portable.zip`
+- 大小：7,776,262 bytes
+- SHA-256：`d92ade643652f056f19e9728b0b00c254ae58ae8c574ccc88b05ef82058cca9e`
+- 条目数：14
+- PE 校验：主程序/注入 helper/更新器均为 x64 Windows GUI 子系统，版本统一为 `1.0.7`；Debug 构建为 x64 Console 子系统且不进入便携包
+
+实机结果：失败。日志确认 1.0.7 在游戏前台无 Win32 错误地产生 1129 组扫描码事件，但游戏仍未消费。这否定了“仅恢复扫描码成对提交即可恢复游戏效果”的假设。
+
+## 1.0.8 物理触发键替换候选包
+
+对可用 `SET_AHK` 目录继续核对后确认，实际生成的 `AHK_F.exe` 是要求管理员权限的 32 位 AutoHotkey 热键程序；其普通热键语义会拦截物理触发键，再以合成事件替代。1.0.7 则让真实 F 一直以 down 状态进入游戏，再叠加合成 F，游戏可能把后续 down 当作同一次持续保持而忽略。
+
+1.0.8 首次组合此前没有共同测试过的两部分：
+
+- 保留 1.0.7 的主进程扫描码 down/up 单次成对 `SendInput`。
+- 仅当键盘连发启用、配置键匹配且已核验原神进程位于前台时，低级 hook 吞掉该物理键的 down/up；同一物理边沿仍进入多键状态机。
+- 禁用状态、未核验窗口、其他进程和其他键均不拦截；项目合成事件继续按 injected 标志和项目 marker 排除，不会被自身再次拦截。
+- hook 使用不可变原子策略快照，不在回调中等待状态机锁；多键状态仍保证无关按键不取消 generation。
+- 状态日志新增 `keyboardBackend` 与 `physicalTriggerSuppressionArmed`，用于实机确认候选路径。
+
+自动矩阵包括输入/外壳 race、全项目测试、真实 Windows 键盘/左右键捕获和 30/50/100/250ms 节拍，全部通过。真实原神消费仍是人工门禁。
+
+- 文件：`artifacts/release/GenshinTools-1.0.8-windows-amd64-portable.zip`
+- 大小：7,778,250 bytes
+- SHA-256：`250d06dc23440c3395ee9151de0ec2de9ef4f196160f6dee7cfe0ac3f4cc11a7`
+- 条目数：14
+- PE 校验：主程序/注入 helper/更新器均为 x64 Windows GUI 子系统，版本统一为 `1.0.8`
+
+实机结果：失败。日志确认物理触发键拦截已武装，两次保持分别生成 678 和 610 组，仍无 API/UIPI 错误，游戏未消费。这否定了“物理 down 与合成 down 冲突是唯一原因”的假设。
+
+## 1.0.9 同进程 x86 输入 worker 候选包
+
+对用户可用的 `SET_AHK` 产物做 PE 与机器码核对后，确认 `AHK_F.exe` 强制管理员权限、架构为 i386，并从同一进程同时持有低级热键 hook、物理按键状态和 `keybd_event(vk, scan, flags, extraInfo)` 调用。1.0.6 的 x86 helper 只接受父进程的代发命令，物理 hook 和 held 状态仍属于 x64 主进程，因此并不等价。
+
+1.0.9 将该进程边界完整实现为原创 Go + Win32 worker：
+
+- `GenshinTools-input.exe` 为 x86 Windows GUI 子系统，随高权限主进程继承相同完整性级别，不创建控制台窗口。
+- worker 自己安装 `WH_KEYBOARD_LL`、保存每个配置键的独立 held 原子状态，并从自己的输出循环调用带 AHK ignore-level 标记的 `keybd_event`。
+- worker 在游戏 PID 被发现后启动，因此同时覆盖游戏已运行后冷启动工具以及注入完成后的创建时序。
+- 主程序通过有界 stdin/stdout JSON 协议同步启用状态、最多 16 个连发键、1～5000ms 间隔和已核验游戏 PID；2 秒无确认会终止 worker 并回退。
+- worker 将物理事件继续传给主进程 hook，由主进程完成仅游戏前台的物理触发键拦截和 UI 状态计数；无关按键不会改变 worker held 状态。
+- worker 缺失、启动失败或退出时，主程序明确退回扫描码成对 `SendInput`，日志记录实际 backend 与 worker PID。
+
+自动验证包括：真实 x86 helper 启动/配置确认/管道关闭退出；同进程 held 循环的 Windows 低级 hook 捕获（至少 5 组且 down/up 配平）；原有三模式捕获矩阵；全项目测试；输入/外壳 race；PE 架构、版本、GUI 子系统和便携包审计。真实原神消费仍为人工门禁。
+
+- 文件：`artifacts/release/GenshinTools-1.0.9-windows-amd64-portable.zip`
+- 大小：8,946,265 bytes
+- SHA-256：`147291cbb024be1e38e6dfcec8dc6b3e66f5e4dfb2144189cb6a65be1e81f4f3`
+- 条目数：15
+- PE 校验：主程序/注入 helper/更新器为 x64 GUI，输入 worker 为 x86 GUI，版本统一为 `1.0.9`
+
+## 1.0.10 AHK 消息投递与注入后重装候选包
+
+1.0.9 实机失败后，用专用探针在 `AHK_F.exe` 启动前安装 `WH_KEYBOARD_LL`，并以调试器监视其 `keybd_event`。有效报告捕获到 288 个物理键盘事件、0 次 `keybd_event` 调用：F 保持期间是一个真实 down、约 500ms 后按系统 typematic 重复 down、松开时一个 up，全部 `injected=false`。这确认此前把静态导入误判成实际输出路径。进一步核对同代 AutoHotkey 官方运行时，面向目标窗口的 ControlSend 分支使用 `PostMessage(WM_KEYDOWN/WM_KEYUP)`，不会进入低级 injected-input hook 链；Windows 11 已不支持 journal hook，因此不采用 SendPlay journal。
+
+1.0.10 按报告修正：
+
+- x86 worker 按 AutoHotkey ControlSend 的 Win32 形态向已核验前台原神窗口提交 `PostMessageW(WM_KEYDOWN/WM_KEYUP)`；扫描码、扩展键位和 key-up 状态位写入 `lParam`，该路径不进入低级 injected-input hook 链。
+- 主 x64 hook 不再吞掉物理连发键，保留真实按键及系统 typematic；无关按键仍不会改变任何连发键的 held 状态。
+- `PostMessageW` 失败时降级到原 `keybd_event`；worker 缺失或退出时再降级到主进程扫描码 `SendInput`。
+- 注入成功并留出 2 秒初始化窗口后，内置 x86 worker 也会被重启并恢复原配置，使其低级物理 hook 安装在注入模块之后。
+- 注入启动前精确记录正在运行的 `AHK_F.exe` 与 `quickinput.exe` 的 PID、进程创建时间和完整路径。注入成功并留出 2 秒初始化窗口后，只终止匹配的原进程生命期并按原路径重启，使外部工具在注入模块之后重装 hook。不会匹配 `AutoHotkey.exe`、`AHK_Space.exe` 或其他同类工具。
+- 版本提升为 `1.0.10`。`go test ./...`、输入/外壳 race、真实 Win32 消息投递捕获、30/50/100/250ms 三模式短矩阵以及 PE 版本/架构/GUI 子系统审计均通过；真实原神消费仍是人工门禁。
+
+- 文件：`artifacts/release/GenshinTools-1.0.10-windows-amd64-portable.zip`
+- SHA-256：`2e699836801c4a104098380c081d2dd92761e2faa385cec9c0d5cae21abf4bf2`
+- 条目数：15
+- PE 校验：主程序/注入 helper/更新器为 x64 GUI，输入 worker 为 x86 GUI，版本统一为 `1.0.10`
+
+## 1.0.11 实测 AHK 事件形态与前台托管候选包
+
+1.0.10 实机确认内置键盘连发仍未被游戏消费，且注入后外部 `AHK_F.exe` 的重启日志不能证明替代进程持续存活。新版 schema 3 输入探针在原神前台捕获到 1092 条 F 事件，其中 749 条为注入事件：375 个 down、374 个 up，扫描码均为 33，标志分别为 `LLKHF_INJECTED` 和 `LLKHF_INJECTED|LLKHF_UP`，`dwExtraInfo` 均为 AutoHotkey `KEY_IGNORE_LEVEL(0)` 的 `0xFFC3D44D`。这否定了 1.0.10 的纯 `PostMessage` 推断，并确认可用 AHK_F 会用自身 hook 吞掉物理热键，再以注入式平衡 down/up 替换。
+
+1.0.11 按实测修正：
+
+- x86 worker 在同一进程中持有物理 hook、每键 held 状态和 `keybd_event` 输出；仅在已核验原神前台吞掉配置的物理触发键，其他按键与其他窗口放行。
+- 切出游戏只暂停输出，不销毁 held 循环；重新回到游戏时仍按住的键可以继续输出，不会因其他按键或短暂失焦永久中止。
+- 注入进入 Running 后不再固定等待两秒，而是要求已核验游戏窗口连续位于前台 1.5 秒，再重启内置 worker 和注入前捕获的外部输入工具。
+- 外部工具按精确完整路径分组，终止并等待每个捕获生命期；AHK_F 使用 `/restart`，新 PID 必须持续存活一秒、映像路径和创建时间一致，否则记录真实失败。
+- 重启后的 AHK_F 由其标准 Suspend Hotkeys 命令管理：游戏前台时启用并显示绿色，离开前台时暂停并显示红色。未使用进程冻结，避免冻结低级 hook、锁或半完成按键状态。
+- 若用户设置注入后退出启动器但存在待托管 AHK_F，则改为隐藏驻留；启动器退出前会恢复用户 AHK，避免遗留暂停状态。
+- 输入探针 schema 3 增加 `SendInput`、`keybd_event`、`PostMessage`、`SendMessage` 与线程消息候选 API 记录，并跳过不适合按 user32 基址换算的转发导出。
+- 版本提升为 `1.0.11`。全项目普通与 race 测试、格式、依赖和 vet 门禁通过；真实 Win32 短捕获中 worker 的五组 AHK 标记 down/up 完全配平，键盘/左键/右键在 30/50/100/250ms 矩阵中均配平且节拍处于容差内。PE、GUI 子系统、版本、图标、注入 helper 协议和便携布局审计通过；真实原神消费仍须人工门禁确认。
+
+- 文件：`artifacts/release/GenshinTools-1.0.11-windows-amd64-portable.zip`
+- 大小：8,963,285 bytes
+- SHA-256：`ce6ea1c2dfede9f8300de89f44e4781946ba654b4a95b724b8bf45876dfdc9e7`
+- 条目数：15
+- PE 校验：主程序/注入 helper/更新器为 x64 GUI，输入 worker 为 x86 GUI，版本统一为 `1.0.11`
+
+## 1.1.0 外部 AHK 权限与可靠重启候选包
+
+1.0.11 实测日志确认注入前的高权限 `AHK_F.exe` PID 34164 已被终止，但中权限主程序随后以普通 `CreateProcess` 重启时收到 `ERROR_ELEVATION_REQUIRED`，因此没有新 PID。相同完整性差异还会使 UIPI 拦截后续 `WM_COMMAND/Suspend Hotkeys`，所以只增加一次重试不足以完成前台托管。
+
+1.1.0 冻结内置键盘连发的现状，不再继续修改其行为；本轮只处理外部 AHK：
+
+- 主程序清单改为 `requireAdministrator`，启动时进行一次 UAC，使主程序、AHK_F 和游戏输入管理处于相同完整性级别。
+- 注入 helper、x86 输入 helper 和更新 helper 继续使用 `asInvoker`，按调用方权限继承，不单独重复请求 UAC。
+- AHK_F 使用 `/restart` 先启动替代进程；新 PID 必须持续存活一秒且映像路径、创建时间一致，之后才清理仍存在的旧 PID。替代启动失败、UAC 取消或健康检查失败时不会先结束原 AHK。
+- 普通创建明确返回 `ERROR_ELEVATION_REQUIRED` 时仍提供 `ShellExecuteExW(runas)` 回退，并保留返回的进程句柄/PID用于同一健康检查。
+- AHK 成功替换后继续按已核验游戏是否位于前台，通过同权限 `Suspend Hotkeys` 切换绿色激活与红色暂停状态。
+- 版本提升为 `1.1.0`；全项目普通/race、格式、依赖、vet、AHK 原实例保留顺序、ShellExecute ABI、外壳和输入回归测试通过。PE 审计确认主程序为 `requireAdministrator`，三个辅助程序为 `asInvoker`，版本、架构、GUI 子系统、图标、注入 helper 协议和便携布局均符合预期。
+
+- 文件：`artifacts/release/GenshinTools-1.1.0-windows-amd64-portable.zip`
+- 大小：8,965,121 bytes
+- SHA-256：`dece6160ccec8d6a9b55ae9ed9c0d0a7937f038cfa6540e56acd1f44abdc5ffc`
+- 条目数：15
+- PE 校验：主程序为 x64 GUI/`requireAdministrator`；注入 helper、更新器为 x64 GUI/`asInvoker`；输入 helper 为 x86 GUI/`asInvoker`；版本统一为 `1.1.0`
+
+## 1.2.0 AHK 随游戏共生命周期
+
+- 输入增强页新增持久化选项“AHK随游戏启动/关闭”，配置 schema 提升到 10；旧配置迁移后默认关闭。
+- 启用后，只使用游戏发现层已核验路径、PID 和创建时间的原神进程作为生命周期目标。检测到游戏即启动内置 AHK，不再等待游戏先成为前台；所有目标 PID 退出后脚本自行退出。
+- 游戏仍运行而 AHK 被手动关闭或异常退出时，管理任务一秒后重新拉起；关闭选项只结束本项目记录的内置 PID 与完整路径，不按进程名模糊结束用户工具。
+- 项目脚本只在已核验游戏窗口处于前台时启用热键，离开前台立即暂停；即使主程序按启动后行为退出，脚本仍独立核验游戏 PID 并随游戏退出。
+- 便携包内置官方 AutoHotkey v1.1.37.02 x86 运行时并重命名为 `AHK_F.exe`，同时携带项目脚本、GPL-2.0 文本及完整对应源码 ZIP。用户提供、追加脚本不透明且再分发权限不明的旧 `AHK_F.exe` 不进入仓库或成品。
+- 运行时、脚本、源码在构建、成品审计和每次实际启动前均校验固定 SHA-256，避免管理员主程序执行被本地替换的同名脚本。
+- 自动测试覆盖 schema 迁移/持久化、独立 UI 命中区域、篡改拒绝、升级包必需文件与确定性 ZIP；真实运行时冒烟验证通过脚本解析、进程存活以及目标进程退出后 AHK 自动退出。
+
+- 文件：`artifacts/release/GenshinTools-1.2.0-windows-amd64-portable.zip`
+- 大小：11,464,634 bytes
+- SHA-256：`89035204fbdc0019d7d117bbadc0e0e3672f1be61eaba75f923d217330c07e24`
+- 条目数：19
+- PE 校验：主程序为 x64 GUI/`requireAdministrator`；注入 helper、更新器为 x64 GUI/`asInvoker`；输入 helper 与内置 AHK 运行时为 x86 GUI；项目程序版本统一为 `1.2.0`
 
 ## 尚未关闭的人工门禁
 

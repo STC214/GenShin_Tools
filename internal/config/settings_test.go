@@ -26,6 +26,34 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 	}
 }
 
+func TestAHKWithGamePersistsAndOldSchemaDefaultsOff(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	settings := Default()
+	settings.Game.AHKWithGame = true
+	if err := Save(path, settings); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !loaded.Settings.Game.AHKWithGame {
+		t.Fatal("AHK game lifecycle option was not persisted")
+	}
+
+	oldPath := filepath.Join(t.TempDir(), "old.json")
+	if err := os.WriteFile(oldPath, []byte(`{"schemaVersion":9,"window":{"width":1100,"height":720},"game":{}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	old, err := Load(oldPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if old.Settings.SchemaVersion != CurrentSchemaVersion || old.Settings.Game.AHKWithGame {
+		t.Fatalf("schema 9 AHK lifecycle migration = %+v", old.Settings.Game)
+	}
+}
+
 func TestLoadQuarantinesCorruptSettings(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
 	if err := os.WriteFile(path, []byte("{broken"), 0o644); err != nil {
