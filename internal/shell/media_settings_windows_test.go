@@ -12,6 +12,7 @@ import (
 	"genshintools/internal/input"
 	"genshintools/internal/localization"
 	"genshintools/internal/paths"
+	"genshintools/internal/platform/win32"
 )
 
 func newMediaSettingsTestApp(t *testing.T, configPath string) *application {
@@ -69,6 +70,75 @@ func TestRecordedInputKeyRollsBackWhenSettingsCannotBeSaved(t *testing.T) {
 	}
 	if app.inputUIError == "" {
 		t.Fatal("save failure was not exposed in the input UI")
+	}
+}
+
+func TestInputClickRollsBackIntervalWhenSettingsCannotBeSaved(t *testing.T) {
+	native, err := input.NewNative(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(native.Close)
+	settings := config.Default()
+	if err := native.Configure(settings.Input); err != nil {
+		t.Fatal(err)
+	}
+	settings.Shell.Language = "invalid-language"
+	app := &application{
+		dpi:         96,
+		settings:    settings,
+		layout:      paths.Layout{Config: filepath.Join(t.TempDir(), "config.json")},
+		texts:       localization.New(localization.EN, ""),
+		inputNative: native,
+	}
+	beforeNative := native.Snapshot().Config
+	beforeSettings := app.settings.Input
+	app.inputClick(400, 580)
+	if after := native.Snapshot().Config; after != beforeNative {
+		t.Fatalf("native interval was not rolled back: got %+v want %+v", after, beforeNative)
+	}
+	if app.settings.Input != beforeSettings {
+		t.Fatalf("in-memory interval was not rolled back: got %+v want %+v", app.settings.Input, beforeSettings)
+	}
+	if app.inputUIError == "" {
+		t.Fatal("save failure was not exposed in the input UI")
+	}
+}
+
+func TestInputRepeatHitTestExcludesSpacingAndScrollbarGap(t *testing.T) {
+	const dpi = 144
+	left := win32.Scale(252, dpi)
+	right := win32.Scale(1058, dpi)
+	rowRight := right - win32.Scale(22, dpi)
+
+	index, deleteRow, hit := inputRepeatHitTest(
+		int(rowRight-win32.Scale(20, dpi)),
+		int(win32.Scale(280, dpi)),
+		left,
+		right,
+		dpi,
+		3,
+		0,
+	)
+	if !hit || index != 0 || !deleteRow {
+		t.Fatalf("delete button hit = index %d delete=%t hit=%t", index, deleteRow, hit)
+	}
+	if _, _, hit := inputRepeatHitTest(int(rowRight+win32.Scale(3, dpi)), int(win32.Scale(280, dpi)), left, right, dpi, 3, 0); hit {
+		t.Fatal("blank gap before the scrollbar hit a repeat row")
+	}
+	if _, _, hit := inputRepeatHitTest(int(left+win32.Scale(20, dpi)), int(win32.Scale(314, dpi)), left, right, dpi, 3, 0); hit {
+		t.Fatal("inter-row spacing hit a repeat row")
+	}
+	index, _, hit = inputRepeatHitTest(int(left+win32.Scale(20, dpi)), int(win32.Scale(322, dpi)), left, right, dpi, 3, 1)
+	if !hit || index != 2 {
+		t.Fatalf("DPI-scaled second visible row = index %d hit=%t, want index 2", index, hit)
+	}
+}
+
+func TestInputPageMinimumHeightAlsoAppliesToRestoredBounds(t *testing.T) {
+	got := enforceMinimumWindowSize(config.WindowConfig{Width: 320, Height: 560})
+	if got.Width != minimumWindowWidth || got.Height != minimumWindowHeight {
+		t.Fatalf("restored minimum bounds = %dx%d, want %dx%d", got.Width, got.Height, minimumWindowWidth, minimumWindowHeight)
 	}
 }
 

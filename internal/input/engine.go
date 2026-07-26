@@ -2,9 +2,13 @@ package input
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
+	"time"
 )
+
+var errOutputTargetLost = errors.New("input output target is no longer the configured game window")
 
 type Engine struct {
 	mu         sync.Mutex
@@ -19,6 +23,7 @@ type Engine struct {
 	onChange   func(Snapshot)
 	closed     bool
 	toggleHeld map[uint32]bool
+	repeatHeld map[uint32]bool
 }
 
 func NewEngine(injector Injector, onChange func(Snapshot)) (*Engine, error) {
@@ -26,7 +31,14 @@ func NewEngine(injector Injector, onChange func(Snapshot)) (*Engine, error) {
 		return nil, fmt.Errorf("injector is required")
 	}
 	config, _ := DefaultConfig().Normalized()
-	return &Engine{config: config, state: StateDisabled, injector: injector, onChange: onChange, toggleHeld: map[uint32]bool{}}, nil
+	return &Engine{
+		config:     config,
+		state:      StateDisabled,
+		injector:   injector,
+		onChange:   onChange,
+		toggleHeld: map[uint32]bool{},
+		repeatHeld: map[uint32]bool{},
+	}, nil
 }
 
 func (e *Engine) Configure(config Config) error {
@@ -38,6 +50,7 @@ func (e *Engine) Configure(config Config) error {
 	e.mu.Lock()
 	e.config = normalized
 	clear(e.toggleHeld)
+	clear(e.repeatHeld)
 	if normalized.Enabled {
 		e.state = StateArmed
 	} else {
@@ -79,6 +92,9 @@ func (e *Engine) Start() bool {
 	snapshot := e.snapshotLocked()
 	e.mu.Unlock()
 	e.notify(snapshot)
+	if !e.emit(generation, config) {
+		return false
+	}
 	go e.outputLoop(ctx, generation, config)
 	return true
 }
@@ -131,20 +147,39 @@ func (e *Engine) Handle(event PhysicalEvent) {
 		e.mu.Unlock()
 		return
 	}
-	trigger := config.Mode == ModeKeyboard && event.Kind == EventKey && SameKey(event.Code, config.OutputKey)
+	trigger := config.Mode == ModeKeyboard && event.Kind == EventKey && config.IsRepeatKey(event.Code)
 	if !trigger {
 		e.mu.Unlock()
 		return
+	}
+	key := NormalizeKeyCode(event.Code)
+	if event.Down {
+		if e.repeatHeld[key] {
+			e.mu.Unlock()
+			return
+		}
+		e.repeatHeld[key] = true
 	}
 	if event.Down && e.state == StateArmed {
 		ctx, generation, config := e.startLocked()
 		snapshot := e.snapshotLocked()
 		e.mu.Unlock()
 		e.notify(snapshot)
-		go e.outputLoop(ctx, generation, config)
+		if e.emitKey(generation, config, key) {
+			go e.outputLoop(ctx, generation, config)
+		}
 		return
 	}
-	if !event.Down && e.state == StateRunning {
+	if event.Down && e.state == StateRunning {
+		generation, config := e.gen, e.config
+		e.mu.Unlock()
+		e.emitKey(generation, config, key)
+		return
+	}
+	if !event.Down {
+		delete(e.repeatHeld, key)
+	}
+	if !event.Down && e.state == StateRunning && len(e.repeatHeld) == 0 {
 		e.mu.Unlock()
 		e.stop(false)
 		return
@@ -174,6 +209,21 @@ func (e *Engine) outputLoop(ctx context.Context, generation uint64, config Confi
 			e.Fail(fmt.Errorf("panic in input output loop: %v", value))
 		}
 	}()
+	// The press edge already emitted synchronously. Use a lightweight,
+	// cancellable first interval so a short tap never creates a Windows
+	// waitable timer or a blocked OS thread.
+	delay := time.NewTimer(config.Interval)
+	select {
+	case <-ctx.Done():
+		if !delay.Stop() {
+			select {
+			case <-delay.C:
+			default:
+			}
+		}
+		return
+	case <-delay.C:
+	}
 	if !e.emit(generation, config) {
 		return
 	}
@@ -198,16 +248,24 @@ func (e *Engine) outputLoop(ctx context.Context, generation uint64, config Confi
 	}
 }
 
-func (e *Engine) emit(generation uint64, config Config) bool {
+func (e *Engine) emitKey(generation uint64, config Config, key uint32) bool {
 	e.emitMu.Lock()
 	defer e.emitMu.Unlock()
 	e.mu.Lock()
-	valid := !e.closed && e.state == StateRunning && e.gen == generation
+	key = NormalizeKeyCode(key)
+	valid := !e.closed && e.state == StateRunning && e.gen == generation && e.repeatHeld[key]
 	e.mu.Unlock()
 	if !valid {
 		return false
 	}
-	if err := e.injector.Emit(config); err != nil {
+	keyConfig := config
+	keyConfig.OutputKey = key
+	keyConfig.TriggerKey = key
+	if err := e.injector.Emit(keyConfig); err != nil {
+		if errors.Is(err, errOutputTargetLost) {
+			e.targetLost(generation)
+			return false
+		}
 		e.fault(generation, err)
 		return false
 	}
@@ -221,6 +279,76 @@ func (e *Engine) emit(generation uint64, config Config) bool {
 	return true
 }
 
+func (e *Engine) emit(generation uint64, config Config) bool {
+	e.emitMu.Lock()
+	defer e.emitMu.Unlock()
+	e.mu.Lock()
+	valid := !e.closed && e.state == StateRunning && e.gen == generation
+	repeatKeys := make([]uint32, 0, len(e.repeatHeld))
+	if valid && config.Mode == ModeKeyboard {
+		for key := range e.repeatHeld {
+			repeatKeys = append(repeatKeys, key)
+		}
+		valid = len(repeatKeys) != 0
+	}
+	e.mu.Unlock()
+	if !valid {
+		return false
+	}
+	emitted := uint64(1)
+	if config.Mode == ModeKeyboard {
+		emitted = 0
+		for _, key := range repeatKeys {
+			keyConfig := config
+			keyConfig.OutputKey = key
+			keyConfig.TriggerKey = key
+			if err := e.injector.Emit(keyConfig); err != nil {
+				if errors.Is(err, errOutputTargetLost) {
+					e.targetLost(generation)
+					return false
+				}
+				e.fault(generation, err)
+				return false
+			}
+			emitted++
+		}
+	} else if err := e.injector.Emit(config); err != nil {
+		if errors.Is(err, errOutputTargetLost) {
+			e.targetLost(generation)
+			return false
+		}
+		e.fault(generation, err)
+		return false
+	}
+	e.mu.Lock()
+	if e.gen == generation {
+		e.count += emitted
+	}
+	snapshot := e.snapshotLocked()
+	e.mu.Unlock()
+	e.notify(snapshot)
+	return true
+}
+
+func (e *Engine) targetLost(generation uint64) {
+	e.mu.Lock()
+	if e.closed || e.gen != generation {
+		e.mu.Unlock()
+		return
+	}
+	if e.cancel != nil {
+		e.cancel()
+		e.cancel = nil
+	}
+	e.gen++
+	e.config.Enabled = false
+	e.state = StateDisabled
+	clear(e.repeatHeld)
+	snapshot := e.snapshotLocked()
+	e.mu.Unlock()
+	e.notify(snapshot)
+}
+
 func (e *Engine) stop(disable bool) {
 	e.mu.Lock()
 	if e.cancel != nil {
@@ -228,6 +356,7 @@ func (e *Engine) stop(disable bool) {
 		e.cancel = nil
 	}
 	release := e.state == StateRunning || e.state == StateStopping
+	clear(e.repeatHeld)
 	if e.state == StateRunning {
 		e.state = StateStopping
 	}

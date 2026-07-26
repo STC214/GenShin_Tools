@@ -2,6 +2,7 @@
 package input
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -60,6 +61,7 @@ type Config struct {
 	Mode                Mode          `json:"mode"`
 	TriggerKey          uint32        `json:"triggerKey"`
 	OutputKey           uint32        `json:"outputKey"`
+	RepeatKeys          KeyList       `json:"repeatKeys"`
 	StopKey             uint32        `json:"stopKey"`
 	KeyboardToggleKey   uint32        `json:"keyboardToggleKey"`
 	MouseLeftToggleKey  uint32        `json:"mouseLeftToggleKey"`
@@ -73,6 +75,7 @@ func DefaultConfig() Config {
 		Mode:                ModeKeyboard,
 		TriggerKey:          EncodeKeyCode('F', false),
 		OutputKey:           EncodeKeyCode('F', false),
+		RepeatKeys:          NewKeyList(EncodeKeyCode('F', false)),
 		StopKey:             EncodeKeyCode(0x7B, false),
 		KeyboardToggleKey:   EncodeKeyCode(0x77, false),
 		MouseLeftToggleKey:  EncodeKeyCode(0x78, false),
@@ -106,7 +109,6 @@ func (c Config) Normalized() (Config, error) {
 	c.KeyboardToggleKey = NormalizeKeyCode(c.KeyboardToggleKey)
 	c.MouseLeftToggleKey = NormalizeKeyCode(c.MouseLeftToggleKey)
 	c.MouseRightToggleKey = NormalizeKeyCode(c.MouseRightToggleKey)
-	c.OutputKey = NormalizeKeyCode(c.OutputKey)
 	keys := []uint32{c.StopKey, c.KeyboardToggleKey, c.MouseLeftToggleKey, c.MouseRightToggleKey}
 	seen := make(map[uint32]bool, len(keys))
 	for _, key := range keys {
@@ -118,16 +120,121 @@ func (c Config) Normalized() (Config, error) {
 		}
 		seen[key] = true
 	}
-	if !ValidKeyCode(c.OutputKey) {
-		return Config{}, errors.New("repeat key is required")
+	// A nil list identifies legacy settings. An explicit empty list is valid
+	// and lets the UI remove every repeat row before adding new ones.
+	if !c.RepeatKeys.Present() {
+		legacy := c.OutputKey
+		if !ValidKeyCode(legacy) {
+			legacy = defaults.OutputKey
+		}
+		c.RepeatKeys = NewKeyList(legacy)
 	}
-	if seen[c.OutputKey] {
-		return Config{}, errors.New("repeat key must differ from stop and toggle keys")
+	repeatSeen := make(map[uint32]bool, c.RepeatKeys.Len())
+	for index, key := range c.RepeatKeys.Slice() {
+		key = NormalizeKeyCode(key)
+		if !ValidKeyCode(key) {
+			return Config{}, errors.New("repeat keys must be valid keyboard keys")
+		}
+		if seen[key] {
+			return Config{}, errors.New("repeat keys must differ from stop and toggle keys")
+		}
+		if repeatSeen[key] {
+			return Config{}, errors.New("repeat keys must be different")
+		}
+		repeatSeen[key] = true
+		c.RepeatKeys.Set(index, key)
 	}
-	// TriggerKey is retained in the JSON schema for backward compatibility,
-	// but keyboard repeat now follows the key being repeated.
-	c.TriggerKey = c.OutputKey
+	// Retain the first key in the legacy fields for older readers.
+	c.OutputKey, c.TriggerKey = 0, 0
+	if c.RepeatKeys.Len() != 0 {
+		c.OutputKey = c.RepeatKeys.At(0)
+		c.TriggerKey = c.RepeatKeys.At(0)
+	}
 	return c, nil
+}
+
+func (c Config) IsRepeatKey(code uint32) bool {
+	for _, key := range c.RepeatKeys.Slice() {
+		if SameKey(code, key) {
+			return true
+		}
+	}
+	return false
+}
+
+const MaxRepeatKeys = 16
+
+// KeyList remains comparable so Settings can be transactionally compared and
+// rolled back, while its JSON representation stays a normal variable-length
+// array for users and older tooling.
+type KeyList struct {
+	keys    [MaxRepeatKeys]uint32
+	count   uint8
+	present bool
+}
+
+func NewKeyList(keys ...uint32) KeyList {
+	var result KeyList
+	result.present = true
+	for _, key := range keys {
+		if !result.Append(key) {
+			break
+		}
+	}
+	return result
+}
+
+func (keys KeyList) Present() bool { return keys.present }
+func (keys KeyList) Len() int      { return int(keys.count) }
+func (keys KeyList) At(index int) uint32 {
+	if index < 0 || index >= keys.Len() {
+		return 0
+	}
+	return keys.keys[index]
+}
+func (keys KeyList) Slice() []uint32 {
+	return append([]uint32(nil), keys.keys[:keys.Len()]...)
+}
+func (keys *KeyList) Set(index int, key uint32) bool {
+	if index < 0 || index >= keys.Len() {
+		return false
+	}
+	keys.keys[index] = key
+	keys.present = true
+	return true
+}
+func (keys *KeyList) Append(key uint32) bool {
+	if keys.Len() >= MaxRepeatKeys {
+		return false
+	}
+	keys.keys[keys.count] = key
+	keys.count++
+	keys.present = true
+	return true
+}
+func (keys *KeyList) Delete(index int) bool {
+	if index < 0 || index >= keys.Len() {
+		return false
+	}
+	copy(keys.keys[index:], keys.keys[index+1:keys.Len()])
+	keys.count--
+	keys.keys[keys.count] = 0
+	keys.present = true
+	return true
+}
+func (keys KeyList) MarshalJSON() ([]byte, error) {
+	return json.Marshal(keys.keys[:keys.Len()])
+}
+func (keys *KeyList) UnmarshalJSON(data []byte) error {
+	var values []uint32
+	if err := json.Unmarshal(data, &values); err != nil {
+		return err
+	}
+	if len(values) > MaxRepeatKeys {
+		return fmt.Errorf("no more than %d repeat keys are allowed", MaxRepeatKeys)
+	}
+	*keys = NewKeyList(values...)
+	return nil
 }
 
 const (

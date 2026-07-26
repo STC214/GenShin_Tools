@@ -15,6 +15,67 @@ func TestWinInputLayout(t *testing.T) {
 	}
 }
 
+func TestRawInputLayoutsAndPhysicalKeyboardTranslation(t *testing.T) {
+	if size := unsafe.Sizeof(rawInputDevice{}); size != 16 {
+		t.Fatalf("sizeof(RAWINPUTDEVICE) = %d, want 16", size)
+	}
+	if size := unsafe.Sizeof(rawInputHeader{}); size != 24 {
+		t.Fatalf("sizeof(RAWINPUTHEADER) = %d, want 24", size)
+	}
+	if size := unsafe.Sizeof(rawKeyboard{}); size != 16 {
+		t.Fatalf("sizeof(RAWKEYBOARD) = %d, want 16", size)
+	}
+	n := &Native{wake: make(chan struct{}, 1)}
+	n.handleRawKeyboard(rawKeyboard{VirtualKey: 'F'})
+	n.handleRawKeyboard(rawKeyboard{VirtualKey: 'F', Flags: riKeyBreak})
+	n.handleRawKeyboard(rawKeyboard{VirtualKey: 0x21, Flags: riKeyE0})
+	if n.head.Load() != 3 {
+		t.Fatalf("raw keyboard queued %d events, want 3", n.head.Load())
+	}
+	if first, second := n.events[0], n.events[1]; !first.Down || second.Down || !SameKey(first.Code, 'F') || !SameKey(second.Code, 'F') {
+		t.Fatalf("raw F translation = %+v %+v", first, second)
+	}
+	if got := n.events[2].Code; got != EncodeKeyCode(0x21, true) {
+		t.Fatalf("raw extended Page Up = %#x", got)
+	}
+}
+
+func TestNativeQueueSupportsConcurrentHookAndRawInputProducers(t *testing.T) {
+	n := &Native{wake: make(chan struct{}, 1)}
+	const producers = 8
+	const eventsPerProducer = nativeQueueSize / producers
+	start := make(chan struct{})
+	done := make(chan struct{}, producers)
+	for producer := uint32(1); producer <= producers; producer++ {
+		go func(code uint32) {
+			<-start
+			for range eventsPerProducer {
+				n.enqueue(PhysicalEvent{Kind: EventKey, Code: code, Down: true})
+			}
+			done <- struct{}{}
+		}(producer)
+	}
+	close(start)
+	for range producers {
+		<-done
+	}
+	if n.overflow.Load() {
+		t.Fatal("exactly one queue capacity overflowed")
+	}
+	if got := n.head.Load(); got != nativeQueueSize {
+		t.Fatalf("queued %d events, want %d", got, nativeQueueSize)
+	}
+	counts := make(map[uint32]int, producers)
+	for index := range nativeQueueSize {
+		counts[n.events[index].Code]++
+	}
+	for producer := uint32(1); producer <= producers; producer++ {
+		if got := counts[producer]; got != eventsPerProducer {
+			t.Fatalf("producer %d retained %d events, want %d", producer, got, eventsPerProducer)
+		}
+	}
+}
+
 func TestKeyboardPairUsesScanCodeMarkerAndKeyUp(t *testing.T) {
 	config := DefaultConfig()
 	pair, err := inputPair(config)
@@ -177,6 +238,70 @@ func TestCaptureModeSuppressesGlobalStopFromHookAndPolling(t *testing.T) {
 	}
 	if snapshot := engine.Snapshot(); !snapshot.Config.Enabled || snapshot.State != StateArmed {
 		t.Fatalf("global stop fired while recording completed: %+v", snapshot)
+	}
+}
+
+func TestCaptureModeRecordsArbitraryKeyThroughPollingFallback(t *testing.T) {
+	injector := &fakeInjector{}
+	engine, err := NewEngine(injector, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pressed := make(map[uint32]bool)
+	var observed atomic.Uint32
+	n := &Native{
+		engine:     engine,
+		foreground: func() windows.HWND { return 0 },
+		keyDown:    func(code uint32) bool { return pressed[NormalizeKeyCode(code)] },
+		observer: func(event PhysicalEvent) {
+			if event.Kind == EventKey && event.Down && SameKey(event.Code, 'A') {
+				observed.Add(1)
+			}
+		},
+	}
+	states := make(map[uint32]bool)
+	n.SetCaptureMode(true)
+	n.pollKeyboardOnce(states)
+	pressed[NormalizeKeyCode('A')] = true
+	n.pollKeyboardOnce(states)
+	if observed.Load() != 1 || n.captureKey.Load() != NormalizeKeyCode('A') {
+		t.Fatalf("polling capture did not record A: observed=%d key=%#x", observed.Load(), n.captureKey.Load())
+	}
+	pressed[NormalizeKeyCode('A')] = false
+	n.pollKeyboardOnce(states)
+	if n.capturing.Load() {
+		t.Fatal("polling capture did not finish on key-up")
+	}
+}
+
+func TestCaptureModeRecordsKeyDownBeforeFirstPollingScan(t *testing.T) {
+	injector := &fakeInjector{}
+	engine, err := NewEngine(injector, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pressed := map[uint32]bool{NormalizeKeyCode('A'): true}
+	var observed atomic.Uint32
+	n := &Native{
+		engine:  engine,
+		keyDown: func(code uint32) bool { return pressed[NormalizeKeyCode(code)] },
+		observer: func(event PhysicalEvent) {
+			if event.Kind == EventKey && event.Down && SameKey(event.Code, 'A') {
+				observed.Add(1)
+			}
+		},
+	}
+	states := make(map[uint32]bool)
+	n.SetCaptureMode(true)
+	n.pollKeyboardOnce(states)
+	if observed.Load() != 1 || n.captureKey.Load() != NormalizeKeyCode('A') {
+		t.Fatalf("first polling scan lost A: observed=%d key=%#x", observed.Load(), n.captureKey.Load())
+	}
+
+	pressed[NormalizeKeyCode('A')] = false
+	n.pollKeyboardOnce(states)
+	if n.capturing.Load() {
+		t.Fatal("first-scan capture did not finish on key-up")
 	}
 }
 
@@ -396,6 +521,104 @@ func TestKeyboardPollingFallbackStartsMouseModeInExternalForeground(t *testing.T
 	}
 }
 
+func TestInputOnlyStartsInConfiguredGameProcess(t *testing.T) {
+	injector := &fakeInjector{}
+	engine, err := NewEngine(injector, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var foreground atomic.Uintptr
+	foreground.Store(2)
+	n := &Native{
+		engine:         engine,
+		foreground:     func() windows.HWND { return windows.HWND(foreground.Load()) },
+		windowPID:      func(window windows.HWND) uint32 { return uint32(window) },
+		processCreated: func(processID uint32) int64 { return int64(processID) * 10 },
+	}
+	n.SetGameProcesses([]GameProcess{{PID: 1, CreationTime: 10}})
+	config := DefaultConfig()
+	config.Enabled = true
+	config.Interval = 5 * time.Millisecond
+	if err := n.Configure(config); err != nil {
+		t.Fatal(err)
+	}
+	n.processPhysicalEvent(PhysicalEvent{Kind: EventKey, Code: config.OutputKey, Down: true})
+	if snapshot := engine.Snapshot(); snapshot.State != StateArmed {
+		t.Fatalf("keyboard repeat started outside configured game process: %+v", snapshot)
+	}
+
+	foreground.Store(1)
+	n.processPhysicalEvent(PhysicalEvent{Kind: EventKey, Code: config.OutputKey, Down: true})
+	deadline := time.Now().Add(250 * time.Millisecond)
+	for engine.Snapshot().State != StateRunning && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if snapshot := engine.Snapshot(); snapshot.State != StateRunning {
+		t.Fatalf("keyboard repeat did not start in configured game process: %+v", snapshot)
+	}
+	n.processPhysicalEvent(PhysicalEvent{Kind: EventKey, Code: config.OutputKey, Down: false})
+}
+
+func TestConfiguredGameProcessRejectsReusedPID(t *testing.T) {
+	var creation atomic.Int64
+	creation.Store(10)
+	n := &Native{
+		windowPID:      func(windows.HWND) uint32 { return 1 },
+		processCreated: func(uint32) int64 { return creation.Load() },
+	}
+	n.SetGameProcesses([]GameProcess{{PID: 1, CreationTime: 10}})
+	if !n.isGameWindow(windows.HWND(0x1234)) {
+		t.Fatal("matching process lifetime was rejected")
+	}
+	creation.Store(20)
+	if n.isGameWindow(windows.HWND(0x1234)) {
+		t.Fatal("reused PID with a different creation time was accepted")
+	}
+}
+
+func TestMouseModeWaitsForConfiguredGameProcess(t *testing.T) {
+	injector := &fakeInjector{}
+	engine, err := NewEngine(injector, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var foreground atomic.Uintptr
+	foreground.Store(2)
+	n := &Native{
+		engine:         engine,
+		monitorStop:    make(chan struct{}),
+		monitorDone:    make(chan struct{}),
+		foreground:     func() windows.HWND { return windows.HWND(foreground.Load()) },
+		windowPID:      func(window windows.HWND) uint32 { return uint32(window) },
+		processCreated: func(processID uint32) int64 { return int64(processID) * 10 },
+	}
+	n.SetGameProcesses([]GameProcess{{PID: 1, CreationTime: 10}})
+	config := DefaultConfig()
+	config.Mode = ModeMouseLeft
+	config.Interval = 5 * time.Millisecond
+	if err := n.Configure(config); err != nil {
+		t.Fatal(err)
+	}
+	n.processPhysicalEvent(PhysicalEvent{Kind: EventKey, Code: config.MouseLeftToggleKey, Down: true})
+	if snapshot := engine.Snapshot(); snapshot.State != StateArmed || !snapshot.Config.Enabled {
+		t.Fatalf("mouse mode was not armed outside game process: %+v", snapshot)
+	}
+	go n.safetyMonitor()
+	defer func() {
+		close(n.monitorStop)
+		<-n.monitorDone
+		engine.Close()
+	}()
+	foreground.Store(1)
+	deadline := time.Now().Add(2 * time.Second)
+	for engine.Snapshot().State != StateRunning && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if snapshot := engine.Snapshot(); snapshot.State != StateRunning {
+		t.Fatalf("mouse mode did not start after configured game process became foreground: %+v", snapshot)
+	}
+}
+
 func TestMousePairAndDefensiveRelease(t *testing.T) {
 	config := DefaultConfig()
 	config.Mode = ModeMouseLeft
@@ -543,7 +766,7 @@ func TestForegroundChangeStopsRunningEngine(t *testing.T) {
 	}
 }
 
-func TestTransientForegroundChangeDoesNotStopRunningMouseMode(t *testing.T) {
+func TestTransientForegroundChangeImmediatelyStopsRunningMouseMode(t *testing.T) {
 	injector := &fakeInjector{}
 	engine, err := NewEngine(injector, nil)
 	if err != nil {
@@ -576,11 +799,12 @@ func TestTransientForegroundChangeDoesNotStopRunningMouseMode(t *testing.T) {
 	}()
 	time.Sleep(150 * time.Millisecond)
 	foreground.Store(2)
-	time.Sleep(foregroundLossGrace / 2)
-	foreground.Store(1)
-	time.Sleep(200 * time.Millisecond)
-	if snapshot := engine.Snapshot(); snapshot.State != StateRunning || !snapshot.Config.Enabled {
-		t.Fatalf("transient foreground change stopped mouse mode: %+v", snapshot)
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for engine.Snapshot().State != StateDisabled && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if snapshot := engine.Snapshot(); snapshot.State != StateDisabled || snapshot.Config.Enabled {
+		t.Fatalf("foreground change did not immediately stop mouse mode: %+v", snapshot)
 	}
 }
 

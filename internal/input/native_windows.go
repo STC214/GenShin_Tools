@@ -14,10 +14,17 @@ import (
 )
 
 const (
-	whKeyboardLL = 13
-	whMouseLL    = 14
-	wMQuit       = 0x0012
-	pmNoRemove   = 0x0000
+	whKeyboardLL   = 13
+	whMouseLL      = 14
+	wMQuit         = 0x0012
+	pmNoRemove     = 0x0000
+	ridInput       = 0x10000003
+	rimTypeKey     = 1
+	ridevRemove    = 0x00000001
+	ridevInputSink = 0x00000100
+	riKeyBreak     = 0x0001
+	riKeyE0        = 0x0002
+	riKeyE1        = 0x0004
 
 	wMKeyDown     = 0x0100
 	wMKeyUp       = 0x0101
@@ -48,7 +55,6 @@ const (
 	nativeQueueSize      = 256
 	mouseTargetStableFor = 300 * time.Millisecond
 	keyboardPollInterval = 5 * time.Millisecond
-	foregroundLossGrace  = 750 * time.Millisecond
 )
 
 // injectionMarker is deliberately non-zero, uncommon, and limited to 32 bits.
@@ -85,6 +91,29 @@ type mouseHook struct {
 	ExtraInfo uintptr
 }
 
+type rawInputDevice struct {
+	UsagePage uint16
+	Usage     uint16
+	Flags     uint32
+	Target    uintptr
+}
+
+type rawInputHeader struct {
+	Type   uint32
+	Size   uint32
+	Device uintptr
+	WParam uintptr
+}
+
+type rawKeyboard struct {
+	MakeCode         uint16
+	Flags            uint16
+	Reserved         uint16
+	VirtualKey       uint16
+	Message          uint32
+	ExtraInformation uint32
+}
+
 // winInput mirrors INPUT on both 32-bit and 64-bit Windows. The explicit
 // uintptr alignment before Data is what gives x64 its required 40-byte size.
 type winInput struct {
@@ -93,10 +122,19 @@ type winInput struct {
 	Data [32]byte
 }
 
+// GameProcess identifies one verified game process lifetime. PID alone is not
+// sufficient because Windows may reuse it after the original process exits.
+type GameProcess struct {
+	PID          uint32
+	CreationTime int64
+}
+
 type Native struct {
 	engine    *Engine
 	lifecycle sync.Mutex
 	physical  sync.Mutex
+	queueMu   sync.Mutex
+	targetsMu sync.RWMutex
 
 	events      [nativeQueueSize]PhysicalEvent
 	head        atomic.Uint32
@@ -114,21 +152,27 @@ type Native struct {
 	overflow       atomic.Bool
 	safetyDisabled atomic.Bool
 	capturing      atomic.Bool
+	pollCaptureNew atomic.Bool
 	captureKey     atomic.Uint32
 	runTarget      atomic.Uintptr
 	armTarget      atomic.Uintptr
+	rawRegistered  atomic.Bool
 
 	keyboardCallback uintptr
 	mouseCallback    uintptr
 	observerMu       sync.RWMutex
 	observer         func(PhysicalEvent)
 	foreground       func() windows.HWND
+	windowPID        func(windows.HWND) uint32
+	processCreated   func(uint32) int64
 	keyDown          func(uint32) bool
 	// hookDown tracks keys currently held according to WH_KEYBOARD_LL. It is
 	// protected by physical. GetAsyncKeyState also observes our SendInput
 	// output on some games/Windows builds, so its "up" result must not cancel a
 	// real hook-confirmed hold of the repeat key.
-	hookDown map[uint32]bool
+	hookDown          map[uint32]bool
+	gameProcesses     map[uint32]int64
+	targetsConfigured bool
 }
 
 var activeNative atomic.Pointer[Native]
@@ -148,24 +192,32 @@ var (
 	procGetWindowThreadProcessID = inputUser32.NewProc("GetWindowThreadProcessId")
 	procGetKeyboardLayout        = inputUser32.NewProc("GetKeyboardLayout")
 	procGetAsyncKeyState         = inputUser32.NewProc("GetAsyncKeyState")
+	procRegisterRawInputDevices  = inputUser32.NewProc("RegisterRawInputDevices")
+	procGetRawInputData          = inputUser32.NewProc("GetRawInputData")
 	procGetModuleHandleW         = inputKernel32.NewProc("GetModuleHandleW")
 )
 
 func NewNative(onChange func(Snapshot)) (*Native, error) {
 	n := &Native{
-		wake:        make(chan struct{}, 1),
-		done:        make(chan struct{}),
-		workerDone:  make(chan struct{}),
-		monitorStop: make(chan struct{}),
-		monitorDone: make(chan struct{}),
-		pollDone:    make(chan struct{}),
-		foreground:  windows.GetForegroundWindow,
-		keyDown:     asyncKeyDown,
-		hookDown:    make(map[uint32]bool),
+		wake:           make(chan struct{}, 1),
+		done:           make(chan struct{}),
+		workerDone:     make(chan struct{}),
+		monitorStop:    make(chan struct{}),
+		monitorDone:    make(chan struct{}),
+		pollDone:       make(chan struct{}),
+		foreground:     windows.GetForegroundWindow,
+		windowPID:      windowProcessID,
+		processCreated: processCreationTime,
+		keyDown:        asyncKeyDown,
+		hookDown:       make(map[uint32]bool),
+		gameProcesses:  make(map[uint32]int64),
 	}
 	injector, err := newSendInputInjector()
 	if err != nil {
 		return nil, err
+	}
+	injector.allowed = func() bool {
+		return n.isGameWindowFast(n.foreground())
 	}
 	engine, err := NewEngine(injector, onChange)
 	if err != nil {
@@ -236,6 +288,139 @@ func (n *Native) Enable(enabled bool) {
 }
 func (n *Native) Snapshot() Snapshot { return n.engine.Snapshot() }
 
+// RegisterRawKeyboard adds an INPUTSINK physical keyboard path to the launcher
+// window. Raw events with a real device handle remain distinguishable from
+// this process's SendInput output.
+func (n *Native) RegisterRawKeyboard(window uintptr) error {
+	if window == 0 {
+		return errors.New("raw keyboard target window is required")
+	}
+	device := rawInputDevice{UsagePage: 1, Usage: 6, Flags: ridevInputSink, Target: window}
+	result, _, callErr := procRegisterRawInputDevices.Call(
+		uintptr(unsafe.Pointer(&device)),
+		1,
+		unsafe.Sizeof(device),
+	)
+	if result == 0 {
+		return fmt.Errorf("RegisterRawInputDevices: %w", normalizeCallError(callErr))
+	}
+	n.rawRegistered.Store(true)
+	return nil
+}
+
+// HandleRawInput accepts WM_INPUT LPARAM from the registered launcher window.
+func (n *Native) HandleRawInput(rawHandle uintptr) {
+	if rawHandle == 0 {
+		return
+	}
+	var size uint32
+	headerSize := uint32(unsafe.Sizeof(rawInputHeader{}))
+	result, _, _ := procGetRawInputData.Call(rawHandle, ridInput, 0, uintptr(unsafe.Pointer(&size)), uintptr(headerSize))
+	if uint32(result) == ^uint32(0) || size < headerSize+uint32(unsafe.Sizeof(rawKeyboard{})) || size > 4096 {
+		return
+	}
+	buffer := make([]byte, size)
+	result, _, _ = procGetRawInputData.Call(rawHandle, ridInput, uintptr(unsafe.Pointer(&buffer[0])), uintptr(unsafe.Pointer(&size)), uintptr(headerSize))
+	if uint32(result) == ^uint32(0) || uint32(result) < headerSize+uint32(unsafe.Sizeof(rawKeyboard{})) {
+		return
+	}
+	header := (*rawInputHeader)(unsafe.Pointer(&buffer[0]))
+	// SendInput-originated raw records do not carry a physical device handle.
+	if header.Type != rimTypeKey || header.Device == 0 {
+		return
+	}
+	keyboard := (*rawKeyboard)(unsafe.Pointer(&buffer[headerSize]))
+	n.handleRawKeyboard(*keyboard)
+}
+
+func (n *Native) handleRawKeyboard(keyboard rawKeyboard) {
+	if keyboard.VirtualKey == 0 || keyboard.VirtualKey == 0xff {
+		return
+	}
+	n.enqueue(PhysicalEvent{
+		Kind: EventKey,
+		Code: EncodeKeyCode(uint32(keyboard.VirtualKey), keyboard.Flags&(riKeyE0|riKeyE1) != 0),
+		Down: keyboard.Flags&riKeyBreak == 0,
+	})
+}
+
+// SetGameProcesses restricts generated input to verified running game process
+// lifetimes. Passing an empty list deliberately disables input until a game
+// process is discovered again.
+func (n *Native) SetGameProcesses(processes []GameProcess) {
+	n.targetsMu.Lock()
+	defer n.targetsMu.Unlock()
+	if n.gameProcesses == nil {
+		n.gameProcesses = make(map[uint32]int64)
+	}
+	clear(n.gameProcesses)
+	for _, process := range processes {
+		if process.PID != 0 && process.CreationTime > 0 {
+			n.gameProcesses[process.PID] = process.CreationTime
+		}
+	}
+	n.targetsConfigured = true
+}
+
+func (n *Native) isGameWindow(window windows.HWND) bool {
+	n.targetsMu.RLock()
+	configured := n.targetsConfigured
+	// Retain permissive behavior for low-level unit fixtures that do not
+	// configure a game target. The shell always configures this before input
+	// can be enabled, including with an empty process list.
+	if !configured {
+		n.targetsMu.RUnlock()
+		return true
+	}
+	if window == 0 {
+		n.targetsMu.RUnlock()
+		return false
+	}
+	windowPID := n.windowPID
+	processCreated := n.processCreated
+	processID := windowPID(window)
+	expectedCreation, allowed := n.gameProcesses[processID]
+	n.targetsMu.RUnlock()
+	if !allowed || processCreated == nil {
+		return false
+	}
+	return processCreated(processID) == expectedCreation
+}
+
+// isGameWindowFast is used directly at the SendInput boundary. The full
+// creation-time check remains in the safety monitor; this fast path checks the
+// current foreground HWND and its PID before every emitted pair without
+// opening the game process up to one thousand times per second.
+func (n *Native) isGameWindowFast(window windows.HWND) bool {
+	n.targetsMu.RLock()
+	defer n.targetsMu.RUnlock()
+	if !n.targetsConfigured {
+		return true
+	}
+	if window == 0 || n.windowPID == nil {
+		return false
+	}
+	processID := n.windowPID(window)
+	_, allowed := n.gameProcesses[processID]
+	return allowed
+}
+
+func processCreationTime(processID uint32) int64 {
+	if processID == 0 {
+		return 0
+	}
+	process, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, processID)
+	if err != nil {
+		return 0
+	}
+	defer windows.CloseHandle(process)
+	var creation, exit, kernel, user windows.Filetime
+	if err := windows.GetProcessTimes(process, &creation, &exit, &kernel, &user); err != nil {
+		return 0
+	}
+	return creation.Nanoseconds()
+}
+
 func (n *Native) updateActivationTargets(before State, snapshot Snapshot) {
 	if before != StateRunning && snapshot.State == StateRunning {
 		n.armTarget.Store(0)
@@ -270,10 +455,16 @@ func (n *Native) SetCaptureMode(capturing bool) {
 	defer n.physical.Unlock()
 	if capturing {
 		n.captureKey.Store(0)
+		// The polling fallback may already have a baseline from normal input
+		// monitoring. Force the next capture scan to treat a currently-down
+		// key as a new press, including when it was pressed before that scan.
+		// Publish this reset before capture becomes visible to the poller.
+		n.pollCaptureNew.Store(true)
 		n.capturing.Store(true)
 		return
 	}
 	n.capturing.Store(false)
+	n.pollCaptureNew.Store(false)
 	n.captureKey.Store(0)
 }
 
@@ -284,6 +475,10 @@ func (n *Native) Close() {
 		return
 	}
 	n.engine.Enable(false)
+	if n.rawRegistered.Swap(false) {
+		device := rawInputDevice{UsagePage: 1, Usage: 6, Flags: ridevRemove}
+		procRegisterRawInputDevices.Call(uintptr(unsafe.Pointer(&device)), 1, unsafe.Sizeof(device))
+	}
 	started := n.started.Load()
 	if started {
 		close(n.monitorStop)
@@ -327,12 +522,26 @@ func (n *Native) keyboardPoller() {
 
 func (n *Native) pollKeyboardOnce(states map[uint32]bool) {
 	config := n.engine.Snapshot().Config
-	keys := []uint32{
-		config.OutputKey,
+	keys := config.RepeatKeys.Slice()
+	keys = append(keys,
 		config.StopKey,
 		config.KeyboardToggleKey,
 		config.MouseLeftToggleKey,
 		config.MouseRightToggleKey,
+	)
+	capturing := n.capturing.Load()
+	if capturing {
+		// Protected input paths may not deliver WH_KEYBOARD_LL events even
+		// while the launcher owns the foreground. During shortcut recording,
+		// poll every virtual key so the UI can still accept the next key.
+		keys = keys[:0]
+		for virtualKey := uint32(1); virtualKey <= 0xfe; virtualKey++ {
+			keys = append(keys, NormalizeKeyCode(virtualKey))
+		}
+	}
+	captureFirstScan := capturing && n.pollCaptureNew.Swap(false)
+	if captureFirstScan {
+		clear(states)
 	}
 	live := make(map[uint32]bool, len(keys))
 	for _, code := range keys {
@@ -344,7 +553,13 @@ func (n *Native) pollKeyboardOnce(states map[uint32]bool) {
 		down := n.keyDown(code)
 		previous, initialized := states[code]
 		states[code] = down
-		if !initialized || down == previous {
+		if !initialized {
+			if captureFirstScan && down {
+				n.dispatchPolledEvent(PhysicalEvent{Kind: EventKey, Code: code, Down: true})
+			}
+			continue
+		}
+		if down == previous {
 			continue
 		}
 		n.dispatchPolledEvent(PhysicalEvent{Kind: EventKey, Code: code, Down: down})
@@ -375,7 +590,6 @@ func (n *Native) safetyMonitor() {
 	var candidate windows.HWND
 	var candidateSince time.Time
 	var targetProcessID uint32
-	var foregroundLostSince time.Time
 	for {
 		select {
 		case <-n.monitorStop:
@@ -386,14 +600,13 @@ func (n *Native) safetyMonitor() {
 				target = 0
 				targetProcessID = 0
 				runningSince = time.Time{}
-				foregroundLostSince = time.Time{}
 				foreground := n.foreground()
 				origin := windows.HWND(n.armTarget.Load())
 				if origin == 0 {
 					n.armTarget.Store(uintptr(foreground))
 					candidate = 0
 					candidateSince = time.Time{}
-				} else if foreground == 0 || foreground == origin || currentProcessWindow(foreground) {
+				} else if foreground == 0 || foreground == origin || currentProcessWindow(foreground) || !n.isGameWindow(foreground) {
 					candidate = 0
 					candidateSince = time.Time{}
 				} else if foreground != candidate {
@@ -418,7 +631,6 @@ func (n *Native) safetyMonitor() {
 				n.runTarget.Store(0)
 				n.armTarget.Store(0)
 				runningSince = time.Time{}
-				foregroundLostSince = time.Time{}
 				continue
 			}
 			foreground := n.foreground()
@@ -429,20 +641,14 @@ func (n *Native) safetyMonitor() {
 				}
 				targetProcessID = windowProcessID(target)
 				runningSince = time.Now()
-				foregroundLostSince = time.Time{}
 				continue
 			}
-			sameTarget := foreground != 0 && (foreground == target ||
+			sameTarget := n.isGameWindow(foreground) && (foreground == target ||
 				targetProcessID != 0 && windowProcessID(foreground) == targetProcessID)
 			if !n.safetyDisabled.Load() && !sameTarget {
-				if foregroundLostSince.IsZero() {
-					foregroundLostSince = time.Now()
-				} else if time.Since(foregroundLostSince) >= foregroundLossGrace {
-					n.engine.Enable(false)
-				}
+				n.engine.Enable(false)
 				continue
 			}
-			foregroundLostSince = time.Time{}
 			if time.Since(runningSince) > 30*time.Minute {
 				n.engine.Fail(errors.New("continuous input exceeded the 30-minute safety limit"))
 			}
@@ -536,28 +742,11 @@ func (n *Native) drain() {
 		}
 		event := n.events[tail%nativeQueueSize]
 		n.tail.Store(tail + 1)
-		n.observerMu.RLock()
-		observer := n.observer
-		n.observerMu.RUnlock()
-		if observer != nil {
-			observer(event)
-		}
+		n.observePhysical(event)
 		n.physical.Lock()
 		n.noteHookEventLocked(event)
 		if n.capturing.Load() {
-			if event.Kind == EventKey {
-				key := NormalizeKeyCode(event.Code)
-				captured := n.captureKey.Load()
-				if event.Down && captured == 0 {
-					n.captureKey.CompareAndSwap(0, key)
-				} else if !event.Down && captured != 0 && SameKey(key, captured) {
-					// Keep all physical input suppressed through key-up. This
-					// prevents keyboard autorepeat after the first down event
-					// from immediately triggering the newly recorded shortcut.
-					n.capturing.Store(false)
-					n.captureKey.Store(0)
-				}
-			}
+			n.capturePhysicalKeyLocked(event)
 			n.physical.Unlock()
 			continue
 		}
@@ -571,10 +760,18 @@ func (n *Native) drain() {
 
 func (n *Native) dispatchPolledEvent(event PhysicalEvent) {
 	n.physical.Lock()
-	defer n.physical.Unlock()
 	if n.capturing.Load() {
+		n.physical.Unlock()
+		n.observePhysical(event)
+		n.physical.Lock()
+		defer n.physical.Unlock()
+		if !n.capturing.Load() {
+			return
+		}
+		n.capturePhysicalKeyLocked(event)
 		return
 	}
+	defer n.physical.Unlock()
 	// A physical hook down is authoritative until its matching hook up. This
 	// prevents an injected repeat-key up from the polling fallback ending the
 	// user's still-held keyboard repeat trigger.
@@ -582,6 +779,36 @@ func (n *Native) dispatchPolledEvent(event PhysicalEvent) {
 		return
 	}
 	n.processPhysicalEventLocked(event)
+}
+
+func (n *Native) observePhysical(event PhysicalEvent) {
+	n.observerMu.RLock()
+	observer := n.observer
+	n.observerMu.RUnlock()
+	if observer != nil {
+		observer(event)
+	}
+}
+
+func (n *Native) capturePhysicalKeyLocked(event PhysicalEvent) {
+	if event.Kind != EventKey {
+		return
+	}
+	key := NormalizeKeyCode(event.Code)
+	captured := n.captureKey.Load()
+	if event.Down && captured == 0 {
+		if n.captureKey.CompareAndSwap(0, key) {
+			// A hook/raw event won the capture. Do not let the polling fallback
+			// rescan already-held keys and publish duplicate candidates.
+			n.pollCaptureNew.Store(false)
+		}
+	} else if !event.Down && captured != 0 && SameKey(key, captured) {
+		// Keep all physical input suppressed through key-up. This prevents
+		// keyboard autorepeat after the first down event from immediately
+		// triggering the newly recorded shortcut.
+		n.capturing.Store(false)
+		n.captureKey.Store(0)
+	}
 }
 
 func (n *Native) processPhysicalEvent(event PhysicalEvent) {
@@ -623,6 +850,10 @@ func (n *Native) clearHookStateLocked() {
 
 func (n *Native) processPhysicalEventLocked(event PhysicalEvent) {
 	before := n.engine.Snapshot()
+	if before.State == StateArmed && before.Config.Enabled && before.Config.Mode == ModeKeyboard &&
+		event.Kind == EventKey && event.Down && before.Config.IsRepeatKey(event.Code) && !n.isGameWindow(n.foreground()) {
+		return
+	}
 	n.engine.Handle(event)
 	after := n.engine.Snapshot()
 	// Hook ownership belongs to one enabled input session only. Clearing it on
@@ -634,7 +865,7 @@ func (n *Native) processPhysicalEventLocked(event PhysicalEvent) {
 	if event.Kind == EventKey && event.Down {
 		if mode, toggle := before.Config.ToggleMode(event.Code); toggle && mode != ModeKeyboard && after.State == StateArmed && after.Config.Enabled && after.Config.Mode == mode {
 			target := n.foreground()
-			if target != 0 && !currentProcessWindow(target) {
+			if target != 0 && !currentProcessWindow(target) && n.isGameWindow(target) {
 				n.runTarget.Store(uintptr(target))
 				n.armTarget.Store(0)
 				if n.engine.Start() {
@@ -649,6 +880,11 @@ func (n *Native) processPhysicalEventLocked(event PhysicalEvent) {
 }
 
 func (n *Native) enqueue(event PhysicalEvent) {
+	// WH_KEYBOARD_LL/WH_MOUSE_LL run on the hook thread while WM_INPUT is
+	// delivered on the UI thread. Serialize producers so two callbacks cannot
+	// reserve and overwrite the same ring slot.
+	n.queueMu.Lock()
+	defer n.queueMu.Unlock()
 	head := n.head.Load()
 	if head-n.tail.Load() >= nativeQueueSize {
 		n.overflow.Store(true)
@@ -739,6 +975,7 @@ type sendInputInjector struct {
 	mu           sync.Mutex
 	lastCheck    time.Time
 	lastReport   IntegrityReport
+	allowed      func() bool
 	needsRelease atomic.Bool
 }
 
@@ -751,8 +988,14 @@ func newSendInputInjector() (*sendInputInjector, error) {
 }
 
 func (s *sendInputInjector) Emit(config Config) error {
+	if s.allowed != nil && !s.allowed() {
+		return errOutputTargetLost
+	}
 	if report := s.integrityReport(); report.Blocked {
 		return fmt.Errorf("foreground process PID %d has higher integrity (%s) than Genshin Tools (%s); restart Genshin Tools at the same privilege level", report.TargetPID, report.TargetName, report.SelfName)
+	}
+	if s.allowed != nil && !s.allowed() {
+		return errOutputTargetLost
 	}
 	inputs, err := inputPair(config)
 	if err != nil {

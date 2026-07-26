@@ -59,11 +59,17 @@ const (
 	messagePlugins      = win32.WM_APP + 14
 	messageDiagnostics  = win32.WM_APP + 15
 	messageUpdate       = win32.WM_APP + 16
+	messageRawInput     = 0x00ff
 
 	trayID          = 1
 	captureHotkeyID = 2001
 	menuShow        = 1001
 	menuExit        = 1002
+
+	inputRepeatVisible       = 2
+	inputRepeatRecordingBase = 100
+	minimumWindowWidth       = 840
+	minimumWindowHeight      = 700
 )
 
 var active *application
@@ -110,6 +116,7 @@ type application struct {
 	physicalEvents          chan input.PhysicalEvent
 	inputSnap               input.Snapshot
 	recording               int
+	inputRepeatScroll       int
 	inputUIError            string
 	gameUpdates             chan gameUpdate
 	gameState               gameViewState
@@ -163,6 +170,7 @@ type application struct {
 	pluginTokenEdit         win32.HWND
 	pluginSearchEdit        win32.HWND
 	listScrollbar           win32.HWND
+	inputScrollbar          win32.HWND
 	fufuTarget              plugins.FufuTargetConfig
 	fufuTargetInstalled     bool
 	fufuTargetEnabled       bool
@@ -565,12 +573,7 @@ func (app *application) createWindow() error {
 }
 
 func clampBounds(window config.WindowConfig) config.WindowConfig {
-	if window.Width < 840 {
-		window.Width = 840
-	}
-	if window.Height < 560 {
-		window.Height = 560
-	}
+	window = enforceMinimumWindowSize(window)
 	probe := win32.Rect{Left: int32(window.X), Top: int32(window.Y), Right: int32(window.X + window.Width), Bottom: int32(window.Y + window.Height)}
 	if window.X < 0 || window.Y < 0 {
 		probe = win32.Rect{Left: 0, Top: 0, Right: int32(window.Width), Bottom: int32(window.Height)}
@@ -588,6 +591,16 @@ func clampBounds(window config.WindowConfig) config.WindowConfig {
 	}
 	if window.Y < int(work.Top) || window.Y+window.Height > int(work.Bottom) {
 		window.Y = int(work.Top) + (workHeight-window.Height)/2
+	}
+	return window
+}
+
+func enforceMinimumWindowSize(window config.WindowConfig) config.WindowConfig {
+	if window.Width < minimumWindowWidth {
+		window.Width = minimumWindowWidth
+	}
+	if window.Height < minimumWindowHeight {
+		window.Height = minimumWindowHeight
 	}
 	return window
 }
@@ -642,6 +655,7 @@ func (app *application) handleMessage(hwnd win32.HWND, message uint32, wParam, l
 			select {
 			case app.inputSnap = <-app.inputUpdates:
 			default:
+				app.syncInputScrollbar()
 				win32.Invalidate(hwnd)
 				return 0
 			}
@@ -655,12 +669,18 @@ func (app *application) handleMessage(hwnd win32.HWND, message uint32, wParam, l
 				return 0
 			}
 		}
+	case messageRawInput:
+		if app.inputNative != nil {
+			app.inputNative.HandleRawInput(lParam)
+		}
+		return win32.DefWindowProc(hwnd, message, wParam, lParam)
 	case messageGame:
 		for {
 			select {
 			case update := <-app.gameUpdates:
 				if update.taskID == app.gameTask {
 					app.gameState = update.state
+					app.syncInputGameProcesses()
 					app.reconcileCaptureOverlay(false)
 				}
 			default:
@@ -955,6 +975,17 @@ func (app *application) handleMessage(hwnd win32.HWND, message uint32, wParam, l
 		}
 		return 0
 	case win32.WM_MOUSEWHEEL:
+		if app.selected == 6 {
+			delta := int16((wParam >> 16) & 0xffff)
+			if delta != 0 {
+				step := 1
+				if delta > 0 {
+					step = -1
+				}
+				app.scrollInputRepeatKeys(step)
+			}
+			return 0
+		}
 		if app.selected == 8 || app.selected == 9 {
 			delta := int16((wParam >> 16) & 0xffff)
 			if delta != 0 {
@@ -967,6 +998,10 @@ func (app *application) handleMessage(hwnd win32.HWND, message uint32, wParam, l
 			return 0
 		}
 	case win32.WM_VSCROLL:
+		if win32.HWND(lParam) == app.inputScrollbar {
+			app.handleInputScroll(uint16(wParam & 0xffff))
+			return 0
+		}
 		if win32.HWND(lParam) == app.listScrollbar {
 			app.handleListScroll(uint16(wParam & 0xffff))
 			return 0
@@ -1057,7 +1092,10 @@ func (app *application) handleMessage(hwnd win32.HWND, message uint32, wParam, l
 	case win32.WM_GETMINMAXINFO:
 		if app.settings.Shell.EnforceMinimumSize {
 			info := (*win32.MinMaxInfo)(unsafe.Pointer(lParam))
-			info.MinTrackSize = win32.Point{X: win32.Scale(840, app.dpi), Y: win32.Scale(560, app.dpi)}
+			// The input page's final status row ends at logical Y=648. Keep
+			// enough non-client allowance that every control remains reachable
+			// at the supported minimum window size and DPI.
+			info.MinTrackSize = win32.Point{X: win32.Scale(minimumWindowWidth, app.dpi), Y: win32.Scale(minimumWindowHeight, app.dpi)}
 		}
 		return 0
 	case win32.WM_QUERYENDSESSION:
@@ -1450,11 +1488,16 @@ func (app *application) startInput() error {
 		native.Close()
 		return err
 	}
+	if err := native.RegisterRawKeyboard(uintptr(app.hwnd)); err != nil {
+		native.Close()
+		return err
+	}
 	if err := native.Configure(app.settings.Input); err != nil {
 		native.Close()
 		return err
 	}
 	app.inputNative = native
+	app.syncInputGameProcesses()
 	app.inputSnap = native.Snapshot()
 	app.sessionNotifications = win32.RegisterSessionNotifications(app.hwnd)
 	if !app.sessionNotifications {
@@ -1462,6 +1505,19 @@ func (app *application) startInput() error {
 	}
 	app.logger.Info("input enhancement initialized", map[string]any{"state": app.inputSnap.State.String()})
 	return nil
+}
+
+func (app *application) syncInputGameProcesses() {
+	if app.inputNative == nil {
+		return
+	}
+	processes := make([]input.GameProcess, 0, len(app.gameState.Running))
+	for _, process := range app.gameState.Running {
+		if process.VerifiedPath && process.PID != 0 && process.CreationTime > 0 {
+			processes = append(processes, input.GameProcess{PID: process.PID, CreationTime: process.CreationTime})
+		}
+	}
+	app.inputNative.SetGameProcesses(processes)
 }
 
 func (app *application) startCaptureOverlay() error {
@@ -1503,13 +1559,14 @@ func (app *application) applyCaptureHotkey() error {
 	if !app.settings.Capture.Enabled {
 		return nil
 	}
-	if app.settings.Capture.ConflictsWith(
-		app.settings.Input.OutputKey,
+	inputKeys := app.settings.Input.RepeatKeys.Slice()
+	inputKeys = append(inputKeys,
 		app.settings.Input.StopKey,
 		app.settings.Input.KeyboardToggleKey,
 		app.settings.Input.MouseLeftToggleKey,
 		app.settings.Input.MouseRightToggleKey,
-	) {
+	)
+	if app.settings.Capture.ConflictsWith(inputKeys...) {
 		return errors.New(app.texts.Text("media.error.hotkeyConflict"))
 	}
 	if err := win32.RegisterHotKey(app.hwnd, captureHotkeyID, app.settings.Capture.Modifiers, app.settings.Capture.VirtualKey); err != nil {
@@ -1676,7 +1733,7 @@ func (app *application) mediaClick(_, y int) {
 		for range presets {
 			key := presets[index]
 			index = (index + 1) % len(presets)
-			if !input.SameKey(key, app.settings.Input.OutputKey) &&
+			if !app.settings.Input.IsRepeatKey(key) &&
 				!input.SameKey(key, app.settings.Input.StopKey) &&
 				!input.SameKey(key, app.settings.Input.KeyboardToggleKey) &&
 				!input.SameKey(key, app.settings.Input.MouseLeftToggleKey) &&
@@ -2011,6 +2068,65 @@ func (app *application) syncListScrollbar() {
 	info := win32.ScrollInfo{Mask: win32.SIF_RANGE | win32.SIF_PAGE | win32.SIF_POS, Min: 0, Max: int32(total - 1), Page: uint32(visible), Position: int32(*position)}
 	win32.SetScrollInfo(app.listScrollbar, &info, true)
 	win32.ShowWindow(app.listScrollbar, win32.SW_SHOWNORMAL)
+}
+
+func (app *application) handleInputScroll(command uint16) {
+	if app.inputNative == nil {
+		return
+	}
+	total := app.inputNative.Snapshot().Config.RepeatKeys.Len()
+	next := app.inputRepeatScroll
+	switch command {
+	case win32.SB_LINEUP:
+		next--
+	case win32.SB_LINEDOWN:
+		next++
+	case win32.SB_PAGEUP:
+		next -= inputRepeatVisible
+	case win32.SB_PAGEDOWN:
+		next += inputRepeatVisible
+	case win32.SB_TOP:
+		next = 0
+	case win32.SB_BOTTOM:
+		next = total
+	case win32.SB_THUMBPOSITION, win32.SB_THUMBTRACK:
+		info := win32.ScrollInfo{Mask: win32.SIF_TRACKPOS}
+		if win32.GetScrollInfo(app.inputScrollbar, &info) {
+			next = int(info.TrackPos)
+		}
+	}
+	app.inputRepeatScroll = next
+	app.clampInputRepeatScroll(total)
+	app.syncInputScrollbar()
+	win32.Invalidate(app.hwnd)
+}
+
+func (app *application) syncInputScrollbar() {
+	if app.inputScrollbar == 0 || app.hwnd == 0 || app.inputNative == nil {
+		return
+	}
+	config := app.inputNative.Snapshot().Config
+	total := config.RepeatKeys.Len()
+	if app.selected != 6 || config.Mode != input.ModeKeyboard || total <= inputRepeatVisible {
+		win32.ShowWindow(app.inputScrollbar, win32.SW_HIDE)
+		return
+	}
+	app.clampInputRepeatScroll(total)
+	client := win32.GetClientRect(app.hwnd)
+	right := client.Right - win32.Scale(42, app.dpi)
+	width := win32.Scale(16, app.dpi)
+	top := win32.Scale(276, app.dpi)
+	bottom := win32.Scale(354, app.dpi)
+	win32.SetWindowPos(app.inputScrollbar, win32.Rect{Left: right - width, Top: top, Right: right, Bottom: bottom}, win32.SWP_NOZORDER)
+	info := win32.ScrollInfo{
+		Mask:     win32.SIF_RANGE | win32.SIF_PAGE | win32.SIF_POS,
+		Min:      0,
+		Max:      int32(total - 1),
+		Page:     inputRepeatVisible,
+		Position: int32(app.inputRepeatScroll),
+	}
+	win32.SetScrollInfo(app.inputScrollbar, &info, true)
+	win32.ShowWindow(app.inputScrollbar, win32.SW_SHOWNORMAL)
 }
 
 func (app *application) startFufuMainRepair() {
@@ -3512,7 +3628,7 @@ func (app *application) refreshTheme() {
 		win32.DeleteObject(uintptr(app.editBrush))
 	}
 	app.editBrush = win32.CreateSolidBrush(win32.Color(25, 29, 39))
-	for _, control := range []win32.HWND{app.customArgumentsEdit, app.pluginAliasEdit, app.pluginTokenEdit, app.pluginSearchEdit, app.listScrollbar} {
+	for _, control := range []win32.HWND{app.customArgumentsEdit, app.pluginAliasEdit, app.pluginTokenEdit, app.pluginSearchEdit, app.listScrollbar, app.inputScrollbar} {
 		if control != 0 {
 			win32.SetControlDarkTheme(control, app.palette.Dark)
 			win32.Invalidate(control)
@@ -3631,6 +3747,9 @@ func (app *application) inputClick(x, y int) {
 		return
 	}
 	config := app.inputNative.Snapshot().Config
+	previousConfig := config
+	previousSettings := app.settings.Input
+	persistedChange := false
 	sy := func(value int32) int { return int(win32.Scale(value, app.dpi)) }
 	switch {
 	case y >= sy(170) && y < sy(216):
@@ -3658,29 +3777,55 @@ func (app *application) inputClick(x, y int) {
 				app.logger.Error("configure input mode", map[string]any{"error": err.Error()})
 			} else {
 				app.inputUIError = ""
+				persistedChange = true
 			}
 		}
-	case y >= sy(276) && y < sy(316) && config.Mode == input.ModeKeyboard:
-		app.inputNative.Enable(false)
-		app.inputNative.SetCaptureMode(true)
-		app.recording = 2
-	case y >= sy(326) && y < sy(366):
+	case y >= sy(276) && y < sy(354) && config.Mode == input.ModeKeyboard:
+		clientRight := win32.GetClientRect(app.hwnd).Right - win32.Scale(42, app.dpi)
+		if keyIndex, deleteRow, hit := inputRepeatHitTest(x, y, int32(left), clientRight, app.dpi, config.RepeatKeys.Len(), app.inputRepeatScroll); hit {
+			if deleteRow {
+				app.inputNative.Enable(false)
+				config = app.inputNative.Snapshot().Config
+				config.RepeatKeys.Delete(keyIndex)
+				config.Enabled = false
+				app.recording = 0
+				app.inputNative.SetCaptureMode(false)
+				if err := app.inputNative.Configure(config); err != nil {
+					app.inputUIError = err.Error()
+				} else {
+					app.inputUIError = ""
+					persistedChange = true
+					app.clampInputRepeatScroll(config.RepeatKeys.Len())
+				}
+			} else {
+				app.inputNative.Enable(false)
+				app.inputNative.SetCaptureMode(true)
+				app.recording = inputRepeatRecordingBase + keyIndex
+			}
+		}
+	case y >= sy(360) && y < sy(396) && config.Mode == input.ModeKeyboard:
+		if config.RepeatKeys.Len() < input.MaxRepeatKeys {
+			app.inputNative.Enable(false)
+			app.inputNative.SetCaptureMode(true)
+			app.recording = 2
+		}
+	case y >= sy(402) && y < sy(438):
 		app.inputNative.Enable(false)
 		app.inputNative.SetCaptureMode(true)
 		app.recording = 4
-	case y >= sy(376) && y < sy(416):
+	case y >= sy(444) && y < sy(480):
 		app.inputNative.Enable(false)
 		app.inputNative.SetCaptureMode(true)
 		app.recording = 5
-	case y >= sy(426) && y < sy(466):
+	case y >= sy(486) && y < sy(522):
 		app.inputNative.Enable(false)
 		app.inputNative.SetCaptureMode(true)
 		app.recording = 6
-	case y >= sy(476) && y < sy(516):
+	case y >= sy(528) && y < sy(564):
 		app.inputNative.Enable(false)
 		app.inputNative.SetCaptureMode(true)
 		app.recording = 3
-	case y >= sy(526) && y < sy(566):
+	case y >= sy(570) && y < sy(606):
 		app.inputNative.SetCaptureMode(false)
 		app.recording = 0
 		config.Interval = adjustInputInterval(config.Interval, inputIntervalIncreaseAt(x, left, app.dpi))
@@ -3691,12 +3836,22 @@ func (app *application) inputClick(x, y int) {
 			app.logger.Error("configure input interval", map[string]any{"error": err.Error()})
 		} else {
 			app.inputUIError = ""
+			persistedChange = true
 		}
 	}
-	app.settings.Input = app.inputNative.Snapshot().Config
-	if err := app.saveInputSettings(); err != nil {
-		app.inputUIError = err.Error()
+	if persistedChange {
+		app.settings.Input = app.inputNative.Snapshot().Config
+		app.settings.Input.Enabled = false
+		if err := app.saveInputSettings(); err != nil {
+			app.settings.Input = previousSettings
+			if restoreErr := app.inputNative.Configure(previousConfig); restoreErr != nil {
+				app.logger.Error("restore input settings after save failure", map[string]any{"error": restoreErr.Error()})
+			}
+			app.inputUIError = err.Error()
+			app.clampInputRepeatScroll(previousConfig.RepeatKeys.Len())
+		}
 	}
+	app.syncInputScrollbar()
 	win32.Invalidate(app.hwnd)
 }
 
@@ -3719,6 +3874,42 @@ func inputIntervalIncreaseAt(x, left int, dpi uint32) bool {
 	return x >= left+int(win32.Scale(110, dpi))
 }
 
+func inputRepeatHitTest(x, y int, left, right int32, dpi uint32, total, scroll int) (index int, deleteRow, hit bool) {
+	repeatRight := right
+	if total > inputRepeatVisible {
+		repeatRight -= win32.Scale(22, dpi)
+	}
+	for visible := 0; visible < inputRepeatVisible; visible++ {
+		index = scroll + visible
+		if index < 0 || index >= total {
+			continue
+		}
+		top := int32(276 + visible*42)
+		row := win32.Rect{Left: left, Top: win32.Scale(top, dpi), Right: repeatRight, Bottom: win32.Scale(top+36, dpi)}
+		if !pointInButton(row, int32(x), int32(y)) {
+			continue
+		}
+		deleteLeft := row.Right - win32.Scale(104, dpi)
+		return index, int32(x) >= deleteLeft, true
+	}
+	return 0, false, false
+}
+
+func (app *application) clampInputRepeatScroll(count int) {
+	maximum := max(0, count-inputRepeatVisible)
+	app.inputRepeatScroll = min(max(app.inputRepeatScroll, 0), maximum)
+}
+
+func (app *application) scrollInputRepeatKeys(step int) {
+	if app.inputNative == nil {
+		return
+	}
+	app.inputRepeatScroll += step
+	app.clampInputRepeatScroll(app.inputNative.Snapshot().Config.RepeatKeys.Len())
+	app.syncInputScrollbar()
+	win32.Invalidate(app.hwnd)
+}
+
 func (app *application) recordPhysical(event input.PhysicalEvent) {
 	if app.recording == 0 || !event.Down || event.Kind != input.EventKey || app.inputNative == nil {
 		return
@@ -3728,8 +3919,7 @@ func (app *application) recordPhysical(event input.PhysicalEvent) {
 	previousSettings := app.settings.Input
 	switch app.recording {
 	case 2:
-		config.OutputKey = event.Code
-		config.TriggerKey = event.Code
+		config.RepeatKeys.Append(event.Code)
 	case 3:
 		config.StopKey = event.Code
 	case 4:
@@ -3738,6 +3928,16 @@ func (app *application) recordPhysical(event input.PhysicalEvent) {
 		config.MouseLeftToggleKey = event.Code
 	case 6:
 		config.MouseRightToggleKey = event.Code
+	default:
+		if app.recording >= inputRepeatRecordingBase {
+			index := app.recording - inputRepeatRecordingBase
+			if index < 0 || index >= config.RepeatKeys.Len() {
+				app.recording = 0
+				app.inputNative.SetCaptureMode(false)
+				return
+			}
+			config.RepeatKeys.Set(index, event.Code)
+		}
 	}
 	config.Enabled = false
 	app.recording = 0
@@ -3760,9 +3960,11 @@ func (app *application) recordPhysical(event input.PhysicalEvent) {
 			app.logger.Error("restore input settings after save failure", map[string]any{"error": restoreErr.Error()})
 		}
 		app.inputUIError = err.Error()
+		app.syncInputScrollbar()
 		win32.Invalidate(app.hwnd)
 		return
 	}
+	app.syncInputScrollbar()
 	win32.Invalidate(app.hwnd)
 }
 
@@ -3775,6 +3977,8 @@ func (app *application) paintInput(dc win32.HDC, client win32.Rect, left int32) 
 	defer win32.DeleteObject(uintptr(buttonBrush))
 	greenBrush := win32.CreateSolidBrush(win32.Color(42, 139, 103))
 	defer win32.DeleteObject(uintptr(greenBrush))
+	dangerBrush := win32.CreateSolidBrush(win32.Color(105, 48, 58))
+	defer win32.DeleteObject(uintptr(dangerBrush))
 
 	snapshot := app.inputSnap
 	if app.inputNative != nil {
@@ -3820,23 +4024,54 @@ func (app *application) paintInput(dc win32.HDC, client win32.Rect, left int32) 
 		draw(name, rect, win32.Color(225, 229, 242))
 	}
 	if config.Mode == input.ModeKeyboard {
-		draw(recordLabel(app.texts, "input.key.output", config.OutputKey, app.recording == 2), row(276, 316, buttonBrush), win32.Color(225, 229, 242))
+		app.clampInputRepeatScroll(config.RepeatKeys.Len())
+		repeatRight := right
+		if config.RepeatKeys.Len() > inputRepeatVisible {
+			repeatRight -= win32.Scale(22, app.dpi)
+		}
+		for visible := 0; visible < inputRepeatVisible; visible++ {
+			index := app.inputRepeatScroll + visible
+			top := int32(276 + visible*42)
+			if index >= config.RepeatKeys.Len() {
+				continue
+			}
+			full := win32.Rect{Left: left, Top: win32.Scale(top, app.dpi), Right: repeatRight, Bottom: win32.Scale(top+36, app.dpi)}
+			app.paintButtonSurface(dc, full, buttonBrush)
+			deleteRect := full
+			deleteRect.Left = deleteRect.Right - win32.Scale(104, app.dpi)
+			app.paintButtonSurface(dc, deleteRect, dangerBrush)
+			keyRect := full
+			keyRect.Right = deleteRect.Left - win32.Scale(6, app.dpi)
+			name := fmt.Sprintf(app.texts.Text("input.repeat.row"), index+1)
+			recording := app.recording == inputRepeatRecordingBase+index
+			label := fmt.Sprintf(app.texts.Text("input.record.ready"), name, win32.KeyName(config.RepeatKeys.At(index)))
+			if recording {
+				label = fmt.Sprintf(app.texts.Text("input.record.pending"), name)
+			}
+			draw(label, keyRect, win32.Color(225, 229, 242))
+			draw(app.texts.Text("input.repeat.delete"), deleteRect, win32.Color(255, 220, 225))
+		}
+		addText := fmt.Sprintf(app.texts.Text("input.repeat.add"), config.RepeatKeys.Len(), input.MaxRepeatKeys)
+		if app.recording == 2 {
+			addText = app.texts.Text("input.repeat.addPending")
+		}
+		draw(addText, row(360, 396, buttonBrush), win32.Color(225, 229, 242))
 	} else {
-		draw(app.texts.Text("input.mouseTrigger"), staticRow(276, 316, cardBrush), win32.Color(166, 174, 197))
+		draw(app.texts.Text("input.mouseTrigger"), staticRow(276, 396, cardBrush), win32.Color(166, 174, 197))
 	}
-	draw(recordLabel(app.texts, "input.key.toggleKeyboard", config.KeyboardToggleKey, app.recording == 4), row(326, 366, buttonBrush), win32.Color(225, 229, 242))
-	draw(recordLabel(app.texts, "input.key.toggleMouseLeft", config.MouseLeftToggleKey, app.recording == 5), row(376, 416, buttonBrush), win32.Color(225, 229, 242))
-	draw(recordLabel(app.texts, "input.key.toggleMouseRight", config.MouseRightToggleKey, app.recording == 6), row(426, 466, buttonBrush), win32.Color(225, 229, 242))
-	draw(recordLabel(app.texts, "input.key.stop", config.StopKey, app.recording == 3), row(476, 516, buttonBrush), win32.Color(225, 229, 242))
-	draw(fmt.Sprintf(app.texts.Text("input.interval"), config.IntervalMS), row(526, 566, buttonBrush), win32.Color(225, 229, 242))
+	draw(recordLabel(app.texts, "input.key.toggleKeyboard", config.KeyboardToggleKey, app.recording == 4), row(402, 438, buttonBrush), win32.Color(225, 229, 242))
+	draw(recordLabel(app.texts, "input.key.toggleMouseLeft", config.MouseLeftToggleKey, app.recording == 5), row(444, 480, buttonBrush), win32.Color(225, 229, 242))
+	draw(recordLabel(app.texts, "input.key.toggleMouseRight", config.MouseRightToggleKey, app.recording == 6), row(486, 522, buttonBrush), win32.Color(225, 229, 242))
+	draw(recordLabel(app.texts, "input.key.stop", config.StopKey, app.recording == 3), row(528, 564, buttonBrush), win32.Color(225, 229, 242))
+	draw(fmt.Sprintf(app.texts.Text("input.interval"), config.IntervalMS), row(570, 606, buttonBrush), win32.Color(225, 229, 242))
 	visibleError := snapshot.LastError
 	if visibleError == "" {
 		visibleError = app.inputUIError
 	}
 	if visibleError != "" {
-		draw(fmt.Sprintf(app.texts.Text("input.error"), visibleError), staticRow(576, 616, cardBrush), win32.Color(255, 126, 126))
+		draw(fmt.Sprintf(app.texts.Text("input.error"), visibleError), staticRow(612, 648, cardBrush), win32.Color(255, 126, 126))
 	} else {
-		draw(fmt.Sprintf(app.texts.Text("input.outputCount"), snapshot.OutputCount), staticRow(576, 616, cardBrush), win32.Color(145, 154, 180))
+		draw(fmt.Sprintf(app.texts.Text("input.outputCount"), snapshot.OutputCount), staticRow(612, 648, cardBrush), win32.Color(145, 154, 180))
 	}
 }
 
@@ -3905,6 +4140,12 @@ func (app *application) createLaunchControls() error {
 	}
 	app.listScrollbar = scrollbar
 	win32.SetControlDarkTheme(scrollbar, app.palette.Dark)
+	inputScrollbar, err := win32.CreateControl("SCROLLBAR", "", win32.WS_CHILD|win32.SBS_VERT, 0, 0, 16, 100, app.hwnd, 2006, app.instance)
+	if err != nil {
+		return err
+	}
+	app.inputScrollbar = inputScrollbar
+	win32.SetControlDarkTheme(inputScrollbar, app.palette.Dark)
 	app.rebuildFufuControls()
 	app.refreshLocalizedCueBanners()
 	app.layoutLaunchControls()
@@ -3951,6 +4192,7 @@ func (app *application) layoutLaunchControls() {
 	}
 	app.layoutFufuControls()
 	app.syncListScrollbar()
+	app.syncInputScrollbar()
 }
 
 func (app *application) layoutFufuControls() {
@@ -4002,6 +4244,7 @@ func (app *application) updateLaunchControlVisibility() {
 	}
 	app.layoutFufuControls()
 	app.syncListScrollbar()
+	app.syncInputScrollbar()
 }
 
 func (app *application) syncPluginAliasEdit() {

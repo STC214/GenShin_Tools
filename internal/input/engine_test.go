@@ -1,29 +1,91 @@
 package input
 
 import (
+	"encoding/json"
 	"errors"
 	"sync"
 	"testing"
 	"time"
 )
 
+func TestRepeatKeyListJSONAddDeleteAndLegacyMigration(t *testing.T) {
+	keys := NewKeyList('F', 'G')
+	if !keys.Delete(0) || !keys.Append('H') || keys.Len() != 2 || !SameKey(keys.At(0), 'G') || !SameKey(keys.At(1), 'H') {
+		t.Fatalf("key-list mutation failed: %v", keys.Slice())
+	}
+	data, err := json.Marshal(keys)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != `[71,72]` {
+		t.Fatalf("key-list JSON = %s", data)
+	}
+	var decoded KeyList
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded != keys {
+		t.Fatalf("decoded key list = %v, want %v", decoded.Slice(), keys.Slice())
+	}
+	legacy := DefaultConfig()
+	legacy.RepeatKeys = KeyList{}
+	legacy.OutputKey = 'B'
+	normalized, err := legacy.Normalized()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if normalized.RepeatKeys.Len() != 1 || !SameKey(normalized.RepeatKeys.At(0), 'B') {
+		t.Fatalf("legacy output key did not migrate: %+v", normalized)
+	}
+}
+
 type fakeInjector struct {
 	mu       sync.Mutex
 	emits    int
 	releases int
 	failAt   int
+	failErr  error
+	keys     []uint32
 }
 
-func (f *fakeInjector) Emit(Config) error {
+func (f *fakeInjector) Emit(config Config) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.emits++
+	f.keys = append(f.keys, config.OutputKey)
 	if f.failAt > 0 && f.emits >= f.failAt {
+		if f.failErr != nil {
+			return f.failErr
+		}
 		return errors.New("injection blocked")
 	}
 	return nil
 }
+func (f *fakeInjector) emittedKeys() []uint32 {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]uint32(nil), f.keys...)
+}
 func (f *fakeInjector) Release(Config) error { f.mu.Lock(); f.releases++; f.mu.Unlock(); return nil }
+
+func TestOutputTargetLossDisablesWithoutFault(t *testing.T) {
+	injector := &fakeInjector{failAt: 1, failErr: errOutputTargetLost}
+	engine, err := NewEngine(injector, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+	config := DefaultConfig()
+	config.Enabled = true
+	if err := engine.Configure(config); err != nil {
+		t.Fatal(err)
+	}
+	engine.Handle(PhysicalEvent{Kind: EventKey, Code: config.OutputKey, Down: true})
+	snapshot := engine.Snapshot()
+	if snapshot.State != StateDisabled || snapshot.Config.Enabled || snapshot.LastError != "" {
+		t.Fatalf("target loss became a fault instead of a clean stop: %+v", snapshot)
+	}
+}
 func (f *fakeInjector) counts() (int, int) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -55,6 +117,29 @@ func TestKeyboardRepeatFollowsTheRepeatedKeyAndStopsOnRelease(t *testing.T) {
 	emits, _ = injector.counts()
 	if emits != before {
 		t.Fatalf("late output after release: %d -> %d", before, emits)
+	}
+}
+
+func TestShortTapEmitsImmediatelyBeforeKeyUp(t *testing.T) {
+	injector := &fakeInjector{}
+	engine, err := NewEngine(injector, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config := DefaultConfig()
+	config.Enabled = true
+	config.Interval = 5 * time.Second
+	if err := engine.Configure(config); err != nil {
+		t.Fatal(err)
+	}
+	engine.Handle(PhysicalEvent{Kind: EventKey, Code: config.OutputKey, Down: true})
+	engine.Handle(PhysicalEvent{Kind: EventKey, Code: config.OutputKey, Down: false})
+	emits, _ := injector.counts()
+	if emits != 1 {
+		t.Fatalf("short tap emitted %d pairs, want exactly one immediate pair", emits)
+	}
+	if snapshot := engine.Snapshot(); snapshot.State != StateArmed || snapshot.OutputCount != 1 {
+		t.Fatalf("short-tap snapshot = %+v", snapshot)
 	}
 }
 
@@ -102,6 +187,56 @@ func TestUnrelatedKeysDoNotInterruptKeyboardRepeatOrMouseClick(t *testing.T) {
 				engine.Enable(false)
 			}
 		})
+	}
+}
+
+func TestMultipleRepeatKeysRunIndependently(t *testing.T) {
+	injector := &fakeInjector{}
+	engine, err := NewEngine(injector, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config := DefaultConfig()
+	config.Enabled = true
+	config.Interval = 5 * time.Millisecond
+	config.RepeatKeys = NewKeyList('F', 'G')
+	if err := engine.Configure(config); err != nil {
+		t.Fatal(err)
+	}
+	engine.Handle(PhysicalEvent{Kind: EventKey, Code: 'F', Down: true})
+	engine.Handle(PhysicalEvent{Kind: EventKey, Code: 'A', Down: true})
+	engine.Handle(PhysicalEvent{Kind: EventKey, Code: 'A', Down: false})
+	engine.Handle(PhysicalEvent{Kind: EventKey, Code: 'G', Down: true})
+	deadline := time.Now().Add(250 * time.Millisecond)
+	for {
+		seenF, seenG := false, false
+		for _, key := range injector.emittedKeys() {
+			seenF = seenF || SameKey(key, 'F')
+			seenG = seenG || SameKey(key, 'G')
+		}
+		if seenF && seenG {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("both held repeat keys were not emitted: %v", injector.emittedKeys())
+		}
+		time.Sleep(time.Millisecond)
+	}
+	engine.Handle(PhysicalEvent{Kind: EventKey, Code: 'F', Down: false})
+	before := len(injector.emittedKeys())
+	time.Sleep(20 * time.Millisecond)
+	afterKeys := injector.emittedKeys()
+	if snapshot := engine.Snapshot(); snapshot.State != StateRunning || len(afterKeys) <= before {
+		t.Fatalf("releasing F interrupted held G: before=%d after=%d snapshot=%+v", before, len(afterKeys), snapshot)
+	}
+	for _, key := range afterKeys[before:] {
+		if !SameKey(key, 'G') {
+			t.Fatalf("released F was still emitted: %v", afterKeys[before:])
+		}
+	}
+	engine.Handle(PhysicalEvent{Kind: EventKey, Code: 'G', Down: false})
+	if snapshot := engine.Snapshot(); snapshot.State != StateArmed {
+		t.Fatalf("last repeat-key release did not arm engine: %+v", snapshot)
 	}
 }
 
@@ -220,7 +355,7 @@ func TestToggleAndStopKeysMustAllBeDistinct(t *testing.T) {
 		t.Fatal("accepted duplicate mouse toggle keys")
 	}
 	config = DefaultConfig()
-	config.OutputKey = config.KeyboardToggleKey
+	config.RepeatKeys = NewKeyList(config.KeyboardToggleKey)
 	if _, err := config.Normalized(); err == nil {
 		t.Fatal("accepted repeat key matching keyboard toggle")
 	}
