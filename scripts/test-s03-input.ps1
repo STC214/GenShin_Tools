@@ -30,19 +30,19 @@ try {
     Write-Host '[S03] 200 native hook install/uninstall cycles'
     Invoke-GoTest -GoArguments @('-run', 'TestNativeHooksStartAndClose', '-count=200', './internal/input')
 
-    Write-Host '[S03] Monolithic keyboard worker, scan-code fallback, and QuickInput-compatible mouse capture'
+    Write-Host '[S03] Interception worker (real driver when available) and QuickInput-compatible mouse capture'
     $env:GENSHINTOOLS_INPUT_CAPTURE = '1'
-    Invoke-GoTest -GoArguments @('-run', 'TestCapturedMonolithicKeyboardWorkerOutput', '-v', './internal/input')
-    Invoke-GoTest -GoArguments @('-run', 'TestCapturedNativePressReleasePairs', '-v', './internal/input')
+    Invoke-GoTest -GoArguments @('-run', 'TestCapturedInterceptionKeyboardWorkerOutput', '-v', './internal/input')
+    Invoke-GoTest -GoArguments @('-run', 'TestCapturedNativeMousePressReleasePairs', '-v', './internal/input')
 
-    Write-Host '[S03] Full engine captured cadence grid: 30/50/100/250 ms x keyboard/left/right'
+    Write-Host '[S03] Native mouse engine captured cadence grid: 30/50/100/250 ms x left/right'
     Invoke-GoTest -GoArguments @('-run', 'TestCapturedNativeEngine', '-v', './internal/input')
 
     if ($SoakMinutes -gt 0) {
         $env:GENSHINTOOLS_INPUT_INTERVAL_MS = '50'
         $env:GENSHINTOOLS_INPUT_SOAK_SECONDS = [string]($SoakMinutes * 60)
-        Write-Host "[S03] Captured long soak: $SoakMinutes minute(s) each x keyboard/left/right (events swallowed)"
-        Invoke-GoTest -GoArguments @('-run', 'TestCapturedNativeEngine', '-v', '-timeout', "$($SoakMinutes * 4 + 2)m", './internal/input')
+        Write-Host "[S03] Captured long soak: $SoakMinutes minute(s) each x mouse left/right (events swallowed)"
+        Invoke-GoTest -GoArguments @('-run', 'TestCapturedNativeEngine', '-v', '-timeout', "$($SoakMinutes * 3 + 2)m", './internal/input')
     }
 
     Write-Host '[S03] Whole-project regression'

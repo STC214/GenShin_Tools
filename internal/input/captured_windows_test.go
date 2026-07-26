@@ -1,6 +1,7 @@
 package input
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"runtime"
@@ -29,6 +30,8 @@ var capturedInput struct {
 	times     []time.Time
 }
 
+var captureAllFScanCodes atomic.Bool
+
 type capturedResult struct {
 	mode          Mode
 	expected      time.Duration
@@ -41,8 +44,8 @@ type capturedResult struct {
 func capturedKeyboardCallback(code int, message, dataPointer uintptr) uintptr {
 	if code >= 0 {
 		data := (*keyboardHook)(unsafe.Pointer(dataPointer))
-		if data != nil && data.Flags&llkhfInjected != 0 &&
-			(data.ExtraInfo == injectionMarker || data.ExtraInfo == autoHotkeyKeyIgnoreLevel0) {
+		if data != nil && ((data.ExtraInfo == injectionMarker || data.ExtraInfo == interceptionMarker) ||
+			(captureAllFScanCodes.Load() && data.ScanCode == 0x21)) {
 			switch message {
 			case wMKeyDown, wMSysKeyDown:
 				capturedInput.keyDown.Add(1)
@@ -60,7 +63,10 @@ func capturedKeyboardCallback(code int, message, dataPointer uintptr) uintptr {
 func capturedMouseCallback(code int, message, dataPointer uintptr) uintptr {
 	if code >= 0 {
 		data := (*mouseHook)(unsafe.Pointer(dataPointer))
-		if data != nil && data.Flags&llmhfInjected != 0 && data.ExtraInfo == quickInputExtraInfo {
+		// The unique test-owned QuickInput marker is the authoritative capture
+		// boundary. Some Windows builds omit LLMHF_INJECTED from events emitted
+		// by the same process even though SendInput accepted them.
+		if data != nil && data.ExtraInfo == quickInputExtraInfo {
 			switch message {
 			case wMLButtonDown:
 				capturedInput.leftDown.Add(1)
@@ -191,33 +197,114 @@ func runCaptureMessageLoop(t *testing.T) {
 	}
 }
 
-func TestCapturedMonolithicKeyboardWorkerOutput(t *testing.T) {
+func TestCapturedInterceptionKeyboardWorkerOutput(t *testing.T) {
 	if os.Getenv("GENSHINTOOLS_INPUT_CAPTURE") != "1" {
-		t.Skip("set GENSHINTOOLS_INPUT_CAPTURE=1 to run swallowed worker output capture")
+		t.Skip("set GENSHINTOOLS_INPUT_CAPTURE=1 to run swallowed Interception worker output capture")
 	}
+	level, err := currentIntegrityLevel()
+	if err != nil || level < 0x3000 {
+		t.Skipf("Interception output requires a High-integrity test process (RID=%#x, error=%v)", level, err)
+	}
+	var emit func() error
+	if dllPath := os.Getenv("GENSHINTOOLS_INTERCEPTION_DLL"); dllPath != "" {
+		closeOfficial, officialEmit, err := openOfficialInterceptionTestDLL(dllPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer closeOfficial()
+		emit = officialEmit
+	} else {
+		backend, err := newInterceptionKeyboardBackend()
+		if err != nil {
+			t.Skipf("Interception driver is unavailable: %v", err)
+		}
+		defer backend.Close()
+		worker := &keyboardWorkerRuntime{done: make(chan struct{}), backend: backend}
+		emit = func() error { return worker.emitKey(EncodeKeyCode('F', false), time.Millisecond) }
+	}
+	captureAllFScanCodes.Store(true)
+	defer captureAllFScanCodes.Store(false)
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
-	closeForeground := installCapturedForegroundWindow(t)
-	defer closeForeground()
 	cleanup := installCaptureHooks(t)
 	defer cleanup()
 	resetCapturedInput()
 	threadID := windows.GetCurrentThreadId()
 	go func() {
-		worker := &keyboardWorkerRuntime{done: make(chan struct{})}
 		for index := 0; index < 5; index++ {
-			worker.emitKey(EncodeKeyCode('F', false))
+			if err := emit(); err != nil {
+				break
+			}
+		}
+		deadline := time.Now().Add(time.Second)
+		for (capturedInput.keyDown.Load() < 5 || capturedInput.keyUp.Load() < 5) && time.Now().Before(deadline) {
+			time.Sleep(time.Millisecond)
 		}
 		procPostThreadMessageW.Call(uintptr(threadID), wMQuit, 0, 0)
 	}()
 	runCaptureMessageLoop(t)
 	down, up := capturedInput.keyDown.Load(), capturedInput.keyUp.Load()
 	if down != 5 || up != 5 {
-		t.Fatalf("AHK-compatible worker delivered down/up = %d/%d, want five balanced pairs", down, up)
+		t.Fatalf("Interception worker delivered down/up = %d/%d, want five balanced pairs", down, up)
 	}
 }
 
-func TestCapturedNativePressReleasePairs(t *testing.T) {
+func openOfficialInterceptionTestDLL(path string) (func(), func() error, error) {
+	dll, err := syscall.LoadDLL(path)
+	if err != nil {
+		return nil, nil, err
+	}
+	create, err := dll.FindProc("interception_create_context")
+	if err != nil {
+		dll.Release()
+		return nil, nil, err
+	}
+	destroy, err := dll.FindProc("interception_destroy_context")
+	if err != nil {
+		dll.Release()
+		return nil, nil, err
+	}
+	send, err := dll.FindProc("interception_send")
+	if err != nil {
+		dll.Release()
+		return nil, nil, err
+	}
+	context, _, _ := create.Call()
+	if context == 0 {
+		dll.Release()
+		return nil, nil, errors.New("official interception_create_context returned null")
+	}
+	closeDLL := func() {
+		destroy.Call(context)
+		dll.Release()
+	}
+	device := uintptr(1)
+	if value := os.Getenv("GENSHINTOOLS_INTERCEPTION_DEVICE"); value != "" {
+		parsed, err := strconv.Atoi(value)
+		if err != nil || parsed < 1 || parsed > 10 {
+			closeDLL()
+			return nil, nil, fmt.Errorf("invalid GENSHINTOOLS_INTERCEPTION_DEVICE %q", value)
+		}
+		device = uintptr(parsed)
+	}
+	emit := func() error {
+		for _, state := range []uint16{0, interceptionKeyUp} {
+			stroke := struct {
+				Code        uint16
+				State       uint16
+				Information uint32
+			}{Code: 0x21, State: state, Information: uint32(interceptionMarker)}
+			written, _, callErr := send.Call(context, device, uintptr(unsafe.Pointer(&stroke)), 1)
+			if written != 1 {
+				return fmt.Errorf("official interception_send returned %d: %w", written, normalizeCallError(callErr))
+			}
+		}
+		return nil
+	}
+	return closeDLL, emit, nil
+}
+
+func TestCapturedNativeMousePressReleasePairs(t *testing.T) {
 	if os.Getenv("GENSHINTOOLS_INPUT_CAPTURE") != "1" {
 		t.Skip("set GENSHINTOOLS_INPUT_CAPTURE=1 to run swallowed native input capture")
 	}
@@ -235,7 +322,15 @@ func TestCapturedNativePressReleasePairs(t *testing.T) {
 	go func() {
 		injector, err := newSendInputInjector()
 		if err == nil {
-			for _, mode := range []Mode{ModeKeyboard, ModeMouseLeft, ModeMouseRight} {
+			// This gate validates emitted mouse edges, not foreground UIPI.
+			// Cache an unblocked report so another elevated desktop window
+			// stealing foreground focus cannot make the capture nondeterministic.
+			injector.lastCheck = time.Now().Add(time.Hour)
+			injector.lastReport = IntegrityReport{}
+			injector.allowed = func() bool {
+				return windowProcessID(windows.GetForegroundWindow()) == uint32(os.Getpid())
+			}
+			for _, mode := range []Mode{ModeMouseLeft, ModeMouseRight} {
 				config := DefaultConfig()
 				config.Mode = mode
 				for index := 0; index < pairs && err == nil; index++ {
@@ -248,10 +343,12 @@ func TestCapturedNativePressReleasePairs(t *testing.T) {
 	}()
 	runCaptureMessageLoop(t)
 	if err := <-result; err != nil {
+		if errors.Is(err, errOutputTargetLost) {
+			t.Skip("capture fixture lost foreground focus to another desktop process")
+		}
 		t.Fatal(err)
 	}
 	got := []uint64{
-		capturedInput.keyDown.Load(), capturedInput.keyUp.Load(),
 		capturedInput.leftDown.Load(), capturedInput.leftUp.Load(),
 		capturedInput.rightDown.Load(), capturedInput.rightUp.Load(),
 	}
@@ -302,6 +399,22 @@ func TestCapturedNativeEngine(t *testing.T) {
 			procPostThreadMessageW.Call(uintptr(threadID), wMQuit, 0, 0)
 			return
 		}
+		injector, ok := native.engine.injector.(*sendInputInjector)
+		if !ok {
+			results <- []capturedResult{{err: errors.New("native engine does not use the Win32 SendInput injector")}}
+			procPostThreadMessageW.Call(uintptr(threadID), wMQuit, 0, 0)
+			return
+		}
+		injector.lastCheck = time.Now().Add(time.Hour)
+		injector.lastReport = IntegrityReport{}
+		var focusLost atomic.Bool
+		injector.allowed = func() bool {
+			allowed := windowProcessID(windows.GetForegroundWindow()) == uint32(os.Getpid())
+			if !allowed {
+				focusLost.Store(true)
+			}
+			return allowed
+		}
 		// Keep the real hook chain installed but detach physical user input from
 		// this test engine. The test drives enqueue directly so normal mouse use
 		// cannot stop a mouse-button soak run.
@@ -309,7 +422,7 @@ func TestCapturedNativeEngine(t *testing.T) {
 		native.safetyDisabled.Store(true)
 		defer native.Close()
 		var measurements []capturedResult
-		for _, mode := range []Mode{ModeKeyboard, ModeMouseLeft, ModeMouseRight} {
+		for _, mode := range []Mode{ModeMouseLeft, ModeMouseRight} {
 			for _, interval := range intervals {
 				fmt.Printf("CAPTURE START mode=%s interval=%s duration=%s\n", mode, interval, duration)
 				resetCapturedInput()
@@ -322,14 +435,12 @@ func TestCapturedNativeEngine(t *testing.T) {
 					measurements = append(measurements, capturedResult{mode: mode, expected: interval, err: err})
 					break
 				}
-				if mode != ModeKeyboard && !native.engine.Start() {
+				if !native.engine.Start() {
 					measurements = append(measurements, capturedResult{mode: mode, expected: interval, err: fmt.Errorf("confirmed mouse target did not start engine")})
 					break
 				}
 				event := PhysicalEvent{Down: true}
 				switch mode {
-				case ModeKeyboard:
-					event.Kind, event.Code = EventKey, config.OutputKey
 				case ModeMouseLeft:
 					event.Kind = EventMouseLeft
 				case ModeMouseRight:
@@ -337,16 +448,16 @@ func TestCapturedNativeEngine(t *testing.T) {
 				}
 				native.enqueue(event)
 				time.Sleep(duration)
-				event.Down = false
-				if mode == ModeKeyboard {
-					native.enqueue(event)
-				} else {
-					// Mouse modes are toggle-driven; a physical button-up is
-					// deliberately unrelated to their lifetime. Stop the
-					// engine explicitly and wait for any in-flight separated
-					// up edge before taking the measurement.
-					native.engine.Enable(false)
+				if focusLost.Load() {
+					measurements = append(measurements, capturedResult{mode: mode, expected: interval, err: errOutputTargetLost})
+					break
 				}
+				event.Down = false
+				// Mouse modes are toggle-driven; a physical button-up is
+				// deliberately unrelated to their lifetime. Stop the engine
+				// explicitly and wait for any in-flight separated up edge
+				// before taking the measurement.
+				native.engine.Enable(false)
 				time.Sleep(150 * time.Millisecond)
 				measurement := capturedMeasurement(mode, interval)
 				measurements = append(measurements, measurement)
@@ -359,6 +470,9 @@ func TestCapturedNativeEngine(t *testing.T) {
 	runCaptureMessageLoop(t)
 	for _, result := range <-results {
 		if result.err != nil {
+			if errors.Is(result.err, errOutputTargetLost) {
+				t.Skip("capture fixture lost foreground focus to another desktop process")
+			}
 			t.Fatalf("mode=%s expected=%s: %v", result.mode, result.expected, result.err)
 		}
 		minimumPairs := uint64(duration / (result.expected + result.expected/2))

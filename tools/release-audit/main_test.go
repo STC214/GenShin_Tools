@@ -87,17 +87,17 @@ func TestVerifyBuildInfoRejectsTrailingJSON(t *testing.T) {
 func writeAuditZIP(t *testing.T, path string) {
 	t.Helper()
 	files := map[string][]byte{
-		"AHK_F.ahk": []byte("project-owned script source"),
-		"AHK_F.exe": []byte("official AutoHotkey runtime"),
-		"SOURCES/AutoHotkey-v1.1.37.02-source.zip": []byte("corresponding source"),
+		"AHK_F.exe":                                []byte("project-owner supplied legacy utility"),
 		"build-info.json":                          []byte(`{"version":"1.1.0","target":"windows/amd64"}`),
 		"GenshinTools-injector.exe":                []byte("injector"),
 		"GenshinTools-input.exe":                   []byte("input"),
 		"GenshinTools-updater.exe":                 []byte("updater"),
 		"GenshinTools.exe":                         []byte("main"),
 		"LICENSE":                                  []byte("MIT"),
-		"LICENSES/AutoHotkey-GPL-2.0.txt":          []byte("GPL-2.0"),
+		"LICENSES/AutoHotkey-v1.0-GPL-2.0.txt":     []byte("GPL-2.0"),
+		"LICENSES/User-AHK_F-NOTICE.md":            []byte("project owner distribution notice"),
 		"LICENSE_POLICY.md":                        []byte("policy"),
+		"SOURCES/AutoHotkey-v1.0.48.05-source.zip": []byte("corresponding source"),
 		"THIRD_PARTY_NOTICES.md":                   []byte("notices"),
 	}
 	manifest := selfupdate.PackageManifest{SchemaVersion: 1, Version: "1.1.0"}

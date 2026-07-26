@@ -181,3 +181,16 @@ x86 版本为
 或整套 Rust 调度器。现有 Go 项目的多键规则、独立保持状态、前台游戏核验和停止清理可以
 保留，只需把键盘 worker 的最终输出端新增为经过审计的 Interception backend。
 
+## 1.3.0 独立适配落地
+
+- 没有复制 FlairBloom 的 Rust/TypeScript 源码，也没有打包其任何资源。
+- 没有随包再分发 Interception DLL、安装器或驱动；设置页只打开固定的官方 v1.0.1 release。
+- x86 输入 worker 独立实现公开设备协议边界：游戏进程出现后建立 20 设备 context，
+  为每个设备登记事件句柄，并向逻辑键盘 1 提交 `KEYBOARD_INPUT_DATA`。
+- 键盘扫描码事件使用 `ExtraInformation=0x51485844`；x86 worker hook 与 x64 主 hook
+  均在物理状态处理前过滤该值，阻断自身输出递归。
+- worker 只在已核验游戏进程存在时运行；游戏全部退出后关闭 hook、线程、事件和驱动句柄。
+  注入启动完成且游戏前台稳定后仍会重启 worker，使其 hook 晚于注入模块。
+- 每次输出前重新核对前台 HWND 的 PID；切到其他窗口不吞触发键，也不发送驱动事件。
+- 客户端必须为 High 完整性。Medium 完整性下即使设备打开和 IOCTL 返回成功，官方 DLL
+  与独立实现都可能不产生输入；因此状态探测和 worker 初始化会明确失败，不再静默计数。

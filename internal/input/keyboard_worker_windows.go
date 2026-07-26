@@ -2,6 +2,7 @@ package input
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,8 +20,6 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-const autoHotkeyKeyIgnoreLevel0 uintptr = 0xFFC3D44D
-
 type keyboardWorkerRequest struct {
 	Enabled       bool     `json:"enabled"`
 	RepeatKeys    []uint32 `json:"repeatKeys"`
@@ -33,14 +32,40 @@ type keyboardWorkerResponse struct {
 	Error string `json:"error,omitempty"`
 }
 
-type keyboardWorkerController struct {
+type synchronizedBuffer struct {
 	mu     sync.Mutex
-	cmd    *exec.Cmd
-	stdin  io.WriteCloser
-	output *bufio.Reader
-	active atomic.Bool
-	last   *keyboardWorkerRequest
-	closed bool
+	buffer bytes.Buffer
+}
+
+func (buffer *synchronizedBuffer) Write(data []byte) (int, error) {
+	buffer.mu.Lock()
+	defer buffer.mu.Unlock()
+	return buffer.buffer.Write(data)
+}
+
+func (buffer *synchronizedBuffer) Reset() {
+	buffer.mu.Lock()
+	buffer.buffer.Reset()
+	buffer.mu.Unlock()
+}
+
+func (buffer *synchronizedBuffer) String() string {
+	buffer.mu.Lock()
+	defer buffer.mu.Unlock()
+	return buffer.buffer.String()
+}
+
+type keyboardWorkerController struct {
+	mu          sync.Mutex
+	cmd         *exec.Cmd
+	stdin       io.WriteCloser
+	output      *bufio.Reader
+	processDone chan struct{}
+	stderr      synchronizedBuffer
+	active      atomic.Bool
+	last        *keyboardWorkerRequest
+	lastError   string
+	closed      bool
 }
 
 func newKeyboardWorkerController() *keyboardWorkerController {
@@ -63,6 +88,15 @@ func (worker *keyboardWorkerController) PID() int {
 	return worker.cmd.Process.Pid
 }
 
+func (worker *keyboardWorkerController) LastError() string {
+	if worker == nil {
+		return "keyboard worker is unavailable"
+	}
+	worker.mu.Lock()
+	defer worker.mu.Unlock()
+	return worker.lastError
+}
+
 func (worker *keyboardWorkerController) Configure(request keyboardWorkerRequest) error {
 	if worker == nil {
 		return errors.New("keyboard worker is unavailable")
@@ -72,19 +106,22 @@ func (worker *keyboardWorkerController) Configure(request keyboardWorkerRequest)
 	if worker.closed {
 		return errors.New("keyboard worker is closed")
 	}
+	// The keyboard hook and Interception device handle must not exist before
+	// a verified game process exists. Stopping the worker here also unloads
+	// the complete repeat module when the last game process exits.
+	if len(request.GameProcesses) == 0 {
+		worker.stopLocked()
+		worker.lastError = ""
+		return nil
+	}
 	if worker.cmd != nil && sameKeyboardWorkerRequest(worker.last, &request) {
 		worker.active.Store(request.Enabled && len(request.RepeatKeys) != 0 && len(request.GameProcesses) != 0)
 		return nil
 	}
-	if len(request.GameProcesses) == 0 {
-		worker.active.Store(false)
-		if worker.cmd == nil {
-			return nil
-		}
-	}
 	if worker.cmd == nil {
 		if err := worker.startLocked(); err != nil {
 			worker.active.Store(false)
+			worker.lastError = err.Error()
 			return err
 		}
 	}
@@ -107,22 +144,31 @@ func (worker *keyboardWorkerController) Configure(request keyboardWorkerRequest)
 	select {
 	case exchange = <-result:
 	case <-time.After(2 * time.Second):
+		message := "keyboard worker configuration timed out"
 		worker.stopLocked()
-		return errors.New("keyboard worker configuration timed out")
+		worker.lastError = message
+		return errors.New(message)
 	}
 	if exchange.err != nil {
+		message := fmt.Sprintf("read keyboard worker confirmation: %v", exchange.err)
+		if detail := worker.stderr.String(); detail != "" {
+			message += ": " + detail
+		}
 		worker.stopLocked()
-		return fmt.Errorf("read keyboard worker confirmation: %w", exchange.err)
+		worker.lastError = message
+		return errors.New(message)
 	}
 	response := exchange.response
 	if !response.OK {
 		worker.active.Store(false)
+		worker.lastError = response.Error
 		return errors.New(response.Error)
 	}
 	saved := request
 	saved.RepeatKeys = append([]uint32(nil), request.RepeatKeys...)
 	saved.GameProcesses = append([]uint32(nil), request.GameProcesses...)
 	worker.last = &saved
+	worker.lastError = ""
 	worker.active.Store(request.Enabled && len(request.RepeatKeys) != 0 && len(request.GameProcesses) != 0)
 	return nil
 }
@@ -137,7 +183,11 @@ func (worker *keyboardWorkerController) Restart() error {
 		return errors.New("keyboard worker is closed")
 	}
 	if worker.last == nil {
+		lastError := worker.lastError
 		worker.mu.Unlock()
+		if lastError != "" {
+			return errors.New(lastError)
+		}
 		return nil
 	}
 	request := *worker.last
@@ -183,6 +233,8 @@ func (worker *keyboardWorkerController) startLocked() error {
 	command := exec.Command(helper)
 	command.Dir = filepath.Dir(executable)
 	command.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: windows.CREATE_NO_WINDOW}
+	worker.stderr.Reset()
+	command.Stderr = &worker.stderr
 	stdin, err := command.StdinPipe()
 	if err != nil {
 		return err
@@ -199,18 +251,28 @@ func (worker *keyboardWorkerController) startLocked() error {
 	worker.cmd = command
 	worker.stdin = stdin
 	worker.output = bufio.NewReader(stdout)
-	go func(command *exec.Cmd) {
-		_ = command.Wait()
+	processDone := make(chan struct{})
+	worker.processDone = processDone
+	go func(command *exec.Cmd, done chan struct{}) {
+		waitErr := command.Wait()
+		close(done)
 		worker.mu.Lock()
 		defer worker.mu.Unlock()
 		if worker.cmd == command {
 			worker.active.Store(false)
+			if waitErr != nil && worker.lastError == "" {
+				worker.lastError = fmt.Sprintf("keyboard worker exited: %v", waitErr)
+				if detail := worker.stderr.String(); detail != "" {
+					worker.lastError += ": " + detail
+				}
+			}
 			worker.cmd = nil
 			worker.stdin = nil
 			worker.output = nil
+			worker.processDone = nil
 			worker.last = nil
 		}
-	}(command)
+	}(command, processDone)
 	return nil
 }
 
@@ -232,9 +294,19 @@ func (worker *keyboardWorkerController) stopLocked() {
 	if worker.cmd != nil && worker.cmd.Process != nil {
 		_ = worker.cmd.Process.Kill()
 	}
+	if worker.processDone != nil {
+		select {
+		case <-worker.processDone:
+		case <-time.After(2 * time.Second):
+			if worker.lastError == "" {
+				worker.lastError = "keyboard worker did not exit within two seconds"
+			}
+		}
+	}
 	worker.cmd = nil
 	worker.stdin = nil
 	worker.output = nil
+	worker.processDone = nil
 	worker.last = nil
 }
 
@@ -247,16 +319,27 @@ type keyboardWorkerConfig struct {
 
 type keyboardWorkerRuntime struct {
 	config             atomic.Pointer[keyboardWorkerConfig]
-	held               [256]atomic.Bool
+	held               [1024]atomic.Bool
+	generation         [1024]atomic.Uint64
 	done               chan struct{}
 	wg                 sync.WaitGroup
+	faultMu            sync.Mutex
+	fault              error
+	backend            *interceptionKeyboardBackend
+	threadID           uint32
 	gameForegroundTest func(*keyboardWorkerConfig) bool
+	emitTest           func(uint32, time.Duration) error
 }
 
 func RunKeyboardWorker(input io.Reader, output io.Writer) error {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
-	worker := &keyboardWorkerRuntime{done: make(chan struct{})}
+	backend, err := newInterceptionKeyboardBackend()
+	if err != nil {
+		return err
+	}
+	defer backend.Close()
+	worker := &keyboardWorkerRuntime{done: make(chan struct{}), backend: backend}
 	worker.config.Store(&keyboardWorkerConfig{
 		keys:      map[uint32]struct{}{},
 		processes: map[uint32]struct{}{},
@@ -276,21 +359,24 @@ func RunKeyboardWorker(input io.Reader, output io.Writer) error {
 	}
 	defer procUnhookWindowsHookEx.Call(hook)
 	threadID := windows.GetCurrentThreadId()
+	worker.threadID = threadID
 	go worker.readConfigurations(input, output, threadID)
 	var msg message
+	var loopError error
 	for {
 		value, _, callErr := procGetMessageW.Call(uintptr(unsafe.Pointer(&msg)), 0, 0, 0)
 		if int32(value) == 0 {
 			break
 		}
 		if int32(value) == -1 {
-			return fmt.Errorf("GetMessageW keyboard worker: %w", normalizeCallError(callErr))
+			loopError = fmt.Errorf("GetMessageW keyboard worker: %w", normalizeCallError(callErr))
+			break
 		}
 	}
 	close(worker.done)
 	worker.wg.Wait()
 	runtime.KeepAlive(callback)
-	return nil
+	return errors.Join(loopError, worker.runtimeFault())
 }
 
 func (worker *keyboardWorkerRuntime) readConfigurations(input io.Reader, output io.Writer, threadID uint32) {
@@ -331,6 +417,7 @@ func (worker *keyboardWorkerRuntime) readConfigurations(input io.Reader, output 
 				})
 				for index := range worker.held {
 					worker.held[index].Store(false)
+					worker.generation[index].Add(1)
 				}
 			}
 		}
@@ -345,7 +432,10 @@ var activeKeyboardWorker atomic.Pointer[keyboardWorkerRuntime]
 func keyboardWorkerHookCallback(code int, message, dataPointer uintptr) uintptr {
 	if code >= 0 && dataPointer != 0 {
 		data := (*keyboardHook)(unsafe.Pointer(dataPointer))
-		if data.Flags&llkhfInjected == 0 {
+		// Interception inserts into the keyboard device stack and therefore is
+		// not guaranteed to carry LLKHF_INJECTED. The dedicated information
+		// marker is the recursion boundary used by the driver backend.
+		if data.Flags&llkhfInjected == 0 && data.ExtraInfo != interceptionMarker {
 			down := message == wMKeyDown || message == wMSysKeyDown
 			up := message == wMKeyUp || message == wMSysKeyUp
 			if down || up {
@@ -367,9 +457,11 @@ func keyboardWorkerHookCallback(code int, message, dataPointer uintptr) uintptr 
 
 func (worker *keyboardWorkerRuntime) handlePhysical(key uint32, down bool) bool {
 	key = NormalizeKeyCode(key)
-	virtualKey := VirtualKey(key)
+	index := int(key & 0x3ff)
 	if !down {
-		worker.held[virtualKey].Store(false)
+		if worker.held[index].Swap(false) {
+			worker.generation[index].Add(1)
+		}
 	}
 	config := worker.config.Load()
 	if config == nil || !config.enabled {
@@ -381,17 +473,18 @@ func (worker *keyboardWorkerRuntime) handlePhysical(key uint32, down bool) bool 
 	if !down {
 		return true
 	}
-	if !worker.held[virtualKey].CompareAndSwap(false, true) {
+	if !worker.held[index].CompareAndSwap(false, true) {
 		return true
 	}
+	generation := worker.generation[index].Add(1)
 	worker.wg.Add(1)
-	go worker.repeatKey(key)
+	go worker.repeatKey(key, generation)
 	return true
 }
 
-func (worker *keyboardWorkerRuntime) repeatKey(key uint32) {
+func (worker *keyboardWorkerRuntime) repeatKey(key uint32, generation uint64) {
 	defer worker.wg.Done()
-	virtualKey := VirtualKey(key)
+	index := int(key & 0x3ff)
 	// AutoHotkey dispatches a hotkey after its low-level hook callback has
 	// returned. Do the same so the physical event is fully suppressed before
 	// the replacement down/up pair enters the system input stream.
@@ -404,7 +497,7 @@ func (worker *keyboardWorkerRuntime) repeatKey(key uint32) {
 		return
 	case <-startDelay.C:
 	}
-	for worker.held[virtualKey].Load() {
+	for worker.held[index].Load() && worker.generation[index].Load() == generation {
 		config := worker.config.Load()
 		if config == nil || !config.enabled {
 			return
@@ -414,7 +507,11 @@ func (worker *keyboardWorkerRuntime) repeatKey(key uint32) {
 		}
 		next := time.Now().Add(config.interval)
 		if worker.gameForeground(config) {
-			worker.emitKey(key)
+			if err := worker.emitKey(key, config.interval); err != nil {
+				worker.held[index].Store(false)
+				worker.fail(fmt.Errorf("Interception output for key 0x%X failed: %w", key, err))
+				return
+			}
 		}
 		delay := time.Until(next)
 		if delay < 0 {
@@ -432,6 +529,26 @@ func (worker *keyboardWorkerRuntime) repeatKey(key uint32) {
 	}
 }
 
+func (worker *keyboardWorkerRuntime) fail(err error) {
+	if err == nil {
+		return
+	}
+	worker.faultMu.Lock()
+	if worker.fault == nil {
+		worker.fault = err
+	}
+	worker.faultMu.Unlock()
+	if worker.threadID != 0 {
+		procPostThreadMessageW.Call(uintptr(worker.threadID), wMQuit, 0, 0)
+	}
+}
+
+func (worker *keyboardWorkerRuntime) runtimeFault() error {
+	worker.faultMu.Lock()
+	defer worker.faultMu.Unlock()
+	return worker.fault
+}
+
 func (worker *keyboardWorkerRuntime) gameForeground(config *keyboardWorkerConfig) bool {
 	if worker.gameForegroundTest != nil {
 		return worker.gameForegroundTest(config)
@@ -445,17 +562,12 @@ func (worker *keyboardWorkerRuntime) gameForeground(config *keyboardWorkerConfig
 	return ok
 }
 
-func (worker *keyboardWorkerRuntime) emitKey(key uint32) {
-	virtualKey := VirtualKey(key)
-	foreground := windows.GetForegroundWindow()
-	threadID, _, _ := procGetWindowThreadProcessID.Call(uintptr(foreground), 0)
-	layout, _, _ := procGetKeyboardLayout.Call(threadID)
-	scan, _, _ := procMapVirtualKeyExW.Call(uintptr(virtualKey), mapvkVKToVSCEx, layout)
-	flags := uintptr(0)
-	if KeyIsExtended(key) || scan&0xff00 == 0xe000 || scan&0xff00 == 0xe100 {
-		flags |= keyeventfExtendedKey
+func (worker *keyboardWorkerRuntime) emitKey(key uint32, interval time.Duration) error {
+	if worker.emitTest != nil {
+		return worker.emitTest(key, interval)
 	}
-	procKeybdEvent.Call(uintptr(virtualKey), scan&0xff, flags, autoHotkeyKeyIgnoreLevel0)
-	time.Sleep(time.Millisecond)
-	procKeybdEvent.Call(uintptr(virtualKey), scan&0xff, flags|keyeventfKeyUp, autoHotkeyKeyIgnoreLevel0)
+	if worker.backend == nil {
+		return errors.New("Interception keyboard backend is unavailable")
+	}
+	return worker.backend.Press(key, interval)
 }

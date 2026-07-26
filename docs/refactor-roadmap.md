@@ -153,7 +153,7 @@ Disabled -> Armed -> Running -> Armed
 - 使用自定义 `dwExtraInfo` 标记本程序注入事件，同时检查 LL hook 的 injected 标志，杜绝自激回路。
 - 键盘输出使用扫描码；正确处理扩展键、左右修饰键、NumPad 和布局映射。
 - 每次输入必须成对发送；停止、panic、退出和配置切换时做防御性 key-up/mouse-up 清理。
-- 键盘由独立 x86 worker 在同一进程内同时拥有低级 hook、物理保持状态和带 AutoHotkey ignore-level 标记的 `keybd_event` 输出循环；仅在已核验游戏前台时吞掉配置的物理触发键并提交平衡的 down/up，其他按键放行。worker 缺失/失败时降级到主进程扫描码成对 `SendInput`。注入完成且游戏前台稳定后重启 worker 以重装 hook。鼠标逐事件提交 down/up。所有路径核验前台游戏进程与完整性级别，失败不能静默空转。
+- 键盘由游戏进程出现后才启动的独立 x86 worker 同时拥有低级 hook、每键物理保持状态和 Interception 设备上下文；仅在已核验游戏前台时吞掉配置的物理触发键，并通过驱动提交带防递归标记的扫描码 down/up，其他按键放行。驱动或 worker 不可用时失败关闭，不再降级到游戏无法消费的键盘 `SendInput`。注入完成且游戏前台稳定后重启 worker 以重装 hook；游戏退出后关闭 worker 和全部驱动句柄。鼠标继续逐事件提交 down/up。所有路径核验前台游戏进程与完整性级别，失败不能静默空转。
 - 键盘低级 hook 只观察物理边沿，绝不吞掉配置连发键；状态机仍接收物理边沿并输出合成事件，其他按键不会改变当前 held/generation。
 - 高精度节拍使用 waitable timer；不在 hook 回调中 `Sleep`、等待 channel 或写日志。
 - 检测完整性级别。若游戏以更高权限运行，明确提示需以相同权限重启，避免“界面显示运行但游戏收不到输入”。

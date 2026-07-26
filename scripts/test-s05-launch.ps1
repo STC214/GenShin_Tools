@@ -14,14 +14,22 @@ $GameExe = Join-Path $GameRoot 'YuanShen.exe'
 $GoCache = Join-Path $ProjectRoot '.cache\go-build'
 $GoTemp = Join-Path $ProjectRoot '.tmp\go'
 . (Join-Path $PSScriptRoot 'environment.ps1')
-$EnvironmentNames = @('GOCACHE', 'GOTMPDIR', 'GENSHINTOOLS_S02_READY_FILE', 'GENSHINTOOLS_S02_AUTOCLOSE_MS', 'GENSHINTOOLS_S05_RESULT', 'GENSHINTOOLS_S05_SLEEP_MS', 'GENSHINTOOLS_S05_EXIT_CODE')
+$EnvironmentNames = @('GOCACHE', 'GOTMPDIR', 'GENSHINTOOLS_S02_READY_FILE', 'GENSHINTOOLS_S02_AUTOCLOSE_MS', 'GENSHINTOOLS_S02_INSTANCE_SUFFIX', 'GENSHINTOOLS_S05_RESULT', 'GENSHINTOOLS_S05_SLEEP_MS', 'GENSHINTOOLS_S05_EXIT_CODE')
 $PreviousEnvironment = Save-ProcessEnvironment -Names $EnvironmentNames
+$Process = $null
 
 try {
+if (Test-Path -LiteralPath $SmokeRoot) {
+    Remove-Item -LiteralPath $SmokeRoot -Recurse -Force
+}
 New-Item -ItemType Directory -Force -Path $AppRoot, $GameRoot, (Join-Path $AppRoot 'data'), $GoCache, $GoTemp | Out-Null
-Copy-Item -LiteralPath (Join-Path $ProjectRoot 'dist\GenshinTools.exe') -Destination $AppExe -Force
+if (Test-Path -LiteralPath (Join-Path $ProjectRoot 'cmd\genshin-tools\app.syso')) {
+    throw 'S05 asInvoker harness cannot be built while the generated requireAdministrator app.syso is present'
+}
 $env:GOCACHE = $GoCache
 $env:GOTMPDIR = $GoTemp
+& go build -trimpath -buildvcs=false -ldflags '-H=windowsgui -s -w' -o $AppExe ./cmd/genshin-tools
+if ($LASTEXITCODE -ne 0) { throw "build launcher smoke harness failed: $LASTEXITCODE" }
 & go build -trimpath -buildvcs=false -o $GameExe ./tools/launchfixture
 if ($LASTEXITCODE -ne 0) { throw "build launch fixture failed: $LASTEXITCODE" }
 Set-Content -LiteralPath (Join-Path $GameRoot 'config.ini') -Encoding UTF8 -Value "game_version=6.1.2`nchannel=1"
@@ -47,6 +55,7 @@ public static class S05LaunchSmoke {
     Remove-Item -LiteralPath $ResultPath, $ReadyPath -Force -ErrorAction SilentlyContinue
     $env:GENSHINTOOLS_S02_READY_FILE = $ReadyPath
     $env:GENSHINTOOLS_S02_AUTOCLOSE_MS = '3500'
+    $env:GENSHINTOOLS_S02_INSTANCE_SUFFIX = "s05-$PID-$([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds())"
     $env:GENSHINTOOLS_S05_RESULT = $ResultPath
     $env:GENSHINTOOLS_S05_SLEEP_MS = '300'
     $env:GENSHINTOOLS_S05_EXIT_CODE = '23'
@@ -54,7 +63,7 @@ public static class S05LaunchSmoke {
     $Deadline = (Get-Date).AddSeconds(5)
     while (-not (Test-Path -LiteralPath $ReadyPath) -and (Get-Date) -lt $Deadline) { Start-Sleep -Milliseconds 50 }
     if (-not (Test-Path -LiteralPath $ReadyPath)) { throw 'S05 smoke app did not become ready' }
-    $Window = [S05LaunchSmoke]::FindWindow('GenshinTools.MainWindow.S02', $null)
+    $Window = [S05LaunchSmoke]::FindWindow("GenshinTools.MainWindow.S02.$($env:GENSHINTOOLS_S02_INSTANCE_SUFFIX)", $null)
     if ($Window -eq [IntPtr]::Zero) {
         $HandleDeadline = (Get-Date).AddSeconds(2)
         while ($Window -eq [IntPtr]::Zero -and (Get-Date) -lt $HandleDeadline) {
@@ -80,5 +89,8 @@ public static class S05LaunchSmoke {
     if (-not $Process.HasExited -or $Process.ExitCode -ne 0) { throw "launcher smoke failed or hung: exit=$($Process.ExitCode)" }
     Write-Host "[S05] PASS pid=$($Result.pid) cwd=$($Result.workingDirectory) args=$($Result.arguments.Count)"
 } finally {
+    if ($null -ne $Process -and -not $Process.HasExited) {
+        Stop-Process -Id $Process.Id -Force -ErrorAction SilentlyContinue
+    }
     Restore-ProcessEnvironment -Snapshot $PreviousEnvironment -Names $EnvironmentNames
 }

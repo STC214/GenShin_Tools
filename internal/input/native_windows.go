@@ -325,6 +325,12 @@ func (n *Native) KeyboardWorkerPID() int {
 	}
 	return n.keyboardWorker.PID()
 }
+func (n *Native) KeyboardWorkerError() string {
+	if n == nil || n.keyboardWorker == nil {
+		return "keyboard worker is unavailable"
+	}
+	return n.keyboardWorker.LastError()
+}
 
 // RefreshKeyboardBackend reinstalls the x86 worker hook after injected modules
 // have completed their own hook setup.
@@ -1067,7 +1073,7 @@ func mouseHookCallback(code int, wParam, lParam uintptr) (result uintptr) {
 }
 
 func handleKeyboardHook(data *keyboardHook, message uintptr) bool {
-	if data == nil || data.Flags&llkhfInjected != 0 || data.ExtraInfo == injectionMarker {
+	if data == nil || data.Flags&llkhfInjected != 0 || data.ExtraInfo == injectionMarker || data.ExtraInfo == interceptionMarker {
 		return false
 	}
 	down := message == wMKeyDown || message == wMSysKeyDown
@@ -1137,7 +1143,7 @@ func (s *sendInputInjector) Emit(config Config) error {
 		if s.externalKeyboard != nil && s.externalKeyboard() {
 			return nil
 		}
-		return s.emitBaselineKeyboard(config)
+		return errors.New("Interception keyboard worker is unavailable; install the driver, restart Windows, and run Genshin Tools as administrator")
 	}
 	down, up, err := s.pressFunctions(config)
 	if err != nil {
@@ -1149,29 +1155,6 @@ func (s *sendInputInjector) Emit(config Config) error {
 		// once before entering Fault so API failure cannot leave a stuck key or
 		// mouse button.
 		if up() == nil {
-			s.needsRelease.Store(false)
-		}
-		return err
-	}
-	s.needsRelease.Store(false)
-	return nil
-}
-
-// emitBaselineKeyboard deliberately preserves the keyboard output shape from
-// the 0.9.5 build which was confirmed to work in the real game: scan-code
-// KEYBDINPUT down/up in one SendInput call, from the main x64 process.
-func (s *sendInputInjector) emitBaselineKeyboard(config Config) error {
-	down, err := scanCodeKeyboardInput(config.OutputKey, false)
-	if err != nil {
-		return err
-	}
-	up, err := scanCodeKeyboardInput(config.OutputKey, true)
-	if err != nil {
-		return err
-	}
-	s.needsRelease.Store(true)
-	if err := sendInputs([]winInput{down, up}); err != nil {
-		if sendInputs([]winInput{up}) == nil {
 			s.needsRelease.Store(false)
 		}
 		return err

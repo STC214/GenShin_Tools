@@ -119,33 +119,37 @@ if ($BuildInfo.version -ne $Version -or $BuildInfo.target -ne 'windows/amd64') {
 Write-Host "Verified portable data layout and build-info.json"
 
 $AHKRuntimePath = Join-Path $DistDirectory 'AHK_F.exe'
-$AHKScriptPath = Join-Path $DistDirectory 'AHK_F.ahk'
-$AHKSourcePath = Join-Path $DistDirectory 'SOURCES\AutoHotkey-v1.1.37.02-source.zip'
-$AHKLicensePath = Join-Path $DistDirectory 'LICENSES\AutoHotkey-GPL-2.0.txt'
-$ExpectedAHKRuntimeHash = 'ba35b8b4346b79b8bb4f97360025cb6befaf501b03149a3b5fef8f07bdf265c7'
-$ExpectedAHKScriptHash = 'ce1e29cf5ca21dd0fa99840db895c9eea66e76721c0238d33bcb1e072d17ea4b'
-$ExpectedAHKSourceHash = '2b1d94e5d9b94b6a6dc3a2565bc65e74fef93ac2c34bb57fe182ffb4ab20fe92'
-foreach ($Path in @($AHKRuntimePath, $AHKScriptPath, $AHKSourcePath, $AHKLicensePath)) {
+$AHKNoticePath = Join-Path $DistDirectory 'LICENSES\User-AHK_F-NOTICE.md'
+$AHKLicensePath = Join-Path $DistDirectory 'LICENSES\AutoHotkey-v1.0-GPL-2.0.txt'
+$AHKSourcePath = Join-Path $DistDirectory 'SOURCES\AutoHotkey-v1.0.48.05-source.zip'
+$ExpectedAHKRuntimeHash = '09ae8c2a0eb2a5636231a4a228f89502bcce5c682d52b10ca803b8fef9cad2f5'
+$ExpectedAHKLicenseHash = '2f37ec8a6e912402a7d79ea03e5e33eacf54d1bf1fc7e3b0eab3a69bd8b23252'
+$ExpectedAHKSourceHash = 'fd9d629dbd742cbe1e14c530dd092e32d4ba2a058b97d69d935ea340b61b8c39'
+foreach ($Path in @($AHKRuntimePath, $AHKNoticePath, $AHKLicensePath, $AHKSourcePath)) {
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
-        throw "Missing bundled AutoHotkey artifact: $Path"
+        throw "Missing bundled project-owner AHK artifact: $Path"
     }
 }
 if ((Get-FileHash -Algorithm SHA256 -LiteralPath $AHKRuntimePath).Hash.ToLowerInvariant() -ne $ExpectedAHKRuntimeHash) {
-    throw 'Bundled AHK_F.exe does not match the audited AutoHotkey v1.1.37.02 x86 runtime'
+    throw 'Bundled AHK_F.exe does not match the audited project-owner binary'
 }
-if ((Get-FileHash -Algorithm SHA256 -LiteralPath $AHKScriptPath).Hash.ToLowerInvariant() -ne $ExpectedAHKScriptHash) {
-    throw 'Bundled AHK_F.ahk does not match the audited project script'
-}
-if ((Get-FileHash -Algorithm SHA256 -LiteralPath $AHKSourcePath).Hash.ToLowerInvariant() -ne $ExpectedAHKSourceHash) {
-    throw 'Bundled AutoHotkey corresponding source archive has an unexpected hash'
+if ((Get-Item -LiteralPath $AHKRuntimePath).Length -ne 422139) {
+    throw 'Bundled AHK_F.exe has an unexpected size'
 }
 if ((Get-PEMachine -Path $AHKRuntimePath) -ne 0x014c -or (Get-PESubsystem -Path $AHKRuntimePath) -ne 2) {
     throw 'Bundled AHK_F.exe is not the expected x86 Windows GUI executable'
 }
-$AHKScript = Get-Content -LiteralPath $AHKScriptPath -Raw -Encoding UTF8
-foreach ($Marker in @('#SingleInstance Force', 'Process, Exist', 'WinGet, activePID, PID, A', 'ExitApp')) {
-    if (-not $AHKScript.Contains($Marker)) {
-        throw "Bundled AHK script is missing audited lifecycle marker: $Marker"
-    }
+$AHKVersion = (Get-Item -LiteralPath $AHKRuntimePath).VersionInfo
+if ($AHKVersion.FileVersion -ne '1.6.0') {
+    throw 'Bundled AHK_F.exe version metadata does not match the audited project-owner binary'
 }
-Write-Host 'Verified bundled AutoHotkey runtime, project script, GPL license and complete corresponding source'
+if ((Get-FileHash -Algorithm SHA256 -LiteralPath $AHKLicensePath).Hash.ToLowerInvariant() -ne $ExpectedAHKLicenseHash) {
+    throw 'Bundled AutoHotkey GPL-2.0 license does not match the audited text'
+}
+if ((Get-FileHash -Algorithm SHA256 -LiteralPath $AHKSourcePath).Hash.ToLowerInvariant() -ne $ExpectedAHKSourceHash) {
+    throw 'Bundled AutoHotkey v1.0.48.05 corresponding source does not match the audited archive'
+}
+if ((Get-Item -LiteralPath $AHKSourcePath).Length -ne 1566188) {
+    throw 'Bundled AutoHotkey v1.0.48.05 corresponding source has an unexpected size'
+}
+Write-Host 'Verified project-owner supplied legacy AHK_F.exe and AutoHotkey v1.0.48.05 GPL materials'

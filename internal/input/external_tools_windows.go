@@ -8,7 +8,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -19,8 +18,7 @@ import (
 )
 
 const (
-	bundledAHKRuntimeSHA256 = "ba35b8b4346b79b8bb4f97360025cb6befaf501b03149a3b5fef8f07bdf265c7"
-	bundledAHKScriptSHA256  = "ce1e29cf5ca21dd0fa99840db895c9eea66e76721c0238d33bcb1e072d17ea4b"
+	bundledAHKRuntimeSHA256 = "09ae8c2a0eb2a5636231a4a228f89502bcce5c682d52b10ca803b8fef9cad2f5"
 )
 
 // ExternalCompatibilityTool is an exact, pre-injection input utility instance
@@ -33,10 +31,12 @@ type ExternalCompatibilityTool struct {
 }
 
 type ExternalToolRestartResult struct {
-	Path    string
-	OldPIDs []uint32
-	NewPID  uint32
-	Error   error
+	Path            string
+	OldPIDs         []uint32
+	NewPID          uint32
+	NewCreationTime int64
+	Job             windows.Handle
+	Error           error
 }
 
 func CaptureExternalCompatibilityTools() []ExternalCompatibilityTool {
@@ -56,10 +56,14 @@ func CaptureExternalCompatibilityTools() []ExternalCompatibilityTool {
 		if path == "" || !supportedCompatibilityTool(filepath.Base(path)) {
 			continue
 		}
+		creationTime := processCreationTime(entry.ProcessID)
+		if creationTime == 0 {
+			continue
+		}
 		tools = append(tools, ExternalCompatibilityTool{
 			PID:          entry.ProcessID,
 			Path:         path,
-			CreationTime: processCreationTime(entry.ProcessID),
+			CreationTime: creationTime,
 		})
 	}
 	return tools
@@ -142,6 +146,12 @@ func RestartExternalCompatibilityTools(tools []ExternalCompatibilityTool) []Exte
 		result.NewPID, result.Error = startReplacementCompatibilityTool(result.Path)
 		if result.Error == nil {
 			result.Error = verifyReplacementCompatibilityTool(result.Path, result.NewPID, time.Second)
+			if result.Error == nil {
+				result.NewCreationTime = processCreationTime(result.NewPID)
+				if result.NewCreationTime == 0 {
+					result.Error = fmt.Errorf("replacement PID %d has no verifiable creation time", result.NewPID)
+				}
+			}
 		}
 		results = append(results, result)
 	}
@@ -159,6 +169,12 @@ func restartAHKCompatibilityTool(captured []ExternalCompatibilityTool, result *E
 		verifyReplacementCompatibilityTool,
 		stopCapturedCompatibilityTool,
 	)
+	if result.Error == nil {
+		result.NewCreationTime = processCreationTime(result.NewPID)
+		if result.NewCreationTime == 0 {
+			result.Error = fmt.Errorf("replacement PID %d has no verifiable creation time", result.NewPID)
+		}
+	}
 }
 
 func restartAHKCompatibilityToolWith(
@@ -208,48 +224,51 @@ func startCompatibilityToolWithArguments(path string, arguments []string) (uint3
 	return processID, nil
 }
 
-// StartBundledAHK starts the audited portable AutoHotkey runtime with the
-// project-owned script and verifies the exact replacement image before the
-// shell begins lifecycle monitoring.
-func StartBundledAHK(runtimePath, scriptPath string, processIDs []uint32) ExternalToolRestartResult {
+// StartBundledAHK starts the exact project-owner supplied compiled utility.
+// It is a complete legacy program, not an AutoHotkey interpreter plus script.
+func StartBundledAHK(runtimePath string, processIDs []uint32) ExternalToolRestartResult {
 	result := ExternalToolRestartResult{Path: runtimePath}
-	if !filepath.IsAbs(runtimePath) || !filepath.IsAbs(scriptPath) ||
-		!strings.EqualFold(filepath.Base(runtimePath), "AHK_F.exe") ||
-		!strings.EqualFold(filepath.Base(scriptPath), "AHK_F.ahk") ||
-		!strings.EqualFold(filepath.Dir(runtimePath), filepath.Dir(scriptPath)) {
-		result.Error = errors.New("bundled AHK runtime and script must be absolute audited sibling paths")
-		return result
-	}
-	info, err := os.Stat(scriptPath)
-	if err != nil {
-		result.Error = fmt.Errorf("bundled AHK script is unavailable: %w", err)
-		return result
-	}
-	if info.IsDir() || info.Size() <= 0 || info.Size() > 1<<20 {
-		result.Error = errors.New("bundled AHK script has an invalid size or type")
+	if !filepath.IsAbs(runtimePath) || !strings.EqualFold(filepath.Base(runtimePath), "AHK_F.exe") {
+		result.Error = errors.New("bundled AHK must be an absolute audited AHK_F.exe path")
 		return result
 	}
 	if err := verifyBundledAHKFile(runtimePath, 16<<20, bundledAHKRuntimeSHA256); err != nil {
-		result.Error = fmt.Errorf("bundled AHK runtime audit failed: %w", err)
+		result.Error = fmt.Errorf("bundled AHK binary audit failed: %w", err)
 		return result
 	}
-	if err := verifyBundledAHKFile(scriptPath, 1<<20, bundledAHKScriptSHA256); err != nil {
-		result.Error = fmt.Errorf("bundled AHK script audit failed: %w", err)
-		return result
-	}
-	arguments := []string{"/restart", scriptPath}
+	hasGame := false
 	for _, processID := range processIDs {
 		if processID != 0 {
-			arguments = append(arguments, strconv.FormatUint(uint64(processID), 10))
+			hasGame = true
+			break
 		}
 	}
-	if len(arguments) == 2 {
+	if !hasGame {
 		result.Error = errors.New("bundled AHK requires at least one verified game PID")
 		return result
 	}
-	result.NewPID, result.Error = startCompatibilityToolWithArguments(runtimePath, arguments)
+	result.NewPID, result.Error = startCompatibilityToolWithArguments(runtimePath, compatibilityToolArguments(runtimePath))
 	if result.Error == nil {
-		result.Error = verifyReplacementCompatibilityTool(runtimePath, result.NewPID, time.Second)
+		result.Error = verifyReplacementCompatibilityTool(runtimePath, result.NewPID, time.Millisecond)
+	}
+	if result.Error == nil {
+		result.NewCreationTime = processCreationTime(result.NewPID)
+		if result.NewCreationTime == 0 {
+			result.Error = fmt.Errorf("bundled AHK PID %d has no verifiable creation time", result.NewPID)
+		}
+	}
+	if result.Error == nil {
+		result.Job, result.Error = attachKillOnCloseJob(result.NewPID)
+	}
+	if result.Error != nil && result.NewPID != 0 {
+		creationTime := processCreationTime(result.NewPID)
+		if creationTime != 0 {
+			_ = stopCapturedCompatibilityTool(ExternalCompatibilityTool{
+				PID:          result.NewPID,
+				Path:         runtimePath,
+				CreationTime: creationTime,
+			})
+		}
 	}
 	return result
 }
@@ -273,15 +292,54 @@ func verifyBundledAHKFile(path string, maximumSize int64, expectedSHA256 string)
 	return nil
 }
 
-func StopExternalCompatibilityTool(processID uint32, path string) error {
-	if processID == 0 || !filepath.IsAbs(path) {
+func StopExternalCompatibilityTool(processID uint32, path string, creationTime int64) error {
+	if processID == 0 || !filepath.IsAbs(path) || creationTime == 0 {
 		return errors.New("external compatibility tool identity is invalid")
 	}
 	return stopCapturedCompatibilityTool(ExternalCompatibilityTool{
 		PID:          processID,
 		Path:         path,
-		CreationTime: processCreationTime(processID),
+		CreationTime: creationTime,
 	})
+}
+
+func attachKillOnCloseJob(processID uint32) (windows.Handle, error) {
+	job, err := windows.CreateJobObject(nil, nil)
+	if err != nil {
+		return 0, fmt.Errorf("create bundled AHK job: %w", err)
+	}
+	info := windows.JOBOBJECT_EXTENDED_LIMIT_INFORMATION{}
+	info.BasicLimitInformation.LimitFlags = windows.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+	if _, err := windows.SetInformationJobObject(
+		job,
+		windows.JobObjectExtendedLimitInformation,
+		uintptr(unsafe.Pointer(&info)),
+		uint32(unsafe.Sizeof(info)),
+	); err != nil {
+		windows.CloseHandle(job)
+		return 0, fmt.Errorf("set bundled AHK job limits: %w", err)
+	}
+	process, err := windows.OpenProcess(
+		windows.PROCESS_SET_QUOTA|windows.PROCESS_TERMINATE|windows.PROCESS_QUERY_LIMITED_INFORMATION,
+		false,
+		processID,
+	)
+	if err != nil {
+		windows.CloseHandle(job)
+		return 0, fmt.Errorf("open bundled AHK for job assignment: %w", err)
+	}
+	defer windows.CloseHandle(process)
+	if err := windows.AssignProcessToJobObject(job, process); err != nil {
+		windows.CloseHandle(job)
+		return 0, fmt.Errorf("assign bundled AHK to kill-on-close job: %w", err)
+	}
+	return job, nil
+}
+
+func CloseExternalCompatibilityJob(job windows.Handle) {
+	if job != 0 && job != windows.InvalidHandle {
+		_ = windows.CloseHandle(job)
+	}
 }
 
 func requiresElevatedCompatibilityStart(err error) bool {
@@ -448,8 +506,8 @@ func ToggleExternalAHKSuspend(processID uint32) error {
 	return nil
 }
 
-func ExternalCompatibilityToolRunning(processID uint32, path string) bool {
-	if processID == 0 || !filepath.IsAbs(path) {
+func ExternalCompatibilityToolRunning(processID uint32, path string, creationTime int64) bool {
+	if processID == 0 || !filepath.IsAbs(path) || creationTime == 0 {
 		return false
 	}
 	process, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION|windows.SYNCHRONIZE, false, processID)
@@ -459,7 +517,8 @@ func ExternalCompatibilityToolRunning(processID uint32, path string) bool {
 	defer windows.CloseHandle(process)
 	status, err := windows.WaitForSingleObject(process, 0)
 	return err == nil && status == uint32(windows.WAIT_TIMEOUT) &&
-		strings.EqualFold(filepath.Clean(queryProcessPath(processID)), filepath.Clean(path))
+		strings.EqualFold(filepath.Clean(queryProcessPath(processID)), filepath.Clean(path)) &&
+		processCreationTime(processID) == creationTime
 }
 
 func stopCapturedCompatibilityTool(tool ExternalCompatibilityTool) error {

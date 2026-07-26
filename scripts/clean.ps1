@@ -8,6 +8,7 @@ $Targets = @(
     (Join-Path $ProjectRoot '.cache'),
     (Join-Path $ProjectRoot '.tmp'),
     (Join-Path $ProjectRoot 'assets\app.ico'),
+    (Join-Path $ProjectRoot 'input-helper.exe'),
     (Join-Path $ProjectRoot 'cmd\genshin-tools\app.syso'),
     (Join-Path $ProjectRoot 'cmd\injection-helper\app.syso'),
     (Join-Path $ProjectRoot 'cmd\input-helper\app.syso'),

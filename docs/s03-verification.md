@@ -9,7 +9,7 @@
 - 独立 `LockOSThread` 钩子线程、`WH_KEYBOARD_LL`、`WH_MOUSE_LL` 和 `GetMessageW` 消息循环。
 - 钩子回调只执行 injected/`dwExtraInfo` 过滤和固定 256 项 SPSC 环形队列写入，不等待、不记录日志、不执行状态机。
 - `Disabled / Armed / Running / Stopping / Fault` 单一状态机，generation 阻断旧输出循环。
-- 键盘主路径为独立 x86 worker：同一 worker 进程安装低级键盘 hook、维护每个物理连发键的 held 状态，并调用带 AHK ignore-level 标记的 `keybd_event` 输出平衡的 down/up；主 x64 进程扫描码成对 `SendInput` 只作末级降级。鼠标采用与 QuickInput 一致的单事件 `SendInput`。
+- 键盘主路径为游戏启动后才加载的独立 x86 worker：同一 worker 进程安装低级键盘 hook、维护每个物理连发键的 held 状态、建立完整 Interception 设备上下文，并向第一个逻辑键盘提交带 `0x51485844` 防递归标记的扫描码 down/up；驱动不可用时失败关闭，不再降级到键盘 `SendInput`。鼠标采用与 QuickInput 一致的单事件 `SendInput`。
 - 仅当配置的物理触发键位于已核验游戏前台时，worker 才吞掉该键的 down/up，以免游戏同时收到持续物理 down 和合成重复；其他键和其他窗口始终放行。切出游戏暂停输出但保留 held 循环，其他按键不会取消任何连发键。
 - 快捷键全键盘轮询明确排除鼠标左右键、中键和 XButton 虚拟键，点击“设置”遗留的鼠标按下状态不会再被保存为 `Unknown key`。
 - `MapVirtualKeyExW` 按当前前台线程键盘布局转换，并处理扩展扫描码。
@@ -61,13 +61,20 @@
 - 运行中实际锁屏/解锁、休眠/恢复各一次，确认立即停止且不会自动重新启用。
 - 多种键盘布局以及左右修饰键、NumPad、扩展键人工抽检。
 
-可选长跑使用同一捕获钩子吞掉测试输入，不会把连点或连按发送到其他桌面应用。参数表示每种模式的分钟数，总时长约为参数的三倍：
+可选长跑使用同一捕获钩子吞掉测试输入，不会把鼠标连点发送到其他桌面应用。参数表示
+鼠标左/右键各自的分钟数，总时长约为参数的两倍；Interception 键盘长跑必须在管理员
+测试终端中另行执行，不能由本参数冒充：
 
 ```powershell
 ./scripts/test-s03-input.ps1 -SoakMinutes 1
 ```
 
 默认不执行长跑；普通开发回归只运行 `./scripts/test-s03-input.ps1`。
+
+2026-07-26 的 1.3.2 S13 短矩阵中，纯 Go/竞态/200 次 hook 生命周期和全项目回归通过。
+执行终端为 Medium integrity，因此需要 High integrity 的 Interception 真驱动捕获明确
+跳过；自动化桌面抢走捕获窗前台时，鼠标真实输出捕获也明确跳过而不是制造假失败或把
+输入发到其他窗口。管理员权限下的驱动输出与真实原神消费继续列为人工门禁。
 
 ## 稳定性清单对照
 

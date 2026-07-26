@@ -9,3 +9,16 @@ func TestOpenExternalURLRejectsNonFufuTargetsBeforeShellExecute(t *testing.T) {
 		}
 	}
 }
+
+func TestOpenInterceptionReleaseURLRejectsEveryUnpinnedTarget(t *testing.T) {
+	for _, target := range []string{
+		"http://github.com/oblitum/Interception/releases/tag/v1.0.1",
+		"https://github.com/oblitum/Interception/releases/latest",
+		"https://github.com/oblitum/Interception/releases/tag/v1.0.1?download=1",
+		"https://example.invalid/",
+	} {
+		if err := openInterceptionReleaseURL(target); err == nil {
+			t.Fatalf("untrusted Interception URL %q was accepted", target)
+		}
+	}
+}

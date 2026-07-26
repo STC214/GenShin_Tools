@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 
 	"genshintools/internal/input"
@@ -8,6 +9,7 @@ import (
 
 func main() {
 	if err := input.RunKeyboardWorker(os.Stdin, os.Stdout); err != nil {
+		_, _ = fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 }

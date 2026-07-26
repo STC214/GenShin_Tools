@@ -11,23 +11,22 @@ import (
 func TestPackageReleaseCreatesVerifiedDeterministicPortableZIP(t *testing.T) {
 	root := t.TempDir()
 	dist := filepath.Join(root, "dist")
-	if err := os.MkdirAll(filepath.Join(dist, "LICENSES"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(filepath.Join(dist, "SOURCES"), 0o755); err != nil {
-		t.Fatal(err)
+	for _, directory := range []string{"LICENSES", "SOURCES"} {
+		if err := os.MkdirAll(filepath.Join(dist, directory), 0o755); err != nil {
+			t.Fatal(err)
+		}
 	}
 	files := map[string]string{
-		"AHK_F.ahk": "project-owned script source",
-		"AHK_F.exe": "official AutoHotkey runtime",
-		"SOURCES/AutoHotkey-v1.1.37.02-source.zip": "corresponding source",
+		"AHK_F.exe":                                "project-owner supplied legacy utility",
 		"GenshinTools.exe":                         "main",
 		"GenshinTools-injector.exe":                "injector",
 		"GenshinTools-input.exe":                   "input",
 		"GenshinTools-updater.exe":                 "updater",
+		"SOURCES/AutoHotkey-v1.0.48.05-source.zip": "corresponding source",
 		"build-info.json":                          `{"version":"1.2.3","target":"windows/amd64"}`,
 		"LICENSE":                                  "MIT",
-		"LICENSES/AutoHotkey-GPL-2.0.txt":          "GPL-2.0",
+		"LICENSES/AutoHotkey-v1.0-GPL-2.0.txt":     "GPL-2.0",
+		"LICENSES/User-AHK_F-NOTICE.md":            "project owner distribution notice",
 		"LICENSE_POLICY.md":                        "portable release policy",
 		"THIRD_PARTY_NOTICES.md":                   "notices",
 		"LICENSES/dependency.txt":                  "license",

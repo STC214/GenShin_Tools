@@ -96,7 +96,7 @@ try {
     Invoke-S13Step 'clean deterministic Debug/Release/helper/updater build' { & .\scripts\build.ps1 -Configuration Both -BuildTimeUtc $BuildTimeUtc }
     Invoke-S13Step 'PE version, icon, subsystem and portable layout audit' { & .\scripts\verify-artifact.ps1 }
     Invoke-S13Step 'Win32 shell lifecycle and short close stress' { & .\scripts\test-s02-shell.ps1 -StressIterations $ShellIterations }
-    Invoke-S13Step 'captured monolithic keyboard worker/QuickInput-style mouse and hook lifecycle' { & .\scripts\test-s03-input.ps1 -SoakMinutes 0 }
+    Invoke-S13Step 'captured Interception keyboard worker/QuickInput-style mouse and hook lifecycle' { & .\scripts\test-s03-input.ps1 -SoakMinutes 0 }
     Invoke-S13Step 'real-process pure launch fixture' { & .\scripts\test-s05-launch.ps1 }
     Invoke-S13Step 'bounded injection/helper regression' { & .\scripts\test-s09-injection.ps1 }
     if (-not $SkipOnlineProvider) {

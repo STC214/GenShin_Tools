@@ -119,17 +119,13 @@ func TestCompatibilityToolArguments(t *testing.T) {
 	}
 }
 
-func TestStartBundledAHKRejectsTamperedRuntimeAndScriptBeforeLaunch(t *testing.T) {
+func TestStartBundledAHKRejectsTamperedBinaryBeforeLaunch(t *testing.T) {
 	root := t.TempDir()
 	runtimePath := filepath.Join(root, "AHK_F.exe")
-	scriptPath := filepath.Join(root, "AHK_F.ahk")
 	if err := os.WriteFile(runtimePath, []byte("not the audited runtime"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(scriptPath, []byte("not the audited script"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	result := StartBundledAHK(runtimePath, scriptPath, []uint32{42})
+	result := StartBundledAHK(runtimePath, []uint32{42})
 	if result.Error == nil || result.NewPID != 0 {
 		t.Fatalf("tampered bundled AHK was accepted: %+v", result)
 	}

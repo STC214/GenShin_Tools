@@ -7,6 +7,8 @@ import (
 	"strings"
 	"unsafe"
 
+	"genshintools/internal/input"
+
 	"golang.org/x/sys/windows"
 )
 
@@ -17,6 +19,17 @@ func openExternalURL(target string) error {
 	if err != nil || !strings.EqualFold(parsed.Scheme, "https") || !strings.EqualFold(parsed.Hostname(), "fu1.fun") || (parsed.Port() != "" && parsed.Port() != "443") || parsed.User != nil {
 		return errors.New("external URL is not an HTTPS Fufu official URL")
 	}
+	return shellOpenURL(target)
+}
+
+func openInterceptionReleaseURL(target string) error {
+	if target != input.InterceptionReleaseURL {
+		return errors.New("external URL is not the pinned Interception release")
+	}
+	return shellOpenURL(target)
+}
+
+func shellOpenURL(target string) error {
 	verb, err := windows.UTF16PtrFromString("open")
 	if err != nil {
 		return err

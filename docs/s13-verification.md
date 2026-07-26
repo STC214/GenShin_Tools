@@ -226,6 +226,98 @@
 - 条目数：19
 - PE 校验：主程序为 x64 GUI/`requireAdministrator`；注入 helper、更新器为 x64 GUI/`asInvoker`；输入 helper 与内置 AHK 运行时为 x86 GUI；项目程序版本统一为 `1.2.0`
 
+## 1.3.0 Interception 游戏模式键盘连发
+
+- 根据 FlairBloom 游戏模式的已审计行为和 Interception 公开设备协议，独立实现 x86
+  驱动键盘后端；未复制 FlairBloom 源码，也未打包 Interception DLL、安装器或驱动。
+- 输入增强页固定提示“需要安装 Interception 驱动，安装后必须重启电脑，且仅在原神内
+  生效”；驱动不可用时提供固定到官方 v1.0.1 release 的下载入口。
+- 主程序只读探测完整 20 设备 context 和当前完整性级别。驱动已安装但程序不是 High
+  完整性时明确提示管理员运行，不把“设备可打开/IOCTL 成功”误报为真实可输出。
+- `GenshinTools-input.exe` 仅在游戏发现层给出路径、PID、创建时间均已核验的进程后启动，
+  游戏全部退出时立即关闭；注入完成且游戏前台稳定后重启 worker，以保证 hook 安装顺序。
+- worker 同时持有低级键盘 hook、每键独立 held 状态和唯一 Interception context。
+  输出 down/hold/up 在互斥边界内串行提交；1ms 间隔不额外持有，其他间隔采用三分之一且
+  最长 30ms 的持有时间。
+- 所有驱动扫描码写入 `ExtraInformation=0x51485844`，x86/x64 两层 hook 都在物理状态
+  处理前过滤该标记；无关按键不会清除任何正在保持的连发键。
+- 游戏外不吞配置键也不输出。每一组发送前检查当前前台 HWND 是否属于已核验游戏 PID；
+  切出游戏暂停，回到游戏且物理键仍保持时恢复。
+- 普通 Go、x86 编译和竞态门禁覆盖驱动 ABI 大小、IOCTL、扫描码状态、1ms 持有、worker
+  请求与前台隔离。真实驱动输出必须在管理员成品进程和真实原神环境继续完成手工门禁。
+
+- 文件：`artifacts/release/GenshinTools-1.3.0-windows-amd64-portable.zip`
+- 大小：11,481,101 bytes
+- SHA-256：`e2cbf1472a65b02f8626e8a8c2fd7af0fdc48f197ab51ef1f166a2ace402755e`
+- 条目数：19；确认不含 FlairBloom/Interception 源码、DLL、安装器或驱动
+- PE 校验：主程序为 x64 GUI/`requireAdministrator`；输入 worker 为 x86 GUI/`asInvoker`；
+  注入 helper、更新器为 x64 GUI/`asInvoker`；版本统一为 `1.3.0`
+
+## 1.3.1 项目所有者 AHK_F 成品替换
+
+> 本节记录当时的候选包。其“所有者授权足以覆盖整个成品、无需附带 GPL
+> 材料”的判断已被 1.3.2 的二进制审计纠正，不再作为当前许可证结论。
+
+- 按项目所有者确认，不再使用 1.2.0 引入的官方 AutoHotkey v1.1.37.02
+  解释器、独立 `AHK_F.ahk`、GPL 副本和源码 ZIP；这些内容已从源码树、构建、升级白名单
+  和便携包必需文件中移除。
+- 便携包改为直接分发项目所有者约十年前制作并明确授权复制的旧版编译成品
+  `AHK_F.exe`。构建、成品审计和每次启动均固定校验其 422,139 字节大小与
+  SHA-256 `09ae8c2a0eb2a5636231a4a228f89502bcce5c682d52b10ca803b8fef9cad2f5`。
+- 程序不再把该文件当作解释器，也不传入脚本路径或游戏 PID；仅用其兼容的 `/restart`
+  开关直接启动完整成品。
+- “AHK随游戏启动/关闭”仍只接受发现层已核验的游戏进程作为启动条件。管理器按准确
+  AHK PID/完整路径随游戏结束而停止，异常退出时重新拉起；游戏前台时启用，离开前台时
+  通过 AHK 标准暂停命令失活。
+- 新增 `LICENSES/User-AHK_F-NOTICE.md` 记录所有者授权、二进制身份和许可证边界；
+  不把该成品纳入仓库根 MIT，也不声称它对应当前 AutoHotkey 仓库版本。
+- 普通全量测试及 `internal/input`、`internal/shell`、`internal/selfupdate` 竞态测试通过；
+  PE、GUI 子系统、清单权限、版本、图标、注入 helper 协议、便携布局和 AHK 固定身份审计
+  通过。
+
+- 文件：`artifacts/release/GenshinTools-1.3.1-windows-amd64-portable.zip`
+- 大小：9,313,056 bytes
+- SHA-256：`978bd811557906f80099e7c1acf05b2453e8aafd87861f87a9a63db14ea08281`
+- 条目数：17；只含一个 `AHK_F.exe`，不含 `.ahk`、AutoHotkey 源码 ZIP 或旧 GPL 副本
+- PE 校验：主程序为 x64 GUI/`requireAdministrator`；输入 worker 与 `AHK_F.exe` 为
+  x86 GUI；注入 helper、更新器为 x64 GUI/`asInvoker`；项目程序版本统一为 `1.3.1`
+
+## 1.3.2 完整审计与顺序修复
+
+- 键盘连发仅在已核验游戏进程存在后创建独立 x86 worker，并通过用户安装的
+  Interception 驱动提交扫描码；驱动写入失败会保留首个根因、使 helper 非零退出并由
+  主程序显示，不再静默变成“输出计数增长但游戏无输入”。每个连发键另有独立 generation
+  围栏，配置切换后快速重新按下时，旧睡眠循环不能加入新一轮输出。
+- AHK 管理改为记录 PID、规范化完整路径和进程创建时间，避免 PID 复用误判。便携
+  AHK 被纳入 `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`，启动器异常退出也不会长期遗留；
+  启动前等待游戏前台，启动后每 100ms 按前台状态切换 AHK Suspend。
+- 旧版成品中确认存在 `AutoHotkey v1.0.48.05` 运行时标记。所有者授权继续覆盖其
+  成品/脚本部分，运行时则按 GPL-2.0 随包提供许可证
+  `LICENSES/AutoHotkey-v1.0-GPL-2.0.txt` 和对应官方标签源码
+  `SOURCES/AutoHotkey-v1.0.48.05-source.zip`；构建、成品校验、升级白名单及测试夹具均
+  把二者列为必需文件并固定核验 SHA-256。
+- 构建结束无论成功失败都删除四个生成的 `.syso`，避免管理员清单污染后续
+  `go test`。S02/S05 自动化改用独立 asInvoker GUI harness 和独立单实例命名，正式
+  `requireAdministrator` 清单由 PE 审计覆盖，测试不再弹 UAC、遗留高权限进程或锁住
+  `dist`。
+- `./scripts/test-s13-release.ps1 -ShellIterations 1 -SkipOnlineProvider` 自动化短矩阵
+  于 2026-07-26 通过：全量测试、`-race`、格式、vet、确定性构建、PE/图标/清单、
+  S02 生命周期、S05 真实进程参数、S09 helper/注入边界、升级包和环境隔离均通过。
+  当前执行终端为 Medium integrity，Interception 真驱动输出因此明确跳过；自动化桌面
+  抢占前台时鼠标捕获也明确跳过。这两项以及真实原神消费仍属于下方人工门禁，未误标为
+  实机通过。
+
+- 文件：`artifacts/release/GenshinTools-1.3.2-windows-amd64-portable.zip`
+- 大小：10,876,460 bytes
+- SHA-256：`8b3cfc21e1fad7b2ceba5c445326c26655b0369c50f2077c5e81d49d8475c1cc`
+- 条目数：19；不含 Debug EXE、运行数据、日志、缓存、`.ahk`、驱动、Interception
+  DLL/安装器或 FlairBloom 源码
+- AHK_F SHA-256：`09ae8c2a0eb2a5636231a4a228f89502bcce5c682d52b10ca803b8fef9cad2f5`
+- AutoHotkey v1.0.48.05 源码 SHA-256：
+  `fd9d629dbd742cbe1e14c530dd092e32d4ba2a058b97d69d935ea340b61b8c39`
+- GPL-2.0 文本 SHA-256：
+  `2f37ec8a6e912402a7d79ea03e5e33eacf54d1bf1fc7e3b0eab3a69bd8b23252`
+
 ## 尚未关闭的人工门禁
 
 1. 真实原神/反作弊环境下的输入、截图、覆盖层、启动和可选插件/注入组合。

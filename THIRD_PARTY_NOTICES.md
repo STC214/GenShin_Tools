@@ -62,31 +62,38 @@ The Go toolchain and GNU `windres` are build-time tools and are not redistribute
 
 The integration audits the user-installed URL handler and asks Windows to open the protocol. It never terminates a process merely because its executable name is `BetterGI`.
 
-## QuickInput and AutoHotkey
+## QuickInput and project-owner AHK_F
 
 - QuickInput project: ChiyukiGana/Quickinput
 - Source: <https://github.com/ChiyukiGana/Quickinput>
 - Source commit inspected: `95fb003efead7c54d4678949bed765e395f5ccb2`
 - QuickInput license: GPL-3.0
 - Role: behavioral and Win32 API-shape reference for separated mouse down/up events
-- AutoHotkey project: AutoHotkey/AutoHotkey
-- Source and releases: <https://github.com/AutoHotkey/AutoHotkey>
-- Pinned release: `v1.1.37.02`
-- License: GPL-2.0
-- Redistributed runtime: official release file `AutoHotkeyU32.exe`, renamed to `AHK_F.exe`
-- Runtime SHA-256: `ba35b8b4346b79b8bb4f97360025cb6befaf501b03149a3b5fef8f07bdf265c7`
-- Complete corresponding source: `SOURCES/AutoHotkey-v1.1.37.02-source.zip`
-- Source archive SHA-256: `2b1d94e5d9b94b6a6dc3a2565bc65e74fef93ac2c34bb57fe182ffb4ab20fe92`
-- License copy: `LICENSES/AutoHotkey-GPL-2.0.txt`
-- Project-owned script: `AHK_F.ahk`; this script is covered by the repository's MIT license
-- Project-owned script SHA-256: `ce1e29cf5ca21dd0fa99840db895c9eea66e76721c0238d33bcb1e072d17ea4b`
+- Redistributed utility: project-owner supplied legacy compiled `AHK_F.exe`
+- Role: optional keyboard repeater managed with the verified game lifetime and foreground state
+- File version: `1.6.0`
+- File description: `连发工具`
+- Architecture/subsystem: x86 Windows GUI
+- Size: `422139` bytes
+- SHA-256: `09ae8c2a0eb2a5636231a4a228f89502bcce5c682d52b10ca803b8fef9cad2f5`
+- Authenticode: unsigned
+- Distribution notice: `LICENSES/User-AHK_F-NOTICE.md`
+- Embedded runtime: AutoHotkey v1.0.48.05
+- Runtime license: GPL-2.0
+- Runtime license copy: `LICENSES/AutoHotkey-v1.0-GPL-2.0.txt`
+- Corresponding source: `SOURCES/AutoHotkey-v1.0.48.05-source.zip`
+- Upstream source tag: <https://github.com/AutoHotkey/AutoHotkey-v1.0/tree/v1.0.48.05>
 
-The portable package redistributes the pinned official AutoHotkey interpreter under
-GPL-2.0 and includes its complete corresponding source and license text. The
-previously inspected user-provided compiled `AHK_F.exe`/`AHK_Space.exe` tools have
-opaque appended scripts and unclear redistribution permission, so they are not
-committed or packaged. QuickInput remains a behavioral reference only; none of its
-source code or binaries is redistributed.
+The project owner created this compiled utility with a legacy generator around ten
+years ago and has explicitly authorized copying the finished binary into this
+repository and portable package. That authorization covers the finished utility
+and compiled script; its embedded AutoHotkey v1.0.48.05 runtime remains under
+GPL-2.0. The portable package carries the matching license and exact official tag
+source archive. It does not claim that the utility was generated from the current
+AutoHotkey repository or a current release. The former replacement AutoHotkey
+v1.1.37.02 interpreter and separate repository `AHK_F.ahk` are no longer bundled.
+QuickInput remains a behavioral reference only; none of its source code or binaries
+is redistributed.
 
 ## PresentMon
 
@@ -105,9 +112,10 @@ source code or binaries is redistributed.
 - FlairBloom license: CC BY-NC-SA 4.0 (workspace metadata also marks the crates `UNLICENSED`)
 - Interception project: oblitum/Interception
 - Source and release: <https://github.com/oblitum/Interception>
+- Audited source commit: `39eecbbc46a52e0402f783b872ef62b0254a896a`
 - Audited Interception release: `v1.0.1`
 - Interception license: LGPL-3.0 for non-commercial use; separate commercial licenses are offered upstream
-- Role: behavioral and API-boundary research for an independently designed optional driver input backend
+- Role: behavioral and public device-protocol reference for an independently implemented optional driver input backend
 - Redistribution: no FlairBloom or Interception source, driver, DLL, installer, UI asset, or binary is packaged by this project
 
 The complete FlairBloom source is present only in the Git-ignored local research

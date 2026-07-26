@@ -8,10 +8,29 @@ Set-StrictMode -Version Latest
 
 $ProjectRoot = Split-Path -Parent $PSScriptRoot
 . (Join-Path $PSScriptRoot 'environment.ps1')
-$EnvironmentNames = @('GENSHINTOOLS_S02_AUTOCLOSE_MS', 'GENSHINTOOLS_S02_READY_FILE', 'GENSHINTOOLS_S02_ACTIVATED_FILE')
+$EnvironmentNames = @('GENSHINTOOLS_S02_AUTOCLOSE_MS', 'GENSHINTOOLS_S02_READY_FILE', 'GENSHINTOOLS_S02_ACTIVATED_FILE', 'GENSHINTOOLS_S02_INSTANCE_SUFFIX')
 $PreviousEnvironment = Save-ProcessEnvironment -Names $EnvironmentNames
-$Executable = (Resolve-Path (Join-Path $ProjectRoot 'dist\GenshinTools.exe')).Path
-$DataDirectory = Join-Path $ProjectRoot 'dist\data'
+$env:GENSHINTOOLS_S02_INSTANCE_SUFFIX = "test-$PID-$([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds())"
+$HarnessRoot = Join-Path $ProjectRoot 'build\s02-shell'
+$ResourcePath = Join-Path $ProjectRoot 'cmd\genshin-tools\app.syso'
+if (Test-Path -LiteralPath $ResourcePath) {
+    throw 'S02 asInvoker harness cannot be built while the generated requireAdministrator app.syso is present'
+}
+if (Test-Path -LiteralPath $HarnessRoot) {
+    Remove-Item -LiteralPath $HarnessRoot -Recurse -Force
+}
+New-Item -ItemType Directory -Force -Path $HarnessRoot | Out-Null
+$Executable = Join-Path $HarnessRoot 'GenshinTools-s02.exe'
+Push-Location $ProjectRoot
+try {
+    & go build -trimpath -buildvcs=false -ldflags '-H=windowsgui -s -w' -o $Executable ./cmd/genshin-tools
+    if ($LASTEXITCODE -ne 0) {
+        throw "S02 asInvoker GUI harness build failed with code $LASTEXITCODE"
+    }
+} finally {
+    Pop-Location
+}
+$DataDirectory = Join-Path $HarnessRoot 'data'
 $ReadyFile = Join-Path $DataDirectory 's02-ready.tmp'
 $ActivatedFile = Join-Path $DataDirectory 's02-activated.tmp'
 $ConfigFile = Join-Path $DataDirectory 'config.json'
@@ -108,7 +127,7 @@ try {
         throw 'Clean shutdown left session.marker behind'
     }
     $Configuration = Get-Content -LiteralPath $ConfigFile -Raw -Encoding UTF8 | ConvertFrom-Json
-    if ($Configuration.schemaVersion -ne 9 -or $null -eq $Configuration.input -or $null -eq $Configuration.plugins -or $null -eq $Configuration.shell) {
+    if ($Configuration.schemaVersion -ne 10 -or $null -eq $Configuration.input -or $null -eq $Configuration.plugins -or $null -eq $Configuration.shell) {
         throw 'Unexpected config schema after clean shutdown'
     }
     $Entries = @(Get-Content -LiteralPath $LogFile -Encoding UTF8 | ForEach-Object { $_ | ConvertFrom-Json })

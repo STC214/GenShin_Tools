@@ -22,9 +22,9 @@ $ManifestPath = Join-Path $ProjectRoot 'assets\app.manifest'
 $HelperManifestPath = Join-Path $ProjectRoot 'assets\helper.manifest'
 $InputHelperManifestPath = Join-Path $ProjectRoot 'assets\input-helper.manifest'
 $BundledAHKRoot = Join-Path $ProjectRoot 'third_party\autohotkey'
-$BundledAHKRuntimeHash = 'ba35b8b4346b79b8bb4f97360025cb6befaf501b03149a3b5fef8f07bdf265c7'
-$BundledAHKScriptHash = 'ce1e29cf5ca21dd0fa99840db895c9eea66e76721c0238d33bcb1e072d17ea4b'
-$BundledAHKSourceHash = '2b1d94e5d9b94b6a6dc3a2565bc65e74fef93ac2c34bb57fe182ffb4ab20fe92'
+$BundledAHKRuntimeHash = '09ae8c2a0eb2a5636231a4a228f89502bcce5c682d52b10ca803b8fef9cad2f5'
+$BundledAHKSourceHash = 'fd9d629dbd742cbe1e14c530dd092e32d4ba2a058b97d69d935ea340b61b8c39'
+$BundledAHKLicenseHash = '2f37ec8a6e912402a7d79ea03e5e33eacf54d1bf1fc7e3b0eab3a69bd8b23252'
 $ResourcePath = Join-Path $ProjectRoot 'cmd\genshin-tools\app.syso'
 $HelperResourcePath = Join-Path $ProjectRoot 'cmd\injection-helper\app.syso'
 $InputHelperResourcePath = Join-Path $ProjectRoot 'cmd\input-helper\app.syso'
@@ -274,23 +274,20 @@ END
     Copy-Item -LiteralPath (Join-Path $ProjectRoot 'LICENSE_POLICY.md') -Destination $DistDir -Force
     Copy-Item -LiteralPath (Join-Path $ProjectRoot 'LICENSES') -Destination $DistDir -Recurse -Force
     $BundledAHKRuntime = Join-Path $BundledAHKRoot 'AHK_F.exe'
-    $BundledAHKScript = Join-Path $BundledAHKRoot 'AHK_F.ahk'
-    $BundledAHKSource = Join-Path $BundledAHKRoot 'AutoHotkey-v1.1.37.02-source.zip'
-    $BundledAHKLicense = Join-Path $BundledAHKRoot 'LICENSE-GPL-2.0.txt'
+    $BundledAHKSource = Join-Path $BundledAHKRoot 'AutoHotkey-v1.0.48.05-source.zip'
+    $BundledAHKLicense = Join-Path $ProjectRoot 'LICENSES\AutoHotkey-v1.0-GPL-2.0.txt'
     if ((Get-FileHash -Algorithm SHA256 $BundledAHKRuntime).Hash.ToLowerInvariant() -ne $BundledAHKRuntimeHash) {
-        throw 'bundled AutoHotkey runtime hash does not match the audited v1.1.37.02 x86 binary'
-    }
-    if ((Get-FileHash -Algorithm SHA256 $BundledAHKScript).Hash.ToLowerInvariant() -ne $BundledAHKScriptHash) {
-        throw 'bundled AutoHotkey script hash does not match the audited project source'
+        throw 'bundled project-owner AHK_F.exe hash does not match the audited binary'
     }
     if ((Get-FileHash -Algorithm SHA256 $BundledAHKSource).Hash.ToLowerInvariant() -ne $BundledAHKSourceHash) {
-        throw 'bundled AutoHotkey source archive hash does not match the audited v1.1.37.02 source'
+        throw 'AutoHotkey v1.0.48.05 corresponding source hash does not match the audited archive'
     }
-    New-Item -ItemType Directory -Force -Path (Join-Path $DistDir 'SOURCES') | Out-Null
+    if ((Get-FileHash -Algorithm SHA256 $BundledAHKLicense).Hash.ToLowerInvariant() -ne $BundledAHKLicenseHash) {
+        throw 'AutoHotkey v1.0 GPL-2.0 license hash does not match the audited text'
+    }
     Copy-Item -LiteralPath $BundledAHKRuntime -Destination (Join-Path $DistDir 'AHK_F.exe') -Force
-    Copy-Item -LiteralPath $BundledAHKScript -Destination (Join-Path $DistDir 'AHK_F.ahk') -Force
-    Copy-Item -LiteralPath $BundledAHKSource -Destination (Join-Path $DistDir 'SOURCES\AutoHotkey-v1.1.37.02-source.zip') -Force
-    Copy-Item -LiteralPath $BundledAHKLicense -Destination (Join-Path $DistDir 'LICENSES\AutoHotkey-GPL-2.0.txt') -Force
+    New-Item -ItemType Directory -Force -Path (Join-Path $DistDir 'SOURCES') | Out-Null
+    Copy-Item -LiteralPath $BundledAHKSource -Destination (Join-Path $DistDir 'SOURCES\AutoHotkey-v1.0.48.05-source.zip') -Force
 
     $BuildInfo = [ordered]@{
         product       = 'Genshin Tools'
@@ -308,6 +305,12 @@ END
     $BuiltFiles | ForEach-Object { Write-Host "  $_" }
 } finally {
     Pop-Location
+    # Resource objects carry executable manifests. Leaving them beside package
+    # sources makes a later `go test ./...` inherit requireAdministrator and
+    # fail to start from a normal developer shell.
+    foreach ($GeneratedResource in @($ResourcePath, $HelperResourcePath, $InputHelperResourcePath, $UpdaterResourcePath)) {
+        Remove-Item -LiteralPath $GeneratedResource -Force -ErrorAction SilentlyContinue
+    }
     foreach ($Name in $BuildEnvironmentNames) {
         [Environment]::SetEnvironmentVariable($Name, $PreviousBuildEnvironment[$Name], 'Process')
     }

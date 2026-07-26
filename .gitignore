@@ -14,9 +14,10 @@
 *.7z
 *.rar
 
-# Audited redistributable AutoHotkey runtime and corresponding GPL source.
+# Audited project-owner binary and the exact upstream source for its embedded
+# AutoHotkey v1.0.48.05 runtime.
 !/third_party/autohotkey/AHK_F.exe
-!/third_party/autohotkey/AutoHotkey-v1.1.37.02-source.zip
+!/third_party/autohotkey/AutoHotkey-v1.0.48.05-source.zip
 
 # Project-local Go caches and temporary files
 /.cache/

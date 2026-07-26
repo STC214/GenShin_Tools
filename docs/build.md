@@ -37,11 +37,14 @@ Generate and reopen a deterministic S12-compatible portable ZIP with a SHA-256 s
 ./scripts/package-portable.ps1
 ```
 
-From `1.2.0`, the portable package also contains the pinned official AutoHotkey
-v1.1.37.02 x86 runtime as `AHK_F.exe`, the project-owned `AHK_F.ahk`,
-`LICENSES/AutoHotkey-GPL-2.0.txt`, and the complete corresponding source archive
-at `SOURCES/AutoHotkey-v1.1.37.02-source.zip`. Build and artifact verification
-reject missing or hash-mismatched runtime, script, license, or source files.
+From `1.3.2`, the portable package contains the project-owner supplied legacy
+compiled `AHK_F.exe` and its distribution notice. Binary inspection identifies
+an embedded AutoHotkey v1.0.48.05 runtime, so the package also carries
+`LICENSES/AutoHotkey-v1.0-GPL-2.0.txt` and the exact official corresponding source
+at `SOURCES/AutoHotkey-v1.0.48.05-source.zip`. It does not use a separate `.ahk`
+file or the former replacement v1.1.37.02 runtime. Build, runtime launch, artifact
+verification and update staging reject missing or hash-mismatched required
+materials.
 
 Run the complete short S13 automated release matrix:
 
