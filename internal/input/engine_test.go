@@ -76,6 +76,7 @@ func TestOutputTargetLossDisablesWithoutFault(t *testing.T) {
 	}
 	defer engine.Close()
 	config := DefaultConfig()
+	config.Mode = ModeKeyboard
 	config.Enabled = true
 	if err := engine.Configure(config); err != nil {
 		t.Fatal(err)
@@ -96,6 +97,7 @@ func TestKeyboardRepeatFollowsTheRepeatedKeyAndStopsOnRelease(t *testing.T) {
 	injector := &fakeInjector{}
 	engine, _ := NewEngine(injector, nil)
 	config := DefaultConfig()
+	config.Mode = ModeKeyboard
 	config.Enabled = true
 	config.Interval = 10 * time.Millisecond
 	if err := engine.Configure(config); err != nil {
@@ -127,6 +129,7 @@ func TestShortTapEmitsImmediatelyBeforeKeyUp(t *testing.T) {
 		t.Fatal(err)
 	}
 	config := DefaultConfig()
+	config.Mode = ModeKeyboard
 	config.Enabled = true
 	config.Interval = 5 * time.Second
 	if err := engine.Configure(config); err != nil {
@@ -197,6 +200,7 @@ func TestMultipleRepeatKeysRunIndependently(t *testing.T) {
 		t.Fatal(err)
 	}
 	config := DefaultConfig()
+	config.Mode = ModeKeyboard
 	config.Enabled = true
 	config.Interval = 5 * time.Millisecond
 	config.RepeatKeys = NewKeyList('F', 'G')
@@ -278,6 +282,7 @@ func TestOneMillisecondKeyboardCadence(t *testing.T) {
 	injector := &fakeInjector{}
 	engine, _ := NewEngine(injector, nil)
 	config := DefaultConfig()
+	config.Mode = ModeKeyboard
 	config.Enabled = true
 	config.Interval = time.Millisecond
 	if err := engine.Configure(config); err != nil {
@@ -325,7 +330,6 @@ func TestIndependentToggleKeysSelectAndDisableTheirOwnModes(t *testing.T) {
 		key  uint32
 		mode Mode
 	}{
-		{config.KeyboardToggleKey, ModeKeyboard},
 		{config.MouseLeftToggleKey, ModeMouseLeft},
 		{config.MouseRightToggleKey, ModeMouseRight},
 	}
@@ -356,8 +360,8 @@ func TestToggleAndStopKeysMustAllBeDistinct(t *testing.T) {
 	}
 	config = DefaultConfig()
 	config.RepeatKeys = NewKeyList(config.KeyboardToggleKey)
-	if _, err := config.Normalized(); err == nil {
-		t.Fatal("accepted repeat key matching keyboard toggle")
+	if _, err := config.Normalized(); err != nil {
+		t.Fatalf("retired keyboard fields still reserved a hidden shortcut: %v", err)
 	}
 }
 
@@ -382,6 +386,7 @@ func TestInjectionFailureEntersFault(t *testing.T) {
 	injector := &fakeInjector{failAt: 1}
 	engine, _ := NewEngine(injector, nil)
 	config := DefaultConfig()
+	config.Mode = ModeKeyboard
 	config.Enabled = true
 	if err := engine.Configure(config); err != nil {
 		t.Fatal(err)
@@ -402,7 +407,7 @@ func TestConfigAcceptsOneMillisecondAndRejectsUnsafeIntervals(t *testing.T) {
 		t.Fatalf("one millisecond interval rejected: normalized=%+v err=%v", normalized, err)
 	}
 	for _, config := range []Config{
-		{Mode: ModeKeyboard, OutputKey: 'B', StopKey: 'B', Interval: 50 * time.Millisecond},
+		{Mode: ModeMouseLeft, StopKey: 'B', MouseLeftToggleKey: 'B', Interval: 50 * time.Millisecond},
 		{Mode: ModeKeyboard, OutputKey: 'B', StopKey: 'C', Interval: 500 * time.Microsecond},
 		{Mode: ModeKeyboard, OutputKey: 'B', StopKey: 'C', Interval: 5001 * time.Millisecond},
 	} {
@@ -416,6 +421,7 @@ func TestRapidTriggerAndEnableDisableStress(t *testing.T) {
 	injector := &fakeInjector{}
 	engine, _ := NewEngine(injector, nil)
 	config := DefaultConfig()
+	config.Mode = ModeKeyboard
 	config.Enabled = true
 	config.Interval = 10 * time.Millisecond
 	if err := engine.Configure(config); err != nil {

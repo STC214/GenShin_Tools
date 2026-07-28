@@ -219,13 +219,11 @@ func migrateAndValidate(settings *Settings) error {
 	if err != nil {
 		return fmt.Errorf("capture settings: %w", err)
 	}
-	inputKeys := settings.Input.RepeatKeys.Slice()
-	inputKeys = append(inputKeys,
+	inputKeys := []uint32{
 		settings.Input.StopKey,
-		settings.Input.KeyboardToggleKey,
 		settings.Input.MouseLeftToggleKey,
 		settings.Input.MouseRightToggleKey,
-	)
+	}
 	if normalizedCapture.ConflictsWith(inputKeys...) {
 		return errors.New("screenshot hotkey conflicts with an input enhancement physical key")
 	}

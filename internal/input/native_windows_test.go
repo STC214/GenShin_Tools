@@ -256,6 +256,7 @@ func TestCaptureModeSuppressesGlobalStopFromHookAndPolling(t *testing.T) {
 		t.Fatal(err)
 	}
 	config := DefaultConfig()
+	config.Mode = ModeKeyboard
 	config.Enabled = true
 	if err := engine.Configure(config); err != nil {
 		t.Fatal(err)
@@ -441,6 +442,7 @@ func TestHookConfirmedRepeatHoldOutranksInjectedPollingUp(t *testing.T) {
 		t.Fatal(err)
 	}
 	config := DefaultConfig()
+	config.Mode = ModeKeyboard
 	config.Enabled = true
 	config.Interval = 5 * time.Millisecond
 	if err := engine.Configure(config); err != nil {
@@ -489,6 +491,7 @@ func TestHookOwnershipClearsWhenInputSessionStopsOrReconfigures(t *testing.T) {
 	}
 	n := &Native{engine: engine, foreground: func() windows.HWND { return 0 }}
 	config := DefaultConfig()
+	config.Mode = ModeKeyboard
 	config.Enabled = true
 	if err := n.Configure(config); err != nil {
 		t.Fatal(err)
@@ -580,6 +583,7 @@ func TestNativeRetiresBuiltInKeyboardConfiguration(t *testing.T) {
 	}
 	defer n.Close()
 	config := DefaultConfig()
+	config.Mode = ModeKeyboard
 	config.Enabled = true
 	config.Interval = 5 * time.Millisecond
 	if err := n.Configure(config); err != nil {
@@ -630,6 +634,56 @@ func TestKeyboardEventsRemainHeldUntilPostLaunchGate(t *testing.T) {
 	n.keyboardReady.Store(true)
 	if n.keyboardInputHeldForLaunch() {
 		t.Fatal("released post-launch gate still held keyboard input")
+	}
+}
+
+func TestMouseModeRemainsArmedUntilPostLaunchGate(t *testing.T) {
+	injector := &fakeInjector{}
+	engine, err := NewEngine(injector, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+	var foreground atomic.Uintptr
+	foreground.Store(2)
+	n := &Native{
+		engine:         engine,
+		monitorStop:    make(chan struct{}),
+		monitorDone:    make(chan struct{}),
+		foreground:     func() windows.HWND { return windows.HWND(foreground.Load()) },
+		windowPID:      func(window windows.HWND) uint32 { return uint32(window) },
+		processCreated: func(processID uint32) int64 { return int64(processID) * 10 },
+	}
+	n.SetGameProcesses([]GameProcess{{PID: 1, CreationTime: 10}})
+	config := DefaultConfig()
+	config.Mode = ModeMouseLeft
+	config.Enabled = true
+	if err := engine.Configure(config); err != nil {
+		t.Fatal(err)
+	}
+	n.updateActivationTargets(StateDisabled, engine.Snapshot())
+	go n.safetyMonitor()
+	defer func() {
+		close(n.monitorStop)
+		<-n.monitorDone
+	}()
+
+	foreground.Store(1)
+	time.Sleep(mouseTargetStableFor + 150*time.Millisecond)
+	if snapshot := engine.Snapshot(); snapshot.State != StateArmed || !snapshot.Config.Enabled {
+		t.Fatalf("post-launch gate changed armed mouse session: %+v", snapshot)
+	}
+	if emits, _ := injector.counts(); emits != 0 {
+		t.Fatalf("mouse emitted %d pairs before post-launch gate", emits)
+	}
+
+	n.keyboardReady.Store(true)
+	deadline := time.Now().Add(2 * time.Second)
+	for engine.Snapshot().State != StateRunning && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if snapshot := engine.Snapshot(); snapshot.State != StateRunning || !snapshot.Config.Enabled {
+		t.Fatalf("mouse did not start after post-launch gate: %+v", snapshot)
 	}
 }
 
@@ -906,6 +960,7 @@ func TestForegroundChangeStopsRunningEngine(t *testing.T) {
 		engine.Close()
 	}()
 	config := DefaultConfig()
+	config.Mode = ModeKeyboard
 	config.Enabled = true
 	if err := engine.Configure(config); err != nil {
 		t.Fatal(err)

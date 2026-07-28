@@ -20,10 +20,9 @@ func TestPackageReleaseCreatesVerifiedDeterministicPortableZIP(t *testing.T) {
 		"AHK_F.exe":                                "project-owner supplied legacy utility",
 		"GenshinTools.exe":                         "main",
 		"GenshinTools-injector.exe":                "injector",
-		"GenshinTools-input.exe":                   "input",
 		"GenshinTools-updater.exe":                 "updater",
 		"SOURCES/AutoHotkey-v1.0.48.05-source.zip": "corresponding source",
-		"build-info.json":                          `{"version":"1.2.3","target":"windows/amd64"}`,
+		"build-info.json":                          `{"version":"1.2.3","target":"windows/amd64","commit":"0123456789ab"}`,
 		"LICENSE":                                  "MIT",
 		"LICENSES/AutoHotkey-v1.0-GPL-2.0.txt":     "GPL-2.0",
 		"LICENSES/User-AHK_F-NOTICE.md":            "project owner distribution notice",
@@ -83,7 +82,7 @@ func TestPackageReleaseRejectsMissingLicenseDirectory(t *testing.T) {
 
 func TestVerifyBuildInfoAcceptsUTF8BOMAndRejectsTrailingJSON(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "build-info.json")
-	valid := append([]byte{0xEF, 0xBB, 0xBF}, []byte(`{"version":"1.2.3","target":"windows/amd64","commit":"fixture"}`)...)
+	valid := append([]byte{0xEF, 0xBB, 0xBF}, []byte(`{"version":"1.2.3","target":"windows/amd64","commit":"0123456789ab"}`)...)
 	if err := os.WriteFile(path, valid, 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -95,5 +94,11 @@ func TestVerifyBuildInfoAcceptsUTF8BOMAndRejectsTrailingJSON(t *testing.T) {
 	}
 	if err := verifyBuildInfo(path, "1.2.3"); err == nil {
 		t.Fatal("trailing build-info JSON was accepted")
+	}
+	if err := os.WriteFile(path, []byte(`{"version":"1.2.3","target":"windows/amd64","commit":"0123456789ab-dirty"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyBuildInfo(path, "1.2.3"); err == nil {
+		t.Fatal("dirty build provenance was accepted")
 	}
 }

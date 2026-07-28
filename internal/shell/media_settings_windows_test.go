@@ -162,6 +162,44 @@ func TestProductInputModesExcludeBuiltInKeyboardRepeat(t *testing.T) {
 	}
 }
 
+func TestAHKRetryDelayIsBoundedAndErrorIsVisible(t *testing.T) {
+	delay := time.Duration(0)
+	for range 10 {
+		delay = nextAHKRetryDelay(delay)
+	}
+	if delay != ahkRetryMaximumDelay {
+		t.Fatalf("AHK retry delay = %s, want %s", delay, ahkRetryMaximumDelay)
+	}
+	app := &application{}
+	app.setAHKStartError("AHK hash mismatch")
+	if got := app.ahkStartErrorText(); got != "AHK hash mismatch" {
+		t.Fatalf("AHK UI error = %q", got)
+	}
+	app.setAHKStartError("")
+	if got := app.ahkStartErrorText(); got != "" {
+		t.Fatalf("cleared AHK UI error = %q", got)
+	}
+}
+
+func TestRetiredInputWorkerIsRemovedFromUpgradeRoot(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "GenshinTools-input.exe")
+	if err := os.WriteFile(path, []byte("retired"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	removed, err := removeRetiredInputWorker(root)
+	if err != nil || !removed {
+		t.Fatalf("remove retired worker: removed=%t err=%v", removed, err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("retired worker still exists: %v", err)
+	}
+	removed, err = removeRetiredInputWorker(root)
+	if err != nil || removed {
+		t.Fatalf("idempotent retired worker cleanup: removed=%t err=%v", removed, err)
+	}
+}
+
 func TestInputPageMinimumHeightAlsoAppliesToRestoredBounds(t *testing.T) {
 	got := enforceMinimumWindowSize(config.WindowConfig{Width: 320, Height: 560})
 	if got.Width != minimumWindowWidth || got.Height != minimumWindowHeight {

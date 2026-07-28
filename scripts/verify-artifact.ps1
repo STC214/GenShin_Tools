@@ -40,7 +40,6 @@ $Expected = @(
     @{ Path = (Join-Path $DistDirectory 'GenshinTools-debug.exe'); Subsystem = 3; Machine = 0x8664; Name = 'console x64'; Elevation = 'requireAdministrator' }
     @{ Path = (Join-Path $DistDirectory 'GenshinTools.exe'); Subsystem = 2; Machine = 0x8664; Name = 'windows-gui x64'; Elevation = 'requireAdministrator' }
     @{ Path = (Join-Path $DistDirectory 'GenshinTools-injector.exe'); Subsystem = 2; Machine = 0x8664; Name = 'windows-gui injection-helper x64'; Elevation = 'asInvoker' }
-    @{ Path = (Join-Path $DistDirectory 'GenshinTools-input.exe'); Subsystem = 2; Machine = 0x014c; Name = 'windows-gui input-helper x86'; Elevation = 'asInvoker' }
     @{ Path = (Join-Path $DistDirectory 'GenshinTools-updater.exe'); Subsystem = 2; Machine = 0x8664; Name = 'windows-gui update-helper x64'; Elevation = 'asInvoker' }
 )
 
@@ -113,7 +112,8 @@ foreach ($Relative in $RequiredDirectories) {
 
 $BuildInfoPath = Join-Path $DistDirectory 'build-info.json'
 $BuildInfo = Get-Content -LiteralPath $BuildInfoPath -Raw -Encoding UTF8 | ConvertFrom-Json
-if ($BuildInfo.version -ne $Version -or $BuildInfo.target -ne 'windows/amd64') {
+if ($BuildInfo.version -ne $Version -or $BuildInfo.target -ne 'windows/amd64' -or
+    [string]$BuildInfo.commit -notmatch '^[0-9A-Fa-f]{12,40}$') {
     throw "Unexpected build-info.json contents"
 }
 Write-Host "Verified portable data layout and build-info.json"

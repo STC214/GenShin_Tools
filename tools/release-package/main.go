@@ -27,7 +27,10 @@ const (
 	maxReleaseBytes     = 512 << 20
 )
 
-var versionPattern = regexp.MustCompile(`^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$`)
+var (
+	versionPattern     = regexp.MustCompile(`^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$`)
+	cleanCommitPattern = regexp.MustCompile(`(?i)^[0-9a-f]{12,40}$`)
+)
 
 type options struct {
 	dist    string
@@ -106,7 +109,7 @@ func packageRelease(options options) error {
 }
 
 func collectReleaseFiles(dist, version string) ([]sourceFile, selfupdate.PackageManifest, error) {
-	names := []string{"AHK_F.exe", "GenshinTools.exe", "GenshinTools-injector.exe", "GenshinTools-input.exe", "GenshinTools-updater.exe", "SOURCES/AutoHotkey-v1.0.48.05-source.zip", "build-info.json", "LICENSE", "LICENSE_POLICY.md", "THIRD_PARTY_NOTICES.md"}
+	names := []string{"AHK_F.exe", "GenshinTools.exe", "GenshinTools-injector.exe", "GenshinTools-updater.exe", "SOURCES/AutoHotkey-v1.0.48.05-source.zip", "build-info.json", "LICENSE", "LICENSE_POLICY.md", "THIRD_PARTY_NOTICES.md"}
 	licensesRoot := filepath.Join(dist, "LICENSES")
 	if err := rejectReparse(licensesRoot); err != nil {
 		return nil, selfupdate.PackageManifest{}, fmt.Errorf("licenses directory: %w", err)
@@ -163,11 +166,13 @@ func verifyBuildInfo(path, version string) error {
 	var info struct {
 		Version string `json:"version"`
 		Target  string `json:"target"`
+		Commit  string `json:"commit"`
 	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	// build-info intentionally carries additional audited build fields.
-	if err := decoder.Decode(&info); err != nil || info.Version != version || info.Target != "windows/amd64" {
-		return errors.New("build-info.json does not match package version/target")
+	if err := decoder.Decode(&info); err != nil || info.Version != version || info.Target != "windows/amd64" ||
+		!cleanCommitPattern.MatchString(info.Commit) {
+		return errors.New("build-info.json does not match package version/target or a clean Git commit")
 	}
 	if err := decoder.Decode(&struct{}{}); err != io.EOF {
 		return errors.New("build-info.json contains trailing JSON")

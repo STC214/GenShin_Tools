@@ -78,7 +78,7 @@ type Config struct {
 
 func DefaultConfig() Config {
 	return Config{
-		Mode:                ModeKeyboard,
+		Mode:                ModeMouseLeft,
 		TriggerKey:          EncodeKeyCode('F', false),
 		OutputKey:           EncodeKeyCode('F', false),
 		RepeatKeys:          NewKeyList(EncodeKeyCode('F', false)),
@@ -102,6 +102,23 @@ func (c Config) Normalized() (Config, error) {
 	}
 	c.IntervalMS = int(c.Interval / time.Millisecond)
 	defaults := DefaultConfig()
+	if !BuiltInKeyboardRepeatEnabled {
+		// Retired fields must not reserve invisible shortcuts or make a
+		// current mouse/AHK configuration impossible to load. Preserve valid
+		// historical values for diagnostics, but repair malformed hidden data
+		// rather than rejecting the active product configuration.
+		if !ValidKeyCode(NormalizeKeyCode(c.KeyboardToggleKey)) {
+			c.KeyboardToggleKey = defaults.KeyboardToggleKey
+		}
+		if c.RepeatKeys.Present() {
+			for _, key := range c.RepeatKeys.Slice() {
+				if !ValidKeyCode(NormalizeKeyCode(key)) {
+					c.RepeatKeys = defaults.RepeatKeys
+					break
+				}
+			}
+		}
+	}
 	if c.KeyboardToggleKey == 0 {
 		c.KeyboardToggleKey = defaults.KeyboardToggleKey
 	}
@@ -115,7 +132,10 @@ func (c Config) Normalized() (Config, error) {
 	c.KeyboardToggleKey = NormalizeKeyCode(c.KeyboardToggleKey)
 	c.MouseLeftToggleKey = NormalizeKeyCode(c.MouseLeftToggleKey)
 	c.MouseRightToggleKey = NormalizeKeyCode(c.MouseRightToggleKey)
-	keys := []uint32{c.StopKey, c.KeyboardToggleKey, c.MouseLeftToggleKey, c.MouseRightToggleKey}
+	keys := []uint32{c.StopKey, c.MouseLeftToggleKey, c.MouseRightToggleKey}
+	if BuiltInKeyboardRepeatEnabled {
+		keys = append(keys, c.KeyboardToggleKey)
+	}
 	seen := make(map[uint32]bool, len(keys))
 	for _, key := range keys {
 		if !ValidKeyCode(key) {
@@ -141,10 +161,10 @@ func (c Config) Normalized() (Config, error) {
 		if !ValidKeyCode(key) {
 			return Config{}, errors.New("repeat keys must be valid keyboard keys")
 		}
-		if seen[key] {
+		if BuiltInKeyboardRepeatEnabled && seen[key] {
 			return Config{}, errors.New("repeat keys must differ from stop and toggle keys")
 		}
-		if repeatSeen[key] {
+		if BuiltInKeyboardRepeatEnabled && repeatSeen[key] {
 			return Config{}, errors.New("repeat keys must be different")
 		}
 		repeatSeen[key] = true
@@ -316,7 +336,7 @@ func SameKey(left, right uint32) bool {
 
 func (c Config) ToggleMode(code uint32) (Mode, bool) {
 	switch {
-	case SameKey(code, c.KeyboardToggleKey):
+	case BuiltInKeyboardRepeatEnabled && SameKey(code, c.KeyboardToggleKey):
 		return ModeKeyboard, true
 	case SameKey(code, c.MouseLeftToggleKey):
 		return ModeMouseLeft, true

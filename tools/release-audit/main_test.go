@@ -79,8 +79,11 @@ func TestReadPublicKeyRejectsOversizedFile(t *testing.T) {
 }
 
 func TestVerifyBuildInfoRejectsTrailingJSON(t *testing.T) {
-	if err := verifyBuildInfo([]byte(`{"version":"1.1.0"} {}`), "1.1.0"); err == nil {
+	if err := verifyBuildInfo([]byte(`{"version":"1.1.0","target":"windows/amd64","commit":"0123456789ab"} {}`), "1.1.0"); err == nil {
 		t.Fatal("build-info trailing JSON was accepted")
+	}
+	if err := verifyBuildInfo([]byte(`{"version":"1.1.0","target":"windows/amd64","commit":"0123456789ab-dirty"}`), "1.1.0"); err == nil {
+		t.Fatal("dirty build provenance was accepted")
 	}
 }
 
@@ -88,9 +91,8 @@ func writeAuditZIP(t *testing.T, path string) {
 	t.Helper()
 	files := map[string][]byte{
 		"AHK_F.exe":                                []byte("project-owner supplied legacy utility"),
-		"build-info.json":                          []byte(`{"version":"1.1.0","target":"windows/amd64"}`),
+		"build-info.json":                          []byte(`{"version":"1.1.0","target":"windows/amd64","commit":"0123456789ab"}`),
 		"GenshinTools-injector.exe":                []byte("injector"),
-		"GenshinTools-input.exe":                   []byte("input"),
 		"GenshinTools-updater.exe":                 []byte("updater"),
 		"GenshinTools.exe":                         []byte("main"),
 		"LICENSE":                                  []byte("MIT"),

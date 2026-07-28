@@ -14,6 +14,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -28,7 +29,11 @@ type auditOptions struct {
 
 type buildInfo struct {
 	Version string `json:"version"`
+	Commit  string `json:"commit"`
+	Target  string `json:"target"`
 }
+
+var cleanCommitPattern = regexp.MustCompile(`(?i)^[0-9a-f]{12,40}$`)
 
 func main() { os.Exit(run(os.Args[1:], os.Stdout, os.Stderr)) }
 
@@ -148,8 +153,9 @@ func readBounded(path string, maximum int64) ([]byte, error) {
 func verifyBuildInfo(data []byte, version string) error {
 	var info buildInfo
 	decoder := json.NewDecoder(bytes.NewReader(data))
-	if err := decoder.Decode(&info); err != nil || info.Version != version {
-		return errors.New("build-info.json version does not match the signed manifest")
+	if err := decoder.Decode(&info); err != nil || info.Version != version || info.Target != "windows/amd64" ||
+		!cleanCommitPattern.MatchString(info.Commit) {
+		return errors.New("build-info.json version/commit does not match a clean release build")
 	}
 	if err := decoder.Decode(&struct{}{}); err != io.EOF {
 		return errors.New("build-info.json contains trailing JSON")

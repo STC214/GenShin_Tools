@@ -112,6 +112,6 @@ $env:BUILD_COMMIT = '0123456789ab'
 - `dist/GenshinTools-debug.exe` uses the console subsystem for diagnostics and embeds the main `requireAdministrator` manifest.
 - `dist/GenshinTools.exe` uses the Windows GUI subsystem and embeds `requireAdministrator`, required for same-integrity AHK restart and control.
 - `dist/GenshinTools-injector.exe` is the Windows-GUI-subsystem x64 injection helper with an `asInvoker` helper manifest; the main UI does not load injection modules.
-- `dist/GenshinTools-input.exe` remains a Windows-GUI-subsystem x86 compatibility artifact for deterministic update/package layouts. Since 1.4.8 the product hard-disables its keyboard worker and never starts this executable; keyboard repeat is provided only by bundled `AHK_F.exe`.
+- The retired `GenshinTools-input.exe` worker is no longer built or included in portable/update packages. On first startup, current versions also remove that product-owned legacy file from an upgraded installation root. Keyboard repeat is provided only by bundled `AHK_F.exe`.
 - `dist/GenshinTools-updater.exe` is the Windows-GUI-subsystem x64 update helper with the same `asInvoker` helper manifest.
 - Runtime state belongs under `data/` next to the executable, including `logs/`, `cache/`, `staging/` and `injection/modules/`.

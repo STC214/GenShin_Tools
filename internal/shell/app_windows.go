@@ -45,6 +45,8 @@ const (
 	instanceName = "Local\\GenshinTools.Singleton.S02"
 
 	postInjectionRepeatDelay = 5 * time.Second
+	ahkRetryInitialDelay     = time.Second
+	ahkRetryMaximumDelay     = 30 * time.Second
 
 	messageActivate     = win32.WM_APP + 1
 	messageTray         = win32.WM_APP + 2
@@ -214,6 +216,7 @@ type application struct {
 	ahkBundled              atomic.Bool
 	ahkStarting             atomic.Bool
 	ahkWithGame             atomic.Bool
+	ahkStartError           atomic.Pointer[string]
 	ahkPID                  atomic.Uint32
 	ahkCreation             atomic.Int64
 	bundledAHKTask          uint64
@@ -1545,6 +1548,12 @@ func (app *application) paint(hwnd win32.HWND) {
 }
 
 func (app *application) startInput() error {
+	retiredWorkerPath := filepath.Join(app.layout.Root, "GenshinTools-input.exe")
+	if removed, err := removeRetiredInputWorker(app.layout.Root); err != nil {
+		app.logger.Error("remove retired built-in keyboard repeat worker", map[string]any{"error": err.Error(), "path": retiredWorkerPath})
+	} else if removed {
+		app.logger.Info("removed retired built-in keyboard repeat worker", map[string]any{"path": retiredWorkerPath})
+	}
 	if !input.BuiltInKeyboardRepeatEnabled && app.settings.Input.Mode == input.ModeKeyboard {
 		app.settings.Input.Mode = input.ModeMouseLeft
 		app.settings.Input.Enabled = false
@@ -1626,6 +1635,20 @@ func (app *application) startInput() error {
 	return nil
 }
 
+func removeRetiredInputWorker(root string) (bool, error) {
+	if strings.TrimSpace(root) == "" {
+		return false, errors.New("application root is empty")
+	}
+	path := filepath.Join(root, "GenshinTools-input.exe")
+	if err := os.Remove(path); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
+}
+
 func (app *application) syncInputGameProcesses() {
 	if app.inputNative == nil {
 		return
@@ -1659,6 +1682,7 @@ func (app *application) syncInputGameProcesses() {
 	}
 	app.inputNative.SetGameProcesses(processes)
 	if len(processes) == 0 && !app.injectionLaunching && app.launchSnap.State != launch.StateStarting {
+		app.setAHKStartError("")
 		app.injectionReadyEvents = nil
 		app.schedulePendingInputToolsRestore("restore after verified game process exit")
 		if err := app.inputNative.SetObservationHooksReady(true); err != nil {
@@ -1967,9 +1991,7 @@ func (app *application) mediaClick(_, y int) {
 		for range presets {
 			key := presets[index]
 			index = (index + 1) % len(presets)
-			if !app.settings.Input.IsRepeatKey(key) &&
-				!input.SameKey(key, app.settings.Input.StopKey) &&
-				!input.SameKey(key, app.settings.Input.KeyboardToggleKey) &&
+			if !input.SameKey(key, app.settings.Input.StopKey) &&
 				!input.SameKey(key, app.settings.Input.MouseLeftToggleKey) &&
 				!input.SameKey(key, app.settings.Input.MouseRightToggleKey) {
 				next.VirtualKey = key
@@ -4068,6 +4090,7 @@ func (app *application) setAHKWithGame(enabled bool) {
 	}
 	app.settings = next
 	app.ahkWithGame.Store(enabled)
+	app.setAHKStartError("")
 	app.inputUIError = ""
 	if enabled {
 		if app.inputHooksReady.Load() {
@@ -4360,6 +4383,9 @@ func (app *application) paintInput(dc win32.HDC, client win32.Rect, left int32) 
 	visibleError := snapshot.LastError
 	if visibleError == "" {
 		visibleError = app.inputUIError
+	}
+	if visibleError == "" {
+		visibleError = app.ahkStartErrorText()
 	}
 	outputRect, optionRect, ahkRect := inputFooterRects(left, right, app.dpi)
 	app.paintStaticSurface(dc, outputRect, cardBrush)
@@ -4939,8 +4965,12 @@ func (app *application) scheduleBundledAHK() {
 	app.tasks.Cancel(app.bundledAHKTask)
 	runtimePath := filepath.Join(app.layout.Root, "AHK_F.exe")
 	app.bundledAHKTask = app.tasks.Run(func(ctx context.Context, _ uint64) {
+		retryDelay := ahkRetryInitialDelay
 		defer func() {
 			app.ahkStarting.Store(false)
+			if !app.ahkWithGame.Load() || len(native.GameProcessIDs()) == 0 {
+				app.setAHKStartError("")
+			}
 			if app.ahkWithGame.Load() && len(native.GameProcessIDs()) != 0 {
 				// Reconcile a rapid off/on toggle which canceled this task
 				// while its replacement process was still in health checking.
@@ -4965,6 +4995,7 @@ func (app *application) scheduleBundledAHK() {
 			if result.Error != nil {
 				fields["error"] = result.Error.Error()
 				app.logger.Error("start bundled AHK with game", fields)
+				app.setAHKStartError(result.Error.Error())
 				if result.NewPID != 0 {
 					if err := input.StopRestartedCompatibilityTools([]input.ExternalToolRestartResult{result}); err != nil {
 						app.logger.Error("retry bundled AHK rollback after failed startup", map[string]any{
@@ -4979,6 +5010,8 @@ func (app *application) scheduleBundledAHK() {
 					}
 				}
 			} else {
+				app.setAHKStartError("")
+				retryDelay = ahkRetryInitialDelay
 				app.logger.Info("started bundled AHK with game", fields)
 				if ctx.Err() != nil {
 					if err := input.StopExternalCompatibilityTool(result.NewPID, result.Path, result.NewCreationTime); err != nil {
@@ -4995,13 +5028,58 @@ func (app *application) scheduleBundledAHK() {
 			// AHK should live for the entire verified game lifetime. If it is
 			// closed or crashes while the game remains alive, retry without
 			// waiting for another game-discovery UI update.
-			select {
-			case <-ctx.Done():
+			if !waitForAHKRetry(ctx, retryDelay) {
 				return
-			case <-time.After(time.Second):
+			}
+			if result.Error != nil {
+				retryDelay = nextAHKRetryDelay(retryDelay)
 			}
 		}
 	})
+}
+
+func (app *application) setAHKStartError(message string) {
+	if strings.TrimSpace(message) == "" {
+		app.ahkStartError.Store(nil)
+	} else {
+		value := message
+		app.ahkStartError.Store(&value)
+	}
+	if app.hwnd != 0 {
+		win32.PostMessage(app.hwnd, messageInput, 0, 0)
+	}
+}
+
+func (app *application) ahkStartErrorText() string {
+	value := app.ahkStartError.Load()
+	if value == nil {
+		return ""
+	}
+	return *value
+}
+
+func nextAHKRetryDelay(current time.Duration) time.Duration {
+	if current <= 0 {
+		return ahkRetryInitialDelay
+	}
+	if current >= ahkRetryMaximumDelay/2 {
+		return ahkRetryMaximumDelay
+	}
+	return current * 2
+}
+
+func waitForAHKRetry(ctx context.Context, delay time.Duration) bool {
+	if delay <= 0 {
+		return false
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
 }
 
 func (app *application) manageBundledAHK(ctx context.Context, native *input.Native, tool input.ExternalToolRestartResult) {

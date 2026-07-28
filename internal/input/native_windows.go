@@ -374,7 +374,9 @@ func (n *Native) SetKeyboardBackendReady(ready bool) error {
 		// Stop any active mouse/legacy output loop while preserving the user's
 		// enabled configuration. No synthetic input may survive into the
 		// suspended launch or plugin initialization interval.
+		before := n.engine.Snapshot().State
 		n.engine.stop(false)
+		n.updateActivationTargets(before, n.engine.Snapshot())
 	}
 	n.keyboardReady.Store(ready)
 	return n.syncKeyboardWorker(n.engine.Snapshot())
@@ -855,6 +857,15 @@ func (n *Native) safetyMonitor() {
 				target = 0
 				targetProcessID = 0
 				runningSince = time.Time{}
+				// The same post-launch gate that blocks SendInput must also
+				// block the state transition into Running. Otherwise the
+				// first denied mouse pair is interpreted as target loss and
+				// permanently disables an otherwise valid armed session.
+				if n.keyboardInputHeldForLaunch() {
+					candidate = 0
+					candidateSince = time.Time{}
+					continue
+				}
 				foreground := n.foreground()
 				origin := windows.HWND(n.armTarget.Load())
 				if origin == 0 {
@@ -1181,10 +1192,6 @@ func (n *Native) clearHookStateLocked() {
 
 func (n *Native) processPhysicalEventLocked(event PhysicalEvent) {
 	before := n.engine.Snapshot()
-	if !BuiltInKeyboardRepeatEnabled && event.Kind == EventKey &&
-		SameKey(event.Code, before.Config.KeyboardToggleKey) {
-		return
-	}
 	// Once a verified game lifetime exists, no keyboard trigger or toggle may
 	// reach Engine until the post-injection finalizer releases the keyboard
 	// backend. The polling fallback remains alive while observation hooks are

@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"genshintools/internal/input"
 )
 
 func TestSaveLoadRoundTrip(t *testing.T) {
@@ -132,6 +134,24 @@ func TestInputEnableIsNotRestoredAcrossRestart(t *testing.T) {
 	}
 	if loaded.Settings.Input.IntervalMS != 100 {
 		t.Fatalf("interval = %d, want 100", loaded.Settings.Input.IntervalMS)
+	}
+}
+
+func TestRetiredKeyboardFieldsDoNotReserveVisibleHotkeys(t *testing.T) {
+	settings := Default()
+	if settings.Input.Mode != input.ModeMouseLeft {
+		t.Fatalf("new product input mode = %d, want mouse-left", settings.Input.Mode)
+	}
+	settings.Capture.VirtualKey = input.VirtualKey(settings.Input.RepeatKeys.At(0))
+	settings.Input.MouseLeftToggleKey = settings.Input.KeyboardToggleKey
+	if err := Save(filepath.Join(t.TempDir(), "retired-fields.json"), settings); err != nil {
+		t.Fatalf("retired keyboard fields blocked active settings: %v", err)
+	}
+
+	settings = Default()
+	settings.Capture.VirtualKey = input.VirtualKey(settings.Input.MouseLeftToggleKey)
+	if err := Save(filepath.Join(t.TempDir(), "active-conflict.json"), settings); err == nil {
+		t.Fatal("active mouse shortcut conflict was accepted")
 	}
 }
 
