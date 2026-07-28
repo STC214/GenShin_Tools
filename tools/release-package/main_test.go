@@ -102,3 +102,31 @@ func TestVerifyBuildInfoAcceptsUTF8BOMAndRejectsTrailingJSON(t *testing.T) {
 		t.Fatal("dirty build provenance was accepted")
 	}
 }
+
+func TestPackageChecksumFailureRemovesIncompleteCandidate(t *testing.T) {
+	root := t.TempDir()
+	output := filepath.Join(root, "portable.zip")
+	if err := os.WriteFile(output, []byte("candidate"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(output+".sha256", 0o755); err != nil {
+		t.Fatal(err)
+	}
+	complete := false
+	func() {
+		defer func() {
+			if !complete {
+				cleanupIncompletePackage(output)
+			}
+		}()
+		if err := writeAtomic(output+".sha256", []byte("hash\n"), 0o644); err == nil {
+			t.Fatal("checksum replacement over a directory unexpectedly succeeded")
+		}
+	}()
+	if _, err := os.Stat(output); !os.IsNotExist(err) {
+		t.Fatalf("incomplete candidate remained after checksum failure: %v", err)
+	}
+	if info, err := os.Stat(output + ".sha256"); err != nil || !info.IsDir() {
+		t.Fatalf("non-file checksum target was modified: info=%v err=%v", info, err)
+	}
+}

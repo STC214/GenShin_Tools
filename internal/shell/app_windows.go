@@ -215,6 +215,7 @@ type application struct {
 	ahkActive               atomic.Bool
 	ahkBundled              atomic.Bool
 	ahkStarting             atomic.Bool
+	ahkRetryBlocked         atomic.Bool
 	ahkWithGame             atomic.Bool
 	ahkStartError           atomic.Pointer[string]
 	ahkPID                  atomic.Uint32
@@ -1682,6 +1683,7 @@ func (app *application) syncInputGameProcesses() {
 	}
 	app.inputNative.SetGameProcesses(processes)
 	if len(processes) == 0 && !app.injectionLaunching && app.launchSnap.State != launch.StateStarting {
+		app.ahkRetryBlocked.Store(false)
 		app.setAHKStartError("")
 		app.injectionReadyEvents = nil
 		app.schedulePendingInputToolsRestore("restore after verified game process exit")
@@ -4090,6 +4092,7 @@ func (app *application) setAHKWithGame(enabled bool) {
 	}
 	app.settings = next
 	app.ahkWithGame.Store(enabled)
+	app.ahkRetryBlocked.Store(false)
 	app.setAHKStartError("")
 	app.inputUIError = ""
 	if enabled {
@@ -4959,7 +4962,7 @@ func pendingToolsAfterRestart(original []input.ExternalCompatibilityTool, result
 func (app *application) scheduleBundledAHK() {
 	native := app.inputNative
 	if native == nil || !app.inputHooksReady.Load() || !app.ahkWithGame.Load() || len(native.GameProcessIDs()) == 0 ||
-		app.ahkManaged.Load() || !app.ahkStarting.CompareAndSwap(false, true) {
+		app.ahkManaged.Load() || app.ahkRetryBlocked.Load() || !app.ahkStarting.CompareAndSwap(false, true) {
 		return
 	}
 	app.tasks.Cancel(app.bundledAHKTask)
@@ -5011,11 +5014,13 @@ func (app *application) scheduleBundledAHK() {
 						// A process that cannot be safely identified and
 						// stopped must block retries; otherwise every second
 						// could create another unmanaged AHK instance.
+						app.ahkRetryBlocked.Store(true)
 						app.setAHKStartError(errors.Join(result.Error, fmt.Errorf("rollback failed; automatic retry is blocked: %w", err)).Error())
 						return
 					}
 				}
 			} else {
+				app.ahkRetryBlocked.Store(false)
 				app.setAHKStartError("")
 				retryDelay = ahkRetryInitialDelay
 				app.logger.Info("started bundled AHK with game", fields)

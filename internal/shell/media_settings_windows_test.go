@@ -226,6 +226,29 @@ func TestBundledAHKTaskRejectionReleasesStartingGuard(t *testing.T) {
 	}
 }
 
+func TestBundledAHKFatalRetryBlockPreventsUIMessageReschedule(t *testing.T) {
+	manager := taskrunner.New()
+	defer manager.Shutdown(time.Second)
+	native, err := input.NewNative(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer native.Close()
+	native.SetGameProcesses([]input.GameProcess{{PID: 42, CreationTime: 84}})
+	app := &application{tasks: manager, inputNative: native}
+	app.inputHooksReady.Store(true)
+	app.ahkWithGame.Store(true)
+	app.ahkRetryBlocked.Store(true)
+
+	// setAHKStartError normally posts messageInput. Its UI handler calls this
+	// scheduler again, so the fatal block must be part of the scheduler's
+	// precondition rather than relying only on the task defer.
+	app.scheduleBundledAHK()
+	if app.ahkStarting.Load() || app.bundledAHKTask != 0 || manager.Active() != 0 {
+		t.Fatalf("fatal AHK retry block was bypassed: starting=%t task=%d active=%d", app.ahkStarting.Load(), app.bundledAHKTask, manager.Active())
+	}
+}
+
 func TestRetiredInputWorkerIsRemovedFromUpgradeRoot(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "GenshinTools-input.exe")

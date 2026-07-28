@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"genshintools/internal/platform/winfile"
 	"genshintools/internal/selfupdate"
 	"golang.org/x/sys/windows"
 )
@@ -81,6 +82,12 @@ func packageRelease(options options) error {
 	if err := writeArchive(output, manifest, files); err != nil {
 		return err
 	}
+	complete := false
+	defer func() {
+		if !complete {
+			cleanupIncompletePackage(output)
+		}
+	}()
 	packageSize, packageHash, err := hashFile(output, maxReleaseBytes)
 	if err != nil {
 		return err
@@ -104,6 +111,7 @@ func packageRelease(options options) error {
 	if err := writeAtomic(output+".sha256", checksum, 0o644); err != nil {
 		return err
 	}
+	complete = true
 	fmt.Printf("Packaged %s\nSHA-256 %s\nFiles %d\n", output, packageHash, len(files)+1)
 	return nil
 }
@@ -212,10 +220,7 @@ func writeArchive(output string, manifest selfupdate.PackageManifest, files []so
 	if err != nil {
 		return err
 	}
-	if err := os.Remove(output); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
-	if err := os.Rename(temporaryPath, output); err != nil {
+	if err := replaceFile(temporaryPath, output); err != nil {
 		return err
 	}
 	committed = true
@@ -330,12 +335,33 @@ func writeAtomic(path string, data []byte, mode os.FileMode) error {
 	if err := temporary.Close(); err != nil {
 		return err
 	}
-	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
-	if err := os.Rename(temporaryPath, path); err != nil {
+	if err := replaceFile(temporaryPath, path); err != nil {
 		return err
 	}
 	committed = true
 	return nil
+}
+
+func replaceFile(source, destination string) error {
+	sourceUTF16, err := windows.UTF16PtrFromString(source)
+	if err != nil {
+		return err
+	}
+	destinationUTF16, err := windows.UTF16PtrFromString(destination)
+	if err != nil {
+		return err
+	}
+	return winfile.Replace(sourceUTF16, destinationUTF16, windows.MOVEFILE_REPLACE_EXISTING|windows.MOVEFILE_WRITE_THROUGH)
+}
+
+func removeRegularFile(path string) {
+	info, err := os.Lstat(path)
+	if err == nil && info.Mode().IsRegular() {
+		_ = os.Remove(path)
+	}
+}
+
+func cleanupIncompletePackage(output string) {
+	_ = os.Remove(output)
+	removeRegularFile(output + ".sha256")
 }
