@@ -4964,14 +4964,19 @@ func (app *application) scheduleBundledAHK() {
 	}
 	app.tasks.Cancel(app.bundledAHKTask)
 	runtimePath := filepath.Join(app.layout.Root, "AHK_F.exe")
-	app.bundledAHKTask = app.tasks.Run(func(ctx context.Context, _ uint64) {
+	taskID := app.tasks.Run(func(ctx context.Context, _ uint64) {
 		retryDelay := ahkRetryInitialDelay
 		defer func() {
 			app.ahkStarting.Store(false)
 			if !app.ahkWithGame.Load() || len(native.GameProcessIDs()) == 0 {
 				app.setAHKStartError("")
 			}
-			if app.ahkWithGame.Load() && len(native.GameProcessIDs()) != 0 {
+			if shouldReconcileBundledAHK(
+				ctx.Err() != nil,
+				app.ahkWithGame.Load(),
+				len(native.GameProcessIDs()) != 0,
+				app.shuttingDown.Load(),
+			) {
 				// Reconcile a rapid off/on toggle which canceled this task
 				// while its replacement process was still in health checking.
 				win32.PostMessage(app.hwnd, messageInput, 0, 0)
@@ -5006,6 +5011,7 @@ func (app *application) scheduleBundledAHK() {
 						// A process that cannot be safely identified and
 						// stopped must block retries; otherwise every second
 						// could create another unmanaged AHK instance.
+						app.setAHKStartError(errors.Join(result.Error, fmt.Errorf("rollback failed; automatic retry is blocked: %w", err)).Error())
 						return
 					}
 				}
@@ -5036,6 +5042,16 @@ func (app *application) scheduleBundledAHK() {
 			}
 		}
 	})
+	app.bundledAHKTask = taskID
+	if taskID == 0 {
+		// Manager.Run rejects new work after shutdown begins. Release the
+		// compare-and-swap guard because the task body and its defer never ran.
+		app.ahkStarting.Store(false)
+	}
+}
+
+func shouldReconcileBundledAHK(canceled, enabled, gamePresent, shuttingDown bool) bool {
+	return canceled && enabled && gamePresent && !shuttingDown
 }
 
 func (app *application) setAHKStartError(message string) {

@@ -13,6 +13,7 @@ import (
 	"genshintools/internal/localization"
 	"genshintools/internal/paths"
 	"genshintools/internal/platform/win32"
+	"genshintools/internal/taskrunner"
 )
 
 func newMediaSettingsTestApp(t *testing.T, configPath string) *application {
@@ -178,6 +179,50 @@ func TestAHKRetryDelayIsBoundedAndErrorIsVisible(t *testing.T) {
 	app.setAHKStartError("")
 	if got := app.ahkStartErrorText(); got != "" {
 		t.Fatalf("cleared AHK UI error = %q", got)
+	}
+}
+
+func TestBundledAHKReconcileRequiresCanceledLiveLifecycle(t *testing.T) {
+	tests := []struct {
+		name                           string
+		canceled, enabled, game, close bool
+		want                           bool
+	}{
+		{name: "rapid replacement", canceled: true, enabled: true, game: true, want: true},
+		{name: "fatal rollback", enabled: true, game: true},
+		{name: "option disabled", canceled: true, game: true},
+		{name: "game exited", canceled: true, enabled: true},
+		{name: "shutdown", canceled: true, enabled: true, game: true, close: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := shouldReconcileBundledAHK(test.canceled, test.enabled, test.game, test.close); got != test.want {
+				t.Fatalf("shouldReconcileBundledAHK() = %t, want %t", got, test.want)
+			}
+		})
+	}
+}
+
+func TestBundledAHKTaskRejectionReleasesStartingGuard(t *testing.T) {
+	manager := taskrunner.New()
+	if !manager.Shutdown(time.Second) {
+		t.Fatal("empty task manager did not shut down")
+	}
+	native, err := input.NewNative(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer native.Close()
+	native.SetGameProcesses([]input.GameProcess{{PID: 42, CreationTime: 84}})
+	app := &application{tasks: manager, inputNative: native}
+	app.inputHooksReady.Store(true)
+	app.ahkWithGame.Store(true)
+	app.scheduleBundledAHK()
+	if app.ahkStarting.Load() {
+		t.Fatal("rejected AHK task left the starting guard set")
+	}
+	if app.bundledAHKTask != 0 {
+		t.Fatalf("rejected AHK task ID = %d, want 0", app.bundledAHKTask)
 	}
 }
 
