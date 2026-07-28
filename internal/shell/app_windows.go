@@ -44,7 +44,7 @@ const (
 	windowClass  = "GenshinTools.MainWindow.S02"
 	instanceName = "Local\\GenshinTools.Singleton.S02"
 
-	postLaunchInputStableFor = 8 * time.Second
+	postInjectionRepeatDelay = 5 * time.Second
 
 	messageActivate     = win32.WM_APP + 1
 	messageTray         = win32.WM_APP + 2
@@ -112,117 +112,116 @@ type application struct {
 	pointerInside   bool
 	trackingMouse   bool
 
-	snapshots                chan diagnosticSnapshot
-	lastSnap                 diagnosticSnapshot
-	inputNative              *input.Native
-	inputUpdates             chan input.Snapshot
-	physicalEvents           chan input.PhysicalEvent
-	inputSnap                input.Snapshot
-	recording                int
-	inputRepeatScroll        int
-	inputUIError             string
-	interceptionDriver       input.InterceptionDriverStatus
-	gameUpdates              chan gameUpdate
-	gameState                gameViewState
-	gameTask                 uint64
-	launchEngine             *launch.Engine
-	launchUpdates            chan launch.Snapshot
-	launchSnap               launch.Snapshot
-	launchUIError            string
-	shortcutStatus           string
-	resourceUpdates          chan resourceUpdate
-	resourceState            resourceViewState
-	resourceTask             uint64
-	localStatus              string
-	betterGITask             uint64
-	serverUpdates            chan serverUpdate
-	serverState              serverViewState
-	serverTask               uint64
-	captureManager           *capture.Manager
-	captureResults           chan capture.Result
-	captureStatus            string
-	captureHotkeyRegistered  bool
-	overlaySession           *overlay.Session
-	overlayUpdates           chan overlayUpdate
-	overlayStatsUpdates      chan overlay.Stats
-	overlayStats             overlay.Stats
-	overlayStatus            string
-	mediaTarget              gamewindow.Target
-	mediaTask                uint64
-	injectionUpdates         chan injectionUpdate
-	injectionModules         []injection.Audit
-	injectionWarnings        []string
-	injectionStatus          string
-	injectionAuditTask       uint64
-	injectionLaunchTask      uint64
-	injectionLaunching       bool
-	injectionHelperDone      bool
-	injectionGameRunning     bool
-	injectionExpectedModules []string
-	injectionReadyEvents     []string
-	inputToolsMu             sync.Mutex
-	inputRestoreMu           sync.Mutex
-	inputToolsGeneration     uint64
-	injectionInputTools      []input.ExternalCompatibilityTool
-	inputHookCommitMu        sync.Mutex
-	inputCompatibilityTask   uint64
-	inputGameFingerprint     string
-	inputHooksReady          atomic.Bool
-	inputHookGamePresent     atomic.Bool
-	inputRestoreRunning      atomic.Bool
-	inputHookEpoch           atomic.Uint64
-	inputFinalizingEpoch     atomic.Uint64
-	pluginLayout             plugins.Layout
-	pluginState              plugins.State
-	pluginItems              []plugins.Item
-	pluginWarnings           []string
-	pluginStatus             string
-	pluginSelected           string
-	storeSelected            string
-	pluginUpdates            chan pluginUpdate
-	pluginTask               uint64
-	pluginBusy               bool
-	pluginDeleteConfirm      string
-	pluginCatalog            plugins.Catalog
-	pluginCatalogPage        plugins.CatalogPage
-	customArgumentsEdit      win32.HWND
-	pluginAliasEdit          win32.HWND
-	pluginTokenEdit          win32.HWND
-	pluginSearchEdit         win32.HWND
-	listScrollbar            win32.HWND
-	inputScrollbar           win32.HWND
-	fufuTarget               plugins.FufuTargetConfig
-	fufuTargetInstalled      bool
-	fufuTargetEnabled        bool
-	fufuEdits                map[string]win32.HWND
-	fufuEditFields           map[uint16]string
-	fufuValues               map[string]string
-	fufuScroll               int
-	pluginListScroll         int
-	storeListScroll          int
-	pluginTargetMode         bool
-	shellStatus              string
-	diagnosticUpdates        chan diagnosticUpdate
-	diagnosticBusy           bool
-	updateUpdates            chan updateCheckUpdate
-	updateTask               uint64
-	updateBusy               bool
-	updateRelease            *selfupdate.Release
-	cpuWarning               atomic.Pointer[cpuWarningConfig]
-	editBrush                win32.HBRUSH
-	sessionNotifications     bool
-	ahkManaged               atomic.Bool
-	ahkActive                atomic.Bool
-	ahkBundled               atomic.Bool
-	ahkStarting              atomic.Bool
-	ahkWithGame              atomic.Bool
-	ahkPID                   atomic.Uint32
-	ahkCreation              atomic.Int64
-	bundledAHKTask           uint64
-	shuttingDown             atomic.Bool
-	shutdown                 sync.Once
-	cleanExit                bool
-	fatal                    bool
+	snapshots               chan diagnosticSnapshot
+	lastSnap                diagnosticSnapshot
+	inputNative             *input.Native
+	inputUpdates            chan input.Snapshot
+	physicalEvents          chan input.PhysicalEvent
+	inputSnap               input.Snapshot
+	recording               int
+	inputRepeatScroll       int
+	inputUIError            string
+	interceptionDriver      input.InterceptionDriverStatus
+	gameUpdates             chan gameUpdate
+	gameState               gameViewState
+	gameTask                uint64
+	launchEngine            *launch.Engine
+	launchUpdates           chan launch.Snapshot
+	launchSnap              launch.Snapshot
+	launchUIError           string
+	shortcutStatus          string
+	resourceUpdates         chan resourceUpdate
+	resourceState           resourceViewState
+	resourceTask            uint64
+	localStatus             string
+	betterGITask            uint64
+	serverUpdates           chan serverUpdate
+	serverState             serverViewState
+	serverTask              uint64
+	captureManager          *capture.Manager
+	captureResults          chan capture.Result
+	captureStatus           string
+	captureHotkeyRegistered bool
+	overlaySession          *overlay.Session
+	overlayUpdates          chan overlayUpdate
+	overlayStatsUpdates     chan overlay.Stats
+	overlayStats            overlay.Stats
+	overlayStatus           string
+	mediaTarget             gamewindow.Target
+	mediaTask               uint64
+	injectionUpdates        chan injectionUpdate
+	injectionModules        []injection.Audit
+	injectionWarnings       []string
+	injectionStatus         string
+	injectionAuditTask      uint64
+	injectionLaunchTask     uint64
+	injectionLaunching      bool
+	injectionHelperDone     bool
+	injectionGameRunning    bool
+	injectionReadyEvents    []string
+	inputToolsMu            sync.Mutex
+	inputRestoreMu          sync.Mutex
+	inputToolsGeneration    uint64
+	injectionInputTools     []input.ExternalCompatibilityTool
+	inputHookCommitMu       sync.Mutex
+	inputCompatibilityTask  uint64
+	inputGameFingerprint    string
+	inputHooksReady         atomic.Bool
+	inputHookGamePresent    atomic.Bool
+	inputRestoreRunning     atomic.Bool
+	inputHookEpoch          atomic.Uint64
+	inputFinalizingEpoch    atomic.Uint64
+	pluginLayout            plugins.Layout
+	pluginState             plugins.State
+	pluginItems             []plugins.Item
+	pluginWarnings          []string
+	pluginStatus            string
+	pluginSelected          string
+	storeSelected           string
+	pluginUpdates           chan pluginUpdate
+	pluginTask              uint64
+	pluginBusy              bool
+	pluginDeleteConfirm     string
+	pluginCatalog           plugins.Catalog
+	pluginCatalogPage       plugins.CatalogPage
+	customArgumentsEdit     win32.HWND
+	pluginAliasEdit         win32.HWND
+	pluginTokenEdit         win32.HWND
+	pluginSearchEdit        win32.HWND
+	listScrollbar           win32.HWND
+	inputScrollbar          win32.HWND
+	fufuTarget              plugins.FufuTargetConfig
+	fufuTargetInstalled     bool
+	fufuTargetEnabled       bool
+	fufuEdits               map[string]win32.HWND
+	fufuEditFields          map[uint16]string
+	fufuValues              map[string]string
+	fufuScroll              int
+	pluginListScroll        int
+	storeListScroll         int
+	pluginTargetMode        bool
+	shellStatus             string
+	diagnosticUpdates       chan diagnosticUpdate
+	diagnosticBusy          bool
+	updateUpdates           chan updateCheckUpdate
+	updateTask              uint64
+	updateBusy              bool
+	updateRelease           *selfupdate.Release
+	cpuWarning              atomic.Pointer[cpuWarningConfig]
+	editBrush               win32.HBRUSH
+	sessionNotifications    bool
+	ahkManaged              atomic.Bool
+	ahkActive               atomic.Bool
+	ahkBundled              atomic.Bool
+	ahkStarting             atomic.Bool
+	ahkWithGame             atomic.Bool
+	ahkPID                  atomic.Uint32
+	ahkCreation             atomic.Int64
+	bundledAHKTask          uint64
+	shuttingDown            atomic.Bool
+	shutdown                sync.Once
+	cleanExit               bool
+	fatal                   bool
 }
 
 type gameViewState struct {
@@ -880,7 +879,6 @@ func (app *application) handleMessage(hwnd win32.HWND, message uint32, wParam, l
 							app.injectionLaunching = false
 							app.injectionHelperDone = false
 							app.injectionGameRunning = false
-							app.injectionExpectedModules = nil
 							app.injectionReadyEvents = nil
 							if app.inputNative != nil && len(app.inputNative.GameProcessIDs()) == 0 {
 								app.schedulePendingInputToolsRestore("restore after injection launch failure")
@@ -1660,7 +1658,6 @@ func (app *application) syncInputGameProcesses() {
 	}
 	app.inputNative.SetGameProcesses(processes)
 	if len(processes) == 0 && !app.injectionLaunching && app.launchSnap.State != launch.StateStarting {
-		app.injectionExpectedModules = nil
 		app.injectionReadyEvents = nil
 		app.schedulePendingInputToolsRestore("restore after verified game process exit")
 		if err := app.inputNative.SetObservationHooksReady(true); err != nil {
@@ -2556,7 +2553,6 @@ func (app *application) startInjectionLaunch() {
 	if len(effectiveModuleIDs) == 0 && settings.ModuleID != "" {
 		effectiveModuleIDs = append(effectiveModuleIDs, settings.ModuleID)
 	}
-	expectedModules := make([]string, 0, len(effectiveModuleIDs))
 	readyEvents := make([]string, 0, len(effectiveModuleIDs))
 	for _, moduleID := range effectiveModuleIDs {
 		audit, err := injection.AuditModule(app.layout.Modules, moduleID, candidate)
@@ -2564,7 +2560,6 @@ func (app *application) startInjectionLaunch() {
 			app.injectionStatus = fmt.Sprintf(app.texts.Text("injection.status.launchFailed"), err)
 			return
 		}
-		expectedModules = append(expectedModules, audit.DLLPath)
 		if audit.Manifest.ReadyEvent != "" {
 			readyEvents = append(readyEvents, audit.Manifest.ReadyEvent)
 		}
@@ -2583,7 +2578,6 @@ func (app *application) startInjectionLaunch() {
 	}
 	tools := input.CaptureExternalCompatibilityTools()
 	app.setPendingInputTools(tools)
-	app.injectionExpectedModules = append([]string(nil), expectedModules...)
 	app.injectionReadyEvents = append([]string(nil), readyEvents...)
 	app.injectionLaunching = true
 	app.injectionHelperDone = false
@@ -2651,7 +2645,6 @@ func (app *application) startCleanLaunch() {
 		app.injectionStatus = fmt.Sprintf(app.texts.Text("injection.status.launchConfigFailed"), app.launchUIError)
 		return
 	}
-	app.injectionExpectedModules = nil
 	app.injectionReadyEvents = nil
 	if err := app.holdPostLaunchInputHooks("clean launch starting"); err != nil {
 		app.injectionStatus = fmt.Sprintf(app.texts.Text("injection.status.cleanFailed"), err)
@@ -4741,7 +4734,6 @@ func (app *application) schedulePostLaunchInputHooks() {
 		return
 	}
 	toolsGeneration, tools := app.pendingInputToolsSnapshot()
-	expectedModules := append([]string(nil), app.injectionExpectedModules...)
 	readyEventTemplates := append([]string(nil), app.injectionReadyEvents...)
 	gamePID := uint32(app.launchSnap.PID)
 	readyEvents := make([]string, 0, len(readyEventTemplates))
@@ -4794,43 +4786,20 @@ func (app *application) schedulePostLaunchInputHooks() {
 			logger.Error("stop pending external tools before input stabilization", map[string]any{"error": stopErr.Error()})
 			return
 		}
-		// Launch StateRunning is published only after every injected DLL has
-		// returned from LoadLibrary and the suspended game thread was resumed.
-		// Keep every repeater unloaded for an additional continuous foreground
-		// stabilization window so asynchronous plugin hook setup also wins the
-		// installation order. Input hooks are the final launch-stage feature.
-		lastModuleError := ""
-		lastModuleFingerprint := ""
-		ready := func() bool {
-			if !native.GameForeground() {
-				return false
-			}
-			if len(expectedModules) == 0 {
-				return true
-			}
-			loaded, fingerprint, err := injection.ModuleReadiness(gamePID, expectedModules)
-			if err != nil {
-				if message := err.Error(); message != lastModuleError {
-					lastModuleError = message
-					logger.Error("verify injected modules before input finalization", map[string]any{"error": message, "pid": gamePID})
-				}
-				return false
-			}
-			lastModuleError = ""
-			if !loaded {
-				return false
-			}
-			// The first complete snapshot and every later module-set change
-			// begin a new continuous stabilization interval.
-			if fingerprint == "" || fingerprint != lastModuleFingerprint {
-				lastModuleFingerprint = fingerprint
-				return false
-			}
+		// The helper reports success only after every audited DLL's remote
+		// LoadLibrary call has returned, and the injection/Running barrier has
+		// already joined that result with the resumed game lifetime. Do not
+		// enumerate modules again after resume: the protected game rejects
+		// TH32CS_SNAPMODULE even for the elevated launcher. Optional explicit
+		// readiness events are observed first; then every internal/external
+		// repeater remains unloaded for a separate fixed five-second delay.
+		lastReadinessError := ""
+		readiness := func() bool {
 			for _, event := range readyEvents {
 				signaled, err := injection.ReadyEventSignaled(event)
 				if err != nil {
-					if message := err.Error(); message != lastModuleError {
-						lastModuleError = message
+					if message := err.Error(); message != lastReadinessError {
+						lastReadinessError = message
 						logger.Error("verify injected module readiness event", map[string]any{"error": message, "event": event, "pid": gamePID})
 					}
 					return false
@@ -4839,10 +4808,10 @@ func (app *application) schedulePostLaunchInputHooks() {
 					return false
 				}
 			}
-			lastModuleError = ""
+			lastReadinessError = ""
 			return true
 		}
-		if !waitForStableGameForeground(ctx, ready, postLaunchInputStableFor) ||
+		if !waitForReadinessDelayAndForeground(ctx, readiness, native.GameForeground, postInjectionRepeatDelay) ||
 			epoch != app.inputHookEpoch.Load() {
 			return
 		}
@@ -4850,14 +4819,18 @@ func (app *application) schedulePostLaunchInputHooks() {
 			logger.Error("reinstall native observation hooks at final launch stage", map[string]any{"error": err.Error()})
 			return
 		}
-		logger.Info("reinstalled native observation hooks at final launch stage", map[string]any{"stableForMS": postLaunchInputStableFor.Milliseconds()})
+		logger.Info("reinstalled native observation hooks at final launch stage", map[string]any{"postInjectionDelayMS": postInjectionRepeatDelay.Milliseconds()})
 		if err := native.SetKeyboardBackendReady(true); err != nil {
 			logger.Error("install built-in keyboard hook at final launch stage", map[string]any{"error": err.Error()})
 			return
 		} else {
+			inputSnapshot := native.Snapshot()
 			logger.Info("installed built-in keyboard hook at final launch stage", map[string]any{
-				"keyboardWorkerPID": native.KeyboardWorkerPID(),
-				"stableForMS":       postLaunchInputStableFor.Milliseconds(),
+				"keyboardWorkerPID":    native.KeyboardWorkerPID(),
+				"postInjectionDelayMS": postInjectionRepeatDelay.Milliseconds(),
+				"repeatKeys":           inputSnapshot.Config.RepeatKeys.Slice(),
+				"intervalMS":           inputSnapshot.Config.IntervalMS,
+				"gamePIDs":             native.GameProcessIDs(),
 			})
 		}
 		if ctx.Err() != nil || epoch != app.inputHookEpoch.Load() {
@@ -5215,23 +5188,25 @@ func (app *application) manageExternalAHK(ctx context.Context, native *input.Nat
 	}
 }
 
-func waitForStableGameForeground(ctx context.Context, foreground func() bool, stableFor time.Duration) bool {
-	if foreground == nil || stableFor <= 0 {
+func waitForReadinessDelayAndForeground(ctx context.Context, readiness, foreground func() bool, delay time.Duration) bool {
+	if readiness == nil || foreground == nil || delay <= 0 {
 		return false
 	}
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
-	var since time.Time
+	var readySince time.Time
 	for {
-		if foreground() {
-			if since.IsZero() {
-				since = time.Now()
+		if readiness() {
+			if readySince.IsZero() {
+				readySince = time.Now()
 			}
-			if time.Since(since) >= stableFor {
+			// Foreground is only the final activation condition. Switching
+			// windows must not restart time already elapsed after injection.
+			if time.Since(readySince) >= delay && foreground() {
 				return true
 			}
 		} else {
-			since = time.Time{}
+			readySince = time.Time{}
 		}
 		select {
 		case <-ctx.Done():
@@ -6290,6 +6265,7 @@ func (app *application) startBackgroundDiagnostics() {
 	app.tasks.Run(func(ctx context.Context, _ uint64) {
 		cpuSampler := cpumonitor.NewSampler(runtime.NumCPU())
 		var sustained cpumonitor.Sustained
+		lastKeyboardDiagnosticError := ""
 		ticker := time.NewTicker(2 * time.Second)
 		defer ticker.Stop()
 		for {
@@ -6312,6 +6288,45 @@ func (app *application) startBackgroundDiagnostics() {
 			select {
 			case app.snapshots <- snapshot:
 			default:
+			}
+			if native := app.inputNative; native != nil && native.KeyboardWorkerActive() {
+				workerSnapshot, err := native.KeyboardWorkerDiagnostics()
+				if err != nil {
+					if message := err.Error(); message != lastKeyboardDiagnosticError {
+						lastKeyboardDiagnosticError = message
+						app.logger.Error("read built-in keyboard worker diagnostics", map[string]any{
+							"error":             message,
+							"keyboardWorkerPID": native.KeyboardWorkerPID(),
+						})
+						if restartErr := native.RefreshKeyboardBackend(); restartErr != nil {
+							app.logger.Error("restart built-in keyboard worker after diagnostic failure", map[string]any{"error": restartErr.Error()})
+						} else {
+							app.logger.Info("restarted built-in keyboard worker after diagnostic failure", map[string]any{"keyboardWorkerPID": native.KeyboardWorkerPID()})
+						}
+					}
+				} else {
+					lastKeyboardDiagnosticError = ""
+					app.logger.Info("built-in keyboard worker diagnostics", map[string]any{
+						"keyboardWorkerPID":    native.KeyboardWorkerPID(),
+						"configuredKeyEvents":  workerSnapshot.ConfiguredKeyEvents,
+						"foregroundMisses":     workerSnapshot.ForegroundMisses,
+						"foregroundPID":        workerSnapshot.ForegroundPID,
+						"heldKeys":             workerSnapshot.HeldKeys,
+						"lastDevice":           workerSnapshot.LastDevice,
+						"lastKey":              workerSnapshot.LastKey,
+						"lastScanCodeAndFlags": workerSnapshot.LastScanCode,
+						"outputFailures":       workerSnapshot.OutputFailures,
+						"outputGateMisses":     workerSnapshot.OutputGateMisses,
+						"outputPairs":          workerSnapshot.OutputPairs,
+						"repeatStarts":         workerSnapshot.RepeatStarts,
+						"repeatStops":          workerSnapshot.RepeatStops,
+						"syntheticHookEvents":  workerSnapshot.SyntheticHookEvents,
+						"triggerDowns":         workerSnapshot.TriggerDowns,
+						"triggerUps":           workerSnapshot.TriggerUps,
+					})
+				}
+			} else {
+				lastKeyboardDiagnosticError = ""
 			}
 			win32.PostMessage(app.hwnd, messageSnapshot, 0, 0)
 			select {

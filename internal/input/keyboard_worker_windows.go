@@ -25,11 +25,34 @@ type keyboardWorkerRequest struct {
 	RepeatKeys    []uint32 `json:"repeatKeys"`
 	IntervalMS    int      `json:"intervalMs"`
 	GameProcesses []uint32 `json:"gameProcesses"`
+	StatusOnly    bool     `json:"statusOnly,omitempty"`
 }
 
 type keyboardWorkerResponse struct {
-	OK    bool   `json:"ok"`
-	Error string `json:"error,omitempty"`
+	OK          bool                      `json:"ok"`
+	Error       string                    `json:"error,omitempty"`
+	Diagnostics KeyboardWorkerDiagnostics `json:"diagnostics"`
+}
+
+// KeyboardWorkerDiagnostics is a bounded snapshot returned by the x86 worker.
+// Counters are monotonic for one worker lifetime, allowing the parent log to
+// distinguish hook capture, foreground gating and driver delivery failures.
+type KeyboardWorkerDiagnostics struct {
+	ConfiguredKeyEvents uint64   `json:"configuredKeyEvents"`
+	ForegroundMisses    uint64   `json:"foregroundMisses"`
+	OutputGateMisses    uint64   `json:"outputGateMisses"`
+	TriggerDowns        uint64   `json:"triggerDowns"`
+	TriggerUps          uint64   `json:"triggerUps"`
+	RepeatStarts        uint64   `json:"repeatStarts"`
+	RepeatStops         uint64   `json:"repeatStops"`
+	OutputPairs         uint64   `json:"outputPairs"`
+	OutputFailures      uint64   `json:"outputFailures"`
+	SyntheticHookEvents uint64   `json:"syntheticHookEvents"`
+	LastKey             uint32   `json:"lastKey"`
+	LastScanCode        uint32   `json:"lastScanCode"`
+	LastDevice          uint32   `json:"lastDevice"`
+	ForegroundPID       uint32   `json:"foregroundPid"`
+	HeldKeys            []uint32 `json:"heldKeys,omitempty"`
 }
 
 type synchronizedBuffer struct {
@@ -171,6 +194,57 @@ func (worker *keyboardWorkerController) Configure(request keyboardWorkerRequest)
 	worker.lastError = ""
 	worker.active.Store(request.Enabled && len(request.RepeatKeys) != 0 && len(request.GameProcesses) != 0)
 	return nil
+}
+
+func (worker *keyboardWorkerController) Diagnostics() (KeyboardWorkerDiagnostics, error) {
+	if worker == nil {
+		return KeyboardWorkerDiagnostics{}, errors.New("keyboard worker is unavailable")
+	}
+	worker.mu.Lock()
+	defer worker.mu.Unlock()
+	if worker.closed || worker.cmd == nil || worker.stdin == nil || worker.output == nil {
+		return KeyboardWorkerDiagnostics{}, errors.New("keyboard worker is not running")
+	}
+	type exchangeResult struct {
+		response keyboardWorkerResponse
+		err      error
+	}
+	result := make(chan exchangeResult, 1)
+	go func() {
+		if err := json.NewEncoder(worker.stdin).Encode(keyboardWorkerRequest{StatusOnly: true}); err != nil {
+			result <- exchangeResult{err: fmt.Errorf("write keyboard worker diagnostic request: %w", err)}
+			return
+		}
+		var response keyboardWorkerResponse
+		err := json.NewDecoder(worker.output).Decode(&response)
+		result <- exchangeResult{response: response, err: err}
+	}()
+	select {
+	case exchange := <-result:
+		if exchange.err != nil {
+			return KeyboardWorkerDiagnostics{}, fmt.Errorf("read keyboard worker diagnostics: %w", exchange.err)
+		}
+		if !exchange.response.OK {
+			return KeyboardWorkerDiagnostics{}, errors.New(exchange.response.Error)
+		}
+		return exchange.response.Diagnostics, nil
+	case <-time.After(750 * time.Millisecond):
+		message := "keyboard worker diagnostic request timed out"
+		// The abandoned decoder would otherwise race a later request for the
+		// same stdout frame. Stop the worker and let normal lifecycle recovery
+		// create a fresh protocol stream.
+		var saved *keyboardWorkerRequest
+		if worker.last != nil {
+			request := *worker.last
+			request.RepeatKeys = append([]uint32(nil), worker.last.RepeatKeys...)
+			request.GameProcesses = append([]uint32(nil), worker.last.GameProcesses...)
+			saved = &request
+		}
+		worker.stopLocked()
+		worker.last = saved
+		worker.lastError = message
+		return KeyboardWorkerDiagnostics{}, errors.New(message)
+	}
 }
 
 func (worker *keyboardWorkerController) Restart() error {
@@ -318,17 +392,31 @@ type keyboardWorkerConfig struct {
 }
 
 type keyboardWorkerRuntime struct {
-	config             atomic.Pointer[keyboardWorkerConfig]
-	held               [1024]atomic.Bool
-	generation         [1024]atomic.Uint64
-	done               chan struct{}
-	wg                 sync.WaitGroup
-	faultMu            sync.Mutex
-	fault              error
-	backend            *interceptionKeyboardBackend
-	threadID           uint32
-	gameForegroundTest func(*keyboardWorkerConfig) bool
-	emitTest           func(uint32, time.Duration) error
+	config              atomic.Pointer[keyboardWorkerConfig]
+	held                [1024]atomic.Bool
+	generation          [1024]atomic.Uint64
+	done                chan struct{}
+	wg                  sync.WaitGroup
+	faultMu             sync.Mutex
+	fault               error
+	backend             *interceptionKeyboardBackend
+	threadID            uint32
+	gameForegroundTest  func(*keyboardWorkerConfig) bool
+	emitTest            func(uint32, time.Duration) error
+	configuredKeyEvents atomic.Uint64
+	foregroundMisses    atomic.Uint64
+	outputGateMisses    atomic.Uint64
+	triggerDowns        atomic.Uint64
+	triggerUps          atomic.Uint64
+	repeatStarts        atomic.Uint64
+	repeatStops         atomic.Uint64
+	outputPairs         atomic.Uint64
+	outputFailures      atomic.Uint64
+	syntheticHookEvents atomic.Uint64
+	lastKey             atomic.Uint32
+	lastScanCode        atomic.Uint32
+	lastDevice          atomic.Uint32
+	foregroundPID       atomic.Uint32
 }
 
 func RunKeyboardWorker(input io.Reader, output io.Writer) error {
@@ -389,7 +477,9 @@ func (worker *keyboardWorkerRuntime) readConfigurations(input io.Reader, output 
 			return
 		}
 		response := keyboardWorkerResponse{OK: true}
-		if request.IntervalMS < 1 || request.IntervalMS > 5000 {
+		if request.StatusOnly {
+			response.Diagnostics = worker.diagnostics()
+		} else if request.IntervalMS < 1 || request.IntervalMS > 5000 {
 			response.OK = false
 			response.Error = "keyboard worker interval must be 1..5000 ms"
 		} else {
@@ -420,6 +510,7 @@ func (worker *keyboardWorkerRuntime) readConfigurations(input io.Reader, output 
 					worker.generation[index].Add(1)
 				}
 			}
+			response.Diagnostics = worker.diagnostics()
 		}
 		if err := encoder.Encode(response); err != nil {
 			return
@@ -432,14 +523,20 @@ var activeKeyboardWorker atomic.Pointer[keyboardWorkerRuntime]
 func keyboardWorkerHookCallback(code int, message, dataPointer uintptr) uintptr {
 	if code >= 0 && dataPointer != 0 {
 		data := (*keyboardHook)(unsafe.Pointer(dataPointer))
+		worker := activeKeyboardWorker.Load()
 		// Interception inserts into the keyboard device stack and therefore is
 		// not guaranteed to carry LLKHF_INJECTED. The dedicated information
 		// marker is the recursion boundary used by the driver backend.
+		if data.ExtraInfo == interceptionMarker {
+			if worker != nil {
+				worker.syntheticHookEvents.Add(1)
+			}
+		}
 		if data.Flags&llkhfInjected == 0 && data.ExtraInfo != interceptionMarker {
 			down := message == wMKeyDown || message == wMSysKeyDown
 			up := message == wMKeyUp || message == wMSysKeyUp
 			if down || up {
-				if worker := activeKeyboardWorker.Load(); worker != nil {
+				if worker != nil {
 					if worker.handlePhysical(EncodeKeyCode(data.VirtualKey, data.Flags&llkhfExtended != 0), down) {
 						// Match the observed AHK_F hotkey path: while the
 						// verified game is foreground, the physical trigger
@@ -467,16 +564,27 @@ func (worker *keyboardWorkerRuntime) handlePhysical(key uint32, down bool) bool 
 	if config == nil || !config.enabled {
 		return false
 	}
-	if _, ok := config.keys[key]; !ok || !worker.gameForeground(config) {
+	if _, ok := config.keys[key]; !ok {
+		return false
+	}
+	worker.configuredKeyEvents.Add(1)
+	worker.lastKey.Store(key)
+	foregroundPID, foreground := worker.gameForegroundPID(config)
+	worker.foregroundPID.Store(foregroundPID)
+	if !foreground {
+		worker.foregroundMisses.Add(1)
 		return false
 	}
 	if !down {
+		worker.triggerUps.Add(1)
 		return true
 	}
+	worker.triggerDowns.Add(1)
 	if !worker.held[index].CompareAndSwap(false, true) {
 		return true
 	}
 	generation := worker.generation[index].Add(1)
+	worker.repeatStarts.Add(1)
 	worker.wg.Add(1)
 	go worker.repeatKey(key, generation)
 	return true
@@ -484,6 +592,7 @@ func (worker *keyboardWorkerRuntime) handlePhysical(key uint32, down bool) bool 
 
 func (worker *keyboardWorkerRuntime) repeatKey(key uint32, generation uint64) {
 	defer worker.wg.Done()
+	defer worker.repeatStops.Add(1)
 	index := int(key & 0x3ff)
 	// AutoHotkey dispatches a hotkey after its low-level hook callback has
 	// returned. Do the same so the physical event is fully suppressed before
@@ -506,12 +615,22 @@ func (worker *keyboardWorkerRuntime) repeatKey(key uint32, generation uint64) {
 			return
 		}
 		next := time.Now().Add(config.interval)
-		if worker.gameForeground(config) {
+		foregroundPID, foreground := worker.gameForegroundPID(config)
+		worker.foregroundPID.Store(foregroundPID)
+		if foreground {
+			if data, err := interceptionKeyboardData(key, false); err == nil {
+				worker.lastScanCode.Store(uint32(data.MakeCode) | uint32(data.Flags&^interceptionKeyUp)<<16)
+				worker.lastDevice.Store(1)
+			}
 			if err := worker.emitKey(key, config.interval); err != nil {
 				worker.held[index].Store(false)
+				worker.outputFailures.Add(1)
 				worker.fail(fmt.Errorf("Interception output for key 0x%X failed: %w", key, err))
 				return
 			}
+			worker.outputPairs.Add(1)
+		} else {
+			worker.outputGateMisses.Add(1)
 		}
 		delay := time.Until(next)
 		if delay < 0 {
@@ -550,16 +669,49 @@ func (worker *keyboardWorkerRuntime) runtimeFault() error {
 }
 
 func (worker *keyboardWorkerRuntime) gameForeground(config *keyboardWorkerConfig) bool {
+	_, foreground := worker.gameForegroundPID(config)
+	return foreground
+}
+
+func (worker *keyboardWorkerRuntime) gameForegroundPID(config *keyboardWorkerConfig) (uint32, bool) {
 	if worker.gameForegroundTest != nil {
-		return worker.gameForegroundTest(config)
+		return 0, worker.gameForegroundTest(config)
 	}
 	foreground := windows.GetForegroundWindow()
 	if foreground == 0 {
-		return false
+		return 0, false
 	}
 	processID := windowProcessID(foreground)
 	_, ok := config.processes[processID]
-	return ok
+	return processID, ok
+}
+
+func (worker *keyboardWorkerRuntime) diagnostics() KeyboardWorkerDiagnostics {
+	diagnostics := KeyboardWorkerDiagnostics{
+		ConfiguredKeyEvents: worker.configuredKeyEvents.Load(),
+		ForegroundMisses:    worker.foregroundMisses.Load(),
+		OutputGateMisses:    worker.outputGateMisses.Load(),
+		TriggerDowns:        worker.triggerDowns.Load(),
+		TriggerUps:          worker.triggerUps.Load(),
+		RepeatStarts:        worker.repeatStarts.Load(),
+		RepeatStops:         worker.repeatStops.Load(),
+		OutputPairs:         worker.outputPairs.Load(),
+		OutputFailures:      worker.outputFailures.Load(),
+		SyntheticHookEvents: worker.syntheticHookEvents.Load(),
+		LastKey:             worker.lastKey.Load(),
+		LastScanCode:        worker.lastScanCode.Load(),
+		LastDevice:          worker.lastDevice.Load(),
+		ForegroundPID:       worker.foregroundPID.Load(),
+	}
+	config := worker.config.Load()
+	if config != nil {
+		for key := range config.keys {
+			if worker.held[int(key&0x3ff)].Load() {
+				diagnostics.HeldKeys = append(diagnostics.HeldKeys, key)
+			}
+		}
+	}
+	return diagnostics
 }
 
 func (worker *keyboardWorkerRuntime) emitKey(key uint32, interval time.Duration) error {

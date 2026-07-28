@@ -41,24 +41,20 @@ func TestLaunchSuspendedAndInjectOnOwnedFixture(t *testing.T) {
 	}
 }
 
-func TestModulesLoadedRequiresExactResidentModule(t *testing.T) {
+func TestRemoteModuleLoadedRequiresExactResidentModule(t *testing.T) {
 	executable, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
 	}
-	loaded, err := ModulesLoaded(windows.GetCurrentProcessId(), []string{executable})
+	loaded, err := remoteModuleLoaded(windows.GetCurrentProcessId(), executable)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !loaded {
 		t.Fatal("current executable was not found in its own module snapshot")
 	}
-	loaded, fingerprint, err := ModuleReadiness(windows.GetCurrentProcessId(), []string{executable})
-	if err != nil || !loaded || fingerprint == "" {
-		t.Fatalf("module readiness loaded=%t fingerprint=%q err=%v", loaded, fingerprint, err)
-	}
-	if _, err := ModulesLoaded(0, nil); err == nil {
-		t.Fatal("empty module readiness request was accepted")
+	if _, err := remoteModuleLoaded(0, executable); err == nil {
+		t.Fatal("zero-PID module query was accepted")
 	}
 }
 
@@ -83,21 +79,5 @@ func TestReadyEventSignaledObservesWithoutMutating(t *testing.T) {
 	signaled, err = ReadyEventSignaled(name)
 	if err != nil || !signaled {
 		t.Fatalf("signaled event result=%t err=%v", signaled, err)
-	}
-}
-
-func TestModuleSetFingerprintTracksReloadedLifetime(t *testing.T) {
-	first := []loadedModule{
-		{path: `C:\Game\plugin.dll`, base: 0x1000, size: 4096},
-		{path: `C:\Windows\System32\kernel32.dll`, base: 0x2000, size: 8192},
-	}
-	sameDifferentOrder := []loadedModule{first[1], first[0]}
-	reloaded := append([]loadedModule(nil), first...)
-	reloaded[0].base = 0x3000
-	if a, b := moduleSetFingerprint(first), moduleSetFingerprint(sameDifferentOrder); a == "" || a != b {
-		t.Fatalf("equivalent module sets produced unstable fingerprints: %q / %q", a, b)
-	}
-	if moduleSetFingerprint(first) == moduleSetFingerprint(reloaded) {
-		t.Fatal("same-path module reload did not change the fingerprint")
 	}
 }

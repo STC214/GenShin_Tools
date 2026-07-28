@@ -352,6 +352,13 @@ func (n *Native) KeyboardWorkerError() string {
 	return n.keyboardWorker.LastError()
 }
 
+func (n *Native) KeyboardWorkerDiagnostics() (KeyboardWorkerDiagnostics, error) {
+	if n == nil || n.keyboardWorker == nil {
+		return KeyboardWorkerDiagnostics{}, errors.New("keyboard worker is unavailable")
+	}
+	return n.keyboardWorker.Diagnostics()
+}
+
 // SetKeyboardBackendReady is the hard post-launch gate for the x86 keyboard
 // hook. Game discovery may configure target PIDs early, but it must not install
 // the hook until launch and every injected module have completed.
@@ -1172,6 +1179,17 @@ func (n *Native) processPhysicalEventLocked(event PhysicalEvent) {
 		return
 	}
 	before := n.engine.Snapshot()
+	// Interception output returns through WM_INPUT with a real device handle,
+	// where its ExtraInformation recursion marker is not available. Once the
+	// dedicated worker owns keyboard repeat, it is the sole physical ledger
+	// and output counter for configured repeat keys. Ignoring the main-process
+	// Raw Input copy prevents each synthetic down/up pair from making the UI
+	// oscillate between Running and Armed.
+	if n.keyboardWorker != nil && n.keyboardWorker.Active() &&
+		before.Config.Enabled && before.Config.Mode == ModeKeyboard &&
+		event.Kind == EventKey && before.Config.IsRepeatKey(event.Code) {
+		return
+	}
 	if before.State == StateArmed && before.Config.Enabled && before.Config.Mode == ModeKeyboard &&
 		event.Kind == EventKey && event.Down && before.Config.IsRepeatKey(event.Code) && !n.isGameWindow(n.foreground()) {
 		return

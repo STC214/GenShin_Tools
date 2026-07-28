@@ -1,12 +1,9 @@
 package injection
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"path/filepath"
-	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -172,8 +169,6 @@ func remoteModuleLoaded(pid uint32, dllPath string) (bool, error) {
 
 type loadedModule struct {
 	path string
-	base uintptr
-	size uint32
 }
 
 func loadedModules(pid uint32) ([]loadedModule, error) {
@@ -190,69 +185,13 @@ func loadedModules(pid uint32) ([]loadedModule, error) {
 	for err = windows.Module32First(snapshot, &entry); err == nil; err = windows.Module32Next(snapshot, &entry) {
 		path := filepath.Clean(windows.UTF16ToString(entry.ExePath[:]))
 		if path != "." && path != "" {
-			modules = append(modules, loadedModule{path: path, base: entry.ModBaseAddr, size: entry.ModBaseSize})
+			modules = append(modules, loadedModule{path: path})
 		}
 	}
 	if errors.Is(err, windows.ERROR_NO_MORE_FILES) {
 		return modules, nil
 	}
 	return nil, err
-}
-
-// ModulesLoaded verifies that every audited injection target is still present
-// in the exact game process. The launcher uses this after helper completion so
-// input hooks cannot be finalized from a stale success result after a module
-// immediately unloaded or the process lifetime changed.
-func ModulesLoaded(pid uint32, dllPaths []string) (bool, error) {
-	loaded, _, err := ModuleReadiness(pid, dllPaths)
-	return loaded, err
-}
-
-// ModuleReadiness verifies the audited injection targets and fingerprints the
-// complete module set from one Toolhelp snapshot. A changing fingerprint means
-// plugin initialization is still loading native dependencies, so the launcher
-// restarts its continuous stabilization window before installing input hooks.
-func ModuleReadiness(pid uint32, dllPaths []string) (loaded bool, fingerprint string, err error) {
-	if pid == 0 || len(dllPaths) == 0 {
-		return false, "", errors.New("game PID and injected module paths are required")
-	}
-	modules, err := loadedModules(pid)
-	if err != nil {
-		return false, "", err
-	}
-	normalized := make(map[string]struct{}, len(modules))
-	for _, module := range modules {
-		lower := strings.ToLower(filepath.Clean(module.path))
-		normalized[lower] = struct{}{}
-	}
-	fingerprint = moduleSetFingerprint(modules)
-	for _, dllPath := range dllPaths {
-		if !filepath.IsAbs(dllPath) {
-			return false, "", fmt.Errorf("injected module path is not absolute: %q", dllPath)
-		}
-		if _, exists := normalized[strings.ToLower(filepath.Clean(dllPath))]; !exists {
-			return false, fingerprint, nil
-		}
-	}
-	return true, fingerprint, nil
-}
-
-func moduleSetFingerprint(modules []loadedModule) string {
-	fingerprintModules := make([]string, 0, len(modules))
-	for _, module := range modules {
-		lower := strings.ToLower(filepath.Clean(module.path))
-		// Include the mapped address and image size as well as the path. A DLL
-		// unloaded and reloaded from the same file is a new module lifetime and
-		// must restart the input-hook stabilization interval.
-		fingerprintModules = append(fingerprintModules, fmt.Sprintf("%s\x00%x:%d", lower, module.base, module.size))
-	}
-	sort.Strings(fingerprintModules)
-	hash := sha256.New()
-	for _, module := range fingerprintModules {
-		_, _ = hash.Write([]byte(module))
-		_, _ = hash.Write([]byte{0})
-	}
-	return hex.EncodeToString(hash.Sum(nil))
 }
 
 // ReadyEventSignaled checks an opt-in module readiness handshake without

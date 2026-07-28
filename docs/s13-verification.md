@@ -432,6 +432,53 @@
 - SHA-256：`f5d9b5b48aa2f893888909e347912ffb4b62130cf5a25ab8e26328ddf638e295`
 - 条目数：19；无重复条目
 
+## 1.3.7 受保护进程兼容与注入后五秒硬时序
+
+- 对实机便携目录日志的复核确认：三次注入均已完成 helper/Running 屏障，插件心跳也持续存在，
+  但恢复运行后的模块快照验证均返回 `Access is denied.`。这会永久阻塞最终化任务，因而既没有
+  启动内置 Interception worker，也没有尝试重新拉起 AHK。
+- 模块驻留验证只保留在 helper 的挂起进程注入阶段；helper 必须等待每个远程
+  `LoadLibrary` 返回并验证目标 DLL 后才能恢复游戏。恢复后的受保护游戏进程不再执行
+  `TH32CS_SNAPMODULE` 枚举，也不再把其访问结果用作输入最终化门禁。
+- 启动顺序固定为：全部 DLL 注入完成 → helper 成功并进入 Running → 等待模块声明的可选
+  `readyEvent` → 在所有内外部连发均未加载的状态下单独等待 5 秒 → 游戏处于前台时依次恢复
+  主观察 Hook、载入内置 Interception worker、重启捕获到的外部 AHK/QuickInput，最后启动
+  随游戏管理的内置 AHK。
+- 五秒计时只由注入/插件就绪状态控制；期间切换前台不会重新计时。计时结束时游戏不在前台，
+  最终化任务继续等待，直到游戏重新成为前台才加载连发。
+- `./scripts/test-s13-release.ps1 -ShellIterations 1 -SkipOnlineProvider` 于
+  2026-07-28 通过：全量普通/race、格式、vet、确定性双配置构建、PE/图标/权限、200 次 Hook
+  重装、鼠标八组节拍、S02、S05、S09 和确定性 ZIP 全部通过。真实 Interception 驱动捕获
+  因自动化进程为 Medium integrity 而明确跳过，真实原神消费仍保留为人工门禁。
+
+- 文件：`artifacts/release/GenshinTools-1.3.7-windows-amd64-portable.zip`
+- 大小：10,906,316 bytes
+- SHA-256：`da0ede8b37fe665ee8bb100302cbdf37bf5eaa82088d18e80f35170bd0519dbc`
+- 条目数：19；无重复条目
+
+## 1.3.8 内置连发分层诊断
+
+- x86 worker 的请求/响应协议新增只读诊断快照，不会因查询而重置配置、held 状态或
+  generation。主进程每两秒记录配置键事件、前台拒绝、触发 down/up、循环启停、当前 held
+  键、输出组数、驱动失败、扫描码、逻辑设备和合成 Hook 回流计数。
+- 诊断协议超时会关闭已经失去帧边界的 worker，并经既有注入后门禁允许的刷新路径重新创建，
+  避免遗留读取协程与后续响应串帧。
+- 已确认界面“触发/待触发”高速切换来自 Interception 合成输入携带真实设备句柄回到
+  Raw Input，而该路径无法读取低级 Hook 的 `ExtraInformation` 标记。worker 活跃时，主状态机
+  不再消费配置连发键的这份回流；真实物理保持与输出仍完全由 x86 worker 负责。
+- `go test -race ./internal/input ./internal/shell -count=1` 于 2026-07-28 通过。
+- `./scripts/test-s13-release.ps1 -ShellIterations 1 -SkipOnlineProvider` 于
+  2026-07-28 通过：全量普通/race、格式、vet、双配置构建、PE/图标/权限、Hook 生命周期、
+  S02、S05、S09 和确定性 ZIP 均通过。真实 Interception 捕获因自动化进程为 Medium
+  integrity 而明确跳过，真实原神消费仍属于人工门禁。
+- 最终复审又补齐诊断超时后的配置保留与 worker 重建；随后重新通过 input/shell race、
+  Debug/Release 双构建、PE/权限/便携布局核验并重打候选包。
+
+- 文件：`artifacts/release/GenshinTools-1.3.8-windows-amd64-portable.zip`
+- 大小：10,916,363 bytes
+- SHA-256：`39cf1d6dc976349b79b04acbc54c8c694d55d0a8f51bf4f65a25ca13bd52fa2b`
+- 条目数：19；无重复条目
+
 ## 尚未关闭的人工门禁
 
 1. 真实原神/反作弊环境下的输入、截图、覆盖层、启动和可选插件/注入组合。

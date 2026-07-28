@@ -93,6 +93,12 @@ func TestKeyboardWorkerSuppressesOnlyConfiguredGameTrigger(t *testing.T) {
 	}
 	close(worker.done)
 	worker.wg.Wait()
+	diagnostics := worker.diagnostics()
+	if diagnostics.ConfiguredKeyEvents != 2 || diagnostics.TriggerDowns != 1 ||
+		diagnostics.TriggerUps != 1 || diagnostics.RepeatStarts != 1 ||
+		diagnostics.RepeatStops != 1 || diagnostics.LastKey != EncodeKeyCode('F', false) {
+		t.Fatalf("unexpected worker diagnostics: %+v", diagnostics)
+	}
 }
 
 func TestKeyboardWorkerDoesNotActivateOutsideGame(t *testing.T) {
@@ -110,6 +116,11 @@ func TestKeyboardWorkerDoesNotActivateOutsideGame(t *testing.T) {
 	}
 	if worker.held[int(EncodeKeyCode('F', false)&0x3ff)].Load() {
 		t.Fatal("trigger became held outside the game")
+	}
+	diagnostics := worker.diagnostics()
+	if diagnostics.ConfiguredKeyEvents != 1 || diagnostics.ForegroundMisses != 1 ||
+		diagnostics.TriggerDowns != 0 || diagnostics.RepeatStarts != 0 {
+		t.Fatalf("foreground rejection was not diagnosed: %+v", diagnostics)
 	}
 }
 
@@ -137,6 +148,10 @@ func TestKeyboardWorkerRecordsInterceptionOutputFailure(t *testing.T) {
 	}
 	if !strings.Contains(fault.Error(), "Interception output") {
 		t.Fatalf("runtime fault lacks actionable context: %v", fault)
+	}
+	diagnostics := worker.diagnostics()
+	if diagnostics.OutputFailures != 1 || diagnostics.OutputPairs != 0 || diagnostics.RepeatStops != 1 {
+		t.Fatalf("driver failure was not diagnosed: %+v", diagnostics)
 	}
 }
 

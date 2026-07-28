@@ -105,30 +105,31 @@ func TestLaunchRemainsBusyDuringPendingToolRestore(t *testing.T) {
 	}
 }
 
-func TestWaitForStableGameForegroundRequiresContinuousForeground(t *testing.T) {
+func TestWaitForReadinessDelayStartsAfterReadinessAndForegroundDoesNotResetIt(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 
-	calls := 0
-	foreground := func() bool {
-		calls++
-		// The first foreground period is interrupted and must not count toward
-		// the stable period. The later period remains continuously foreground.
-		return calls != 2
-	}
 	started := time.Now()
-	if !waitForStableGameForeground(ctx, foreground, 150*time.Millisecond) {
-		t.Fatal("stable foreground was not detected")
+	readiness := func() bool {
+		return time.Since(started) >= 100*time.Millisecond
 	}
-	if elapsed := time.Since(started); elapsed < 250*time.Millisecond {
-		t.Fatalf("returned before a continuous stable period elapsed: %v", elapsed)
+	foreground := func() bool {
+		// Foreground returns only after the independent 150ms post-readiness
+		// delay has elapsed. It must not start a second 150ms interval.
+		return time.Since(started) >= 300*time.Millisecond
+	}
+	if !waitForReadinessDelayAndForeground(ctx, readiness, foreground, 150*time.Millisecond) {
+		t.Fatal("post-injection delay and foreground were not detected")
+	}
+	if elapsed := time.Since(started); elapsed < 300*time.Millisecond || elapsed >= 440*time.Millisecond {
+		t.Fatalf("foreground incorrectly reset or shortened the independent delay: %v", elapsed)
 	}
 }
 
-func TestWaitForStableGameForegroundHonorsCancellation(t *testing.T) {
+func TestWaitForReadinessDelayHonorsCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if waitForStableGameForeground(ctx, func() bool { return false }, 100*time.Millisecond) {
+	if waitForReadinessDelayAndForeground(ctx, func() bool { return true }, func() bool { return true }, 100*time.Millisecond) {
 		t.Fatal("cancelled wait unexpectedly succeeded")
 	}
 }

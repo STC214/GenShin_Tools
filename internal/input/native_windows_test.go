@@ -799,6 +799,26 @@ func TestKeyboardRepeatPreservesPhysicalTriggerInConfiguredGame(t *testing.T) {
 	}
 }
 
+func TestMainEngineIgnoresInterceptionRawInputEcho(t *testing.T) {
+	n, err := NewNative(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config := DefaultConfig()
+	config.Enabled = true
+	config.Mode = ModeKeyboard
+	if err := n.Configure(config); err != nil {
+		t.Fatal(err)
+	}
+	n.keyboardWorker.active.Store(true)
+	n.processPhysicalEvent(PhysicalEvent{Kind: EventKey, Code: config.OutputKey, Down: true})
+	n.processPhysicalEvent(PhysicalEvent{Kind: EventKey, Code: config.OutputKey, Down: false})
+	snapshot := n.Snapshot()
+	if snapshot.State != StateArmed || snapshot.OutputCount != 0 {
+		t.Fatalf("Interception Raw Input echo changed main-engine state: %+v", snapshot)
+	}
+}
+
 func TestNativeHooksStartAndClose(t *testing.T) {
 	n, err := NewNative(nil)
 	if err != nil {
