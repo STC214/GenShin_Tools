@@ -9,12 +9,13 @@
 本项目原创代码与文档采用 [MIT License](LICENSE)。第三方依赖、FufuLauncher、商店插件和按需下载的二进制仍分别受其自身许可证约束，详见 [LICENSE_POLICY.md](LICENSE_POLICY.md) 与 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 
 从 1.1.0 起主程序请求管理员权限，以便与游戏和输入工具保持相同完整性级别。Windows 会在主程序启动时显示一次 UAC。
+点击“纯净启动”或“注入启动”后，启动器保持当前窗口状态，不会因游戏进程进入 Running 而隐藏到系统托盘或退出。
 
 输入增强页提供“AHK随游戏启动/关闭”选项。启用后，程序不会在刚发现游戏进程时立即启动 AHK，而是等待注入 helper 完成全部审计 DLL 的远程 `LoadLibrary` 并与游戏 Running 信号汇合；支持主动就绪协议的模块还必须发出与本次游戏 PID 绑定的命名事件。以上注入工作完成后，内外部连发继续保持完全卸载并单独等待 5 秒；五秒到期且游戏位于前台时，程序才会先重装主程序观察 Hook、再安装内置 worker、恢复注入前关闭的外部输入工具，最后启动便携包内由项目所有者制作并明确授权随项目分发的旧版编译成品 `AHK_F.exe`。切出窗口不会重新计算这五秒，但到期前不会加载任何连发 Hook。游戏进程全部退出后只结束本次记录的准确 PID/路径/创建时间，游戏仍存活而 AHK 意外关闭时会自动重新拉起。热键只在游戏窗口位于前台时生效，切到其他窗口会通过 AHK 自身的暂停命令失活，界面以绿色/红色显示状态。该成品按固定 SHA-256 审计，不使用独立 `.ahk` 脚本；其内嵌的 AutoHotkey v1.0.48.05 运行时仍按 GPL-2.0 提供许可证和对应源码。
 
-内置键盘连发采用与 [FlairBloom](https://github.com/x-wink/flair-bloom) 游戏模式等价的 Interception 驱动输入路径，不再回退到游戏无法消费的 `keybd_event`/`SendInput` 键盘模拟。游戏扫描只登记路径、PID 和创建时间，不创建 worker；注入前连主程序自身的 `WH_KEYBOARD_LL`/`WH_MOUSE_LL` 观察 Hook 也会卸载，只有统一的启动/注入完成屏障放行后才按顺序重装，负责拦截的 x86 worker 最后安装。worker 仅当前台窗口属于该游戏进程时吞掉配置的物理触发键并发送带防递归标记的扫描码 down/up，切出游戏立即停止输出，游戏全部退出后 worker 和驱动句柄一并关闭。
+内置键盘连发采用与 [FlairBloom](https://github.com/x-wink/flair-bloom) 游戏模式等价的 Interception 驱动输入路径，不再回退到游戏无法消费的 `keybd_event`/`SendInput` 键盘模拟。游戏扫描只登记路径、PID 和创建时间，不创建 worker；注入前连主程序自身的 `WH_KEYBOARD_LL`/`WH_MOUSE_LL` 观察 Hook 也会卸载，只有统一的启动/注入完成屏障放行后才按顺序重装，负责输入的 x86 worker 最后安装。worker 直接通过 Interception 驱动的过滤、读取和原设备回写链路透明转发所有硬件键；配置键的驱动 stroke 是 held/generation 的唯一依据，低级 Hook 和 Raw Input 都不再具有结束连发的权限，从而不受插件链复制或重放用户态事件影响。worker 只在前台窗口属于该游戏进程时附加带防递归标记的扫描码 down/up；切出游戏立即停止输出，游戏全部退出后过滤器、worker 和驱动句柄一并关闭。
 
-x86 worker 每两秒向 `data/logs/genshin-tools.log` 回报一次有界诊断快照，包含配置键事件、前台拒绝、物理 down/up、保持键、循环启停、驱动输出组数、失败数、扫描码、逻辑设备和合成 Hook 回流计数。Interception 合成事件经 Raw Input 返回时不再进入主进程的旧状态机，避免界面在“触发/待触发”之间高速闪动，也避免该回流污染真实 worker 计数。
+x86 worker 每两秒向 `data/logs/genshin-tools.log` 回报一次有界诊断快照，包含配置键驱动事件、前台拒绝、物理 down/up、保持键与设备、循环启停、驱动输出组数、失败数、扫描码、输入/输出逻辑设备、伪 up 检查和合成 Hook 回流计数。第一次配置键 down 会立即输出，不等待 Windows 长按重复；重复输出写回该次按下所在的真实 Interception 设备。其他键的驱动 stroke 只会被立即原样转发，不会修改配置键 held；与其他键切换紧邻出现的跨设备伪 up 会被丢弃，原循环不中止。读取、转发或过滤器初始化任一步失败都会停止 worker 并释放过滤上下文，不允许静默漏掉 key-up。
 
 键盘连发要求用户另行安装 [Interception v1.0.1 官方驱动](https://github.com/oblitum/Interception/releases/tag/v1.0.1)：下载并解压官方发布包，以管理员命令行在 `command line installer` 目录执行 `install-interception.exe /install`，成功后必须重启 Windows。Genshin Tools 本身也需要以管理员权限运行。驱动属于全系统键鼠 UpperFilter，安装前应保留可用的系统恢复方式；本项目不会静默安装、卸载，也不随 MIT 便携包再分发其 DLL、安装器或驱动。
 

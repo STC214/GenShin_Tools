@@ -12,8 +12,14 @@ func TestInterceptionKeyboardProtocolABI(t *testing.T) {
 	if got := unsafe.Sizeof(interceptionKeyboardInput{}); got != 12 {
 		t.Fatalf("KEYBOARD_INPUT_DATA size = %d, want 12", got)
 	}
+	if interceptionSetFilterIOCTL != 0x222010 {
+		t.Fatalf("Interception IOCTL_SET_FILTER = 0x%X, want 0x222010", interceptionSetFilterIOCTL)
+	}
 	if interceptionWriteIOCTL != 0x222080 {
 		t.Fatalf("Interception IOCTL_WRITE = 0x%X, want 0x222080", interceptionWriteIOCTL)
+	}
+	if interceptionReadIOCTL != 0x222100 {
+		t.Fatalf("Interception IOCTL_READ = 0x%X, want 0x222100", interceptionReadIOCTL)
 	}
 	if interceptionSetEventIOCTL != 0x222040 {
 		t.Fatalf("Interception IOCTL_SET_EVENT = 0x%X, want 0x222040", interceptionSetEventIOCTL)

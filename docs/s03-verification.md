@@ -10,7 +10,7 @@
 - 钩子回调只执行 injected/`dwExtraInfo` 过滤和固定 256 项 SPSC 环形队列写入，不等待、不记录日志、不执行状态机。
 - `Disabled / Armed / Running / Stopping / Fault` 单一状态机，generation 阻断旧输出循环。
 - 键盘主路径为游戏启动后才加载的独立 x86 worker：同一 worker 进程安装低级键盘 hook、维护每个物理连发键的 held 状态、建立完整 Interception 设备上下文，并向第一个逻辑键盘提交带 `0x51485844` 防递归标记的扫描码 down/up；驱动不可用时失败关闭，不再降级到键盘 `SendInput`。鼠标采用与 QuickInput 一致的单事件 `SendInput`。
-- 仅当配置的物理触发键位于已核验游戏前台时，worker 才吞掉该键的 down/up，以免游戏同时收到持续物理 down 和合成重复；其他键和其他窗口始终放行。切出游戏暂停输出但保留 held 循环，其他按键不会取消任何连发键。
+- 与 FlairBloom 一致，worker 只观察配置键的物理 down/up 并始终调用后续 Hook；仅当已核验游戏位于前台时维护 held 循环并附加合成重复。切出游戏暂停输出但保留 held 循环，其他按键不会取消任何连发键。
 - 快捷键全键盘轮询明确排除鼠标左右键、中键和 XButton 虚拟键，点击“设置”遗留的鼠标按下状态不会再被保存为 `Unknown key`。
 - `MapVirtualKeyExW` 按当前前台线程键盘布局转换，并处理扩展扫描码。
 - 高分辨率 waitable timer；不支持高分辨率标志的旧系统回退普通 waitable timer。
@@ -89,9 +89,10 @@ PID、完整路径和创建时间停止捕获到的外部 AHK/QuickInput；只�
 转交下一轮；若工具已经重启则先精确停止新实例，不能从取消路径提前占据 Hook 顺序。
 
 worker 活跃期间，主进程不会再把 Interception 合成键经 Raw Input 返回的 down/up 当成物理
-触发；真实 held 状态和输出组数只由 x86 worker 维护。主日志每两秒记录一次
-`built-in keyboard worker diagnostics`，可分别判断物理 Hook、前台 PID 门禁、循环生命周期、
-逻辑设备 1 扫描码提交、驱动输出成功与失败。
+触发；真实 held 状态只接受 x86 worker 从 Interception `IOCTL_READ` 得到、再向原设备透明
+回写的硬件 stroke，低级 Hook 和 Raw Input 均不再拥有松键权限。主日志每两秒记录一次
+`built-in keyboard worker diagnostics`，可分别判断驱动物理边沿、前台 PID 门禁、循环生命周期、
+实际输入设备、逻辑设备 1 扫描码提交、驱动输出成功与失败。
 
 ## 稳定性清单对照
 

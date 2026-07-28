@@ -63,7 +63,7 @@ func TestKeyboardWorkerDoesNotStartWhileFeatureDisabled(t *testing.T) {
 	}
 }
 
-func TestKeyboardWorkerSuppressesOnlyConfiguredGameTrigger(t *testing.T) {
+func TestKeyboardWorkerTracksOnlyConfiguredDriverTrigger(t *testing.T) {
 	worker := &keyboardWorkerRuntime{
 		done:               make(chan struct{}),
 		gameForegroundTest: func(*keyboardWorkerConfig) bool { return true },
@@ -75,19 +75,14 @@ func TestKeyboardWorkerSuppressesOnlyConfiguredGameTrigger(t *testing.T) {
 		interval: time.Hour,
 	})
 
-	if worker.handlePhysical(EncodeKeyCode('G', false), true) {
-		t.Fatal("unrelated key was suppressed")
-	}
-	if !worker.handlePhysical(EncodeKeyCode('F', false), true) {
-		t.Fatal("configured trigger down was not suppressed")
-	}
+	worker.handlePhysical(EncodeKeyCode('G', false), true)
+	worker.handlePhysical(EncodeKeyCode('F', false), true)
+	worker.handlePhysical(EncodeKeyCode('G', false), false)
 	heldIndex := int(EncodeKeyCode('F', false) & 0x3ff)
 	if !worker.held[heldIndex].Load() {
-		t.Fatal("configured trigger was not marked held")
+		t.Fatal("unrelated key transition interrupted the configured trigger")
 	}
-	if !worker.handlePhysical(EncodeKeyCode('F', false), false) {
-		t.Fatal("configured trigger up was not suppressed")
-	}
+	worker.handlePhysical(EncodeKeyCode('F', false), false)
 	if worker.held[heldIndex].Load() {
 		t.Fatal("configured trigger remained held after key up")
 	}
@@ -101,6 +96,80 @@ func TestKeyboardWorkerSuppressesOnlyConfiguredGameTrigger(t *testing.T) {
 	}
 }
 
+func TestKeyboardWorkerDriverStrokeIgnoresUnrelatedKey(t *testing.T) {
+	key := EncodeKeyCode('F', false)
+	fStroke := interceptionKeyboardInput{MakeCode: 0x21}
+	gStroke := interceptionKeyboardInput{MakeCode: 0x22}
+	worker := &keyboardWorkerRuntime{
+		done:               make(chan struct{}),
+		gameForegroundTest: func(*keyboardWorkerConfig) bool { return true },
+		emitTest:           func(uint32, time.Duration) error { return nil },
+	}
+	worker.config.Store(&keyboardWorkerConfig{
+		enabled:    true,
+		keys:       map[uint32]struct{}{key: {}},
+		strokeKeys: map[uint32]uint32{interceptionStrokeSignature(fStroke): key},
+		interval:   time.Hour,
+	})
+	worker.handleInterceptionPhysical(1, fStroke)
+	worker.handleInterceptionPhysical(1, gStroke)
+	gStroke.Flags = interceptionKeyUp
+	worker.handleInterceptionPhysical(1, gStroke)
+	if !worker.held[int(key&0x3ff)].Load() {
+		t.Fatal("unrelated driver stroke interrupted held repeat key")
+	}
+	fStroke.Flags = interceptionKeyUp
+	worker.handleInterceptionPhysical(1, fStroke)
+	time.Sleep(keyboardReleaseSettle + 5*time.Millisecond)
+	if !worker.held[int(key&0x3ff)].Load() {
+		t.Fatal("adjacent cross-key release was not suppressed")
+	}
+	if got := worker.releaseSuppressed.Load(); got != 1 {
+		t.Fatalf("suppressed release count = %d, want 1", got)
+	}
+	time.Sleep(keyboardReleaseLookback)
+	worker.handleInterceptionPhysical(1, fStroke)
+	time.Sleep(keyboardReleaseSettle + 5*time.Millisecond)
+	if worker.held[int(key&0x3ff)].Load() {
+		t.Fatal("matching driver key-up did not end held repeat key")
+	}
+	close(worker.done)
+	worker.wg.Wait()
+}
+
+func TestKeyboardWorkerFirstDownEmitsWithoutLongPressDelay(t *testing.T) {
+	key := EncodeKeyCode('F', false)
+	emitted := make(chan struct{}, 1)
+	worker := &keyboardWorkerRuntime{
+		done:               make(chan struct{}),
+		gameForegroundTest: func(*keyboardWorkerConfig) bool { return true },
+		emitTest: func(uint32, time.Duration) error {
+			select {
+			case emitted <- struct{}{}:
+			default:
+			}
+			return nil
+		},
+	}
+	worker.config.Store(&keyboardWorkerConfig{
+		enabled:  true,
+		keys:     map[uint32]struct{}{key: {}},
+		interval: time.Hour,
+	})
+	worker.handlePhysicalDevice(key, true, 4)
+	select {
+	case <-emitted:
+	case <-time.After(50 * time.Millisecond):
+		t.Fatal("first physical down waited for a long-press repeat")
+	}
+	if got := worker.heldDevice[int(key&0x3ff)].Load(); got != 4 {
+		t.Fatalf("held output device = %d, want physical device 4", got)
+	}
+	worker.handlePhysical(key, false)
+	close(worker.done)
+	worker.wg.Wait()
+}
+
 func TestKeyboardWorkerDoesNotActivateOutsideGame(t *testing.T) {
 	worker := &keyboardWorkerRuntime{
 		done:               make(chan struct{}),
@@ -111,9 +180,7 @@ func TestKeyboardWorkerDoesNotActivateOutsideGame(t *testing.T) {
 		keys:     map[uint32]struct{}{EncodeKeyCode('F', false): {}},
 		interval: time.Millisecond,
 	})
-	if worker.handlePhysical(EncodeKeyCode('F', false), true) {
-		t.Fatal("trigger was suppressed outside the game")
-	}
+	worker.handlePhysical(EncodeKeyCode('F', false), true)
 	if worker.held[int(EncodeKeyCode('F', false)&0x3ff)].Load() {
 		t.Fatal("trigger became held outside the game")
 	}

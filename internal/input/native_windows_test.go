@@ -92,6 +92,21 @@ func TestRawInputLayoutsAndPhysicalKeyboardTranslation(t *testing.T) {
 	}
 }
 
+func TestRawKeyboardIgnoresSyntheticDeviceStackMarkers(t *testing.T) {
+	n := &Native{wake: make(chan struct{}, 1)}
+	n.handleRawKeyboard(rawKeyboard{
+		VirtualKey:       'F',
+		ExtraInformation: uint32(interceptionMarker),
+	})
+	n.handleRawKeyboard(rawKeyboard{
+		VirtualKey:       'F',
+		ExtraInformation: uint32(injectionMarker),
+	})
+	if got := n.head.Load(); got != 0 {
+		t.Fatalf("synthetic raw keyboard records queued %d event(s), want 0", got)
+	}
+}
+
 func TestNativeQueueSupportsConcurrentHookAndRawInputProducers(t *testing.T) {
 	n := &Native{wake: make(chan struct{}, 1)}
 	const producers = 8

@@ -513,11 +513,19 @@ func (n *Native) handleRawKeyboard(keyboard rawKeyboard) {
 	if keyboard.VirtualKey == 0 || keyboard.VirtualKey == 0xff {
 		return
 	}
-	n.enqueue(PhysicalEvent{
+	// Interception output is inserted at the keyboard device stack, so unlike
+	// SendInput it can have a non-zero RAWINPUTHEADER device. Its marker is
+	// therefore the required recursion boundary for this physical-state path.
+	if keyboard.ExtraInformation == uint32(interceptionMarker) ||
+		keyboard.ExtraInformation == uint32(injectionMarker) {
+		return
+	}
+	event := PhysicalEvent{
 		Kind: EventKey,
 		Code: EncodeKeyCode(uint32(keyboard.VirtualKey), keyboard.Flags&(riKeyE0|riKeyE1) != 0),
 		Down: keyboard.Flags&riKeyBreak == 0,
-	})
+	}
+	n.enqueue(event)
 }
 
 // SetGameProcesses restricts generated input to verified running game process
@@ -565,9 +573,9 @@ func (n *Native) syncKeyboardWorker(snapshot Snapshot) error {
 }
 
 func (n *Native) publishKeyboardSuppression(snapshot Snapshot) {
-	// The x86 worker owns both the physical hook and AHK-compatible output, so
-	// it suppresses only configured trigger keys inside the verified game.
-	// The x64 hook must not suppress the same event a second time.
+	// The x86 worker owns physical held state and Interception output but, like
+	// FlairBloom, forwards every original physical edge. The x64 hook also
+	// remains observation-only.
 	n.suppression.Store(&keyboardSuppressionSnapshot{})
 }
 
@@ -1179,12 +1187,10 @@ func (n *Native) processPhysicalEventLocked(event PhysicalEvent) {
 		return
 	}
 	before := n.engine.Snapshot()
-	// Interception output returns through WM_INPUT with a real device handle,
-	// where its ExtraInformation recursion marker is not available. Once the
-	// dedicated worker owns keyboard repeat, it is the sole physical ledger
-	// and output counter for configured repeat keys. Ignoring the main-process
-	// Raw Input copy prevents each synthetic down/up pair from making the UI
-	// oscillate between Running and Armed.
+	// The dedicated worker owns keyboard-repeat state and output counters.
+	// handleRawKeyboard filters marked Interception records before this point;
+	// ignoring the remaining main-process copy of configured keys keeps the
+	// legacy Engine from becoming a second repeat state machine.
 	if n.keyboardWorker != nil && n.keyboardWorker.Active() &&
 		before.Config.Enabled && before.Config.Mode == ModeKeyboard &&
 		event.Kind == EventKey && before.Config.IsRepeatKey(event.Code) {

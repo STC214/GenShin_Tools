@@ -2532,7 +2532,7 @@ func (app *application) startInjectionLaunch() {
 		return
 	}
 	settings := app.settings.Injection
-	launchSettings := app.settings.Launch
+	launchSettings := explicitLaunchConfig(app.settings.Launch)
 	available := make(map[string]bool, len(app.pluginItems))
 	for _, item := range app.pluginItems {
 		available[item.Manifest.ID] = true
@@ -2653,7 +2653,8 @@ func (app *application) startCleanLaunch() {
 		}
 		return
 	}
-	if err := app.launchEngine.Launch(*app.gameState.Candidate, app.settings.Launch); err != nil {
+	launchSettings := explicitLaunchConfig(app.settings.Launch)
+	if err := app.launchEngine.Launch(*app.gameState.Candidate, launchSettings); err != nil {
 		app.injectionStatus = fmt.Sprintf(app.texts.Text("injection.status.cleanFailed"), err)
 		if app.inputNative != nil && len(app.inputNative.GameProcessIDs()) == 0 {
 			_ = app.inputNative.SetObservationHooksReady(true)
@@ -2662,6 +2663,13 @@ func (app *application) startCleanLaunch() {
 		return
 	}
 	app.injectionStatus = app.texts.Text("injection.status.cleanStarted")
+}
+
+// explicitLaunchConfig keeps both user-invoked launch buttons from changing
+// the launcher window state after the game process appears.
+func explicitLaunchConfig(settings launch.Config) launch.Config {
+	settings.PostBehavior = launch.PostKeep
+	return settings
 }
 
 func (app *application) homeClick(x, y int) {
@@ -6312,7 +6320,9 @@ func (app *application) startBackgroundDiagnostics() {
 						"foregroundMisses":     workerSnapshot.ForegroundMisses,
 						"foregroundPID":        workerSnapshot.ForegroundPID,
 						"heldKeys":             workerSnapshot.HeldKeys,
+						"heldDevices":          workerSnapshot.HeldDevices,
 						"lastDevice":           workerSnapshot.LastDevice,
+						"lastOutputDevice":     workerSnapshot.LastOutputDevice,
 						"lastKey":              workerSnapshot.LastKey,
 						"lastScanCodeAndFlags": workerSnapshot.LastScanCode,
 						"outputFailures":       workerSnapshot.OutputFailures,
@@ -6320,6 +6330,8 @@ func (app *application) startBackgroundDiagnostics() {
 						"outputPairs":          workerSnapshot.OutputPairs,
 						"repeatStarts":         workerSnapshot.RepeatStarts,
 						"repeatStops":          workerSnapshot.RepeatStops,
+						"releaseChecks":        workerSnapshot.ReleaseChecks,
+						"releaseSuppressed":    workerSnapshot.ReleaseSuppressed,
 						"syntheticHookEvents":  workerSnapshot.SyntheticHookEvents,
 						"triggerDowns":         workerSnapshot.TriggerDowns,
 						"triggerUps":           workerSnapshot.TriggerUps,

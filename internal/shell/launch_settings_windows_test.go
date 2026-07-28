@@ -6,9 +6,21 @@ import (
 	"testing"
 
 	"genshintools/internal/config"
+	"genshintools/internal/launch"
 	"genshintools/internal/localization"
 	"genshintools/internal/paths"
 )
+
+func TestExplicitLaunchAlwaysKeepsWindowState(t *testing.T) {
+	for _, behavior := range []launch.PostBehavior{launch.PostKeep, launch.PostMinimize, launch.PostExit} {
+		settings := launch.DefaultConfig()
+		settings.PostBehavior = behavior
+		got := explicitLaunchConfig(settings)
+		if got.PostBehavior != launch.PostKeep {
+			t.Fatalf("explicit launch with behavior %d retained post behavior %d", behavior, got.PostBehavior)
+		}
+	}
+}
 
 func TestCommitLaunchConfigCommitsAfterSave(t *testing.T) {
 	app := application{

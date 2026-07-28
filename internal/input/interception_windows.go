@@ -18,13 +18,17 @@ const (
 	// system component and is not redistributed by this project.
 	InterceptionReleaseURL = "https://github.com/oblitum/Interception/releases/tag/v1.0.1"
 
-	interceptionKeyUp         = uint16(0x01)
-	interceptionKeyE0         = uint16(0x02)
-	interceptionKeyE1         = uint16(0x04)
-	interceptionSetEventIOCTL = uint32((0x22 << 16) | (0x810 << 2))
-	interceptionWriteIOCTL    = uint32((0x22 << 16) | (0x820 << 2))
-	interceptionMarker        = uintptr(0x51485844)
-	interceptionDeviceCount   = 20
+	interceptionKeyUp          = uint16(0x01)
+	interceptionKeyE0          = uint16(0x02)
+	interceptionKeyE1          = uint16(0x04)
+	interceptionSetFilterIOCTL = uint32((0x22 << 16) | (0x804 << 2))
+	interceptionSetEventIOCTL  = uint32((0x22 << 16) | (0x810 << 2))
+	interceptionWriteIOCTL     = uint32((0x22 << 16) | (0x820 << 2))
+	interceptionReadIOCTL      = uint32((0x22 << 16) | (0x840 << 2))
+	interceptionMarker         = uintptr(0x51485844)
+	interceptionDeviceCount    = 20
+	interceptionKeyboardCount  = 10
+	interceptionFilterKeyAll   = uint16(0xffff)
 )
 
 // InterceptionDriverStatus distinguishes a missing driver from an installed
@@ -174,9 +178,17 @@ func (backend *interceptionKeyboardBackend) Close() error {
 }
 
 func (backend *interceptionKeyboardBackend) Press(key uint32, interval time.Duration) error {
+	return backend.PressDevice(1, key, interval)
+}
+
+func (backend *interceptionKeyboardBackend) PressDevice(device uint32, key uint32, interval time.Duration) error {
 	if backend == nil {
 		return errors.New("Interception keyboard backend is unavailable")
 	}
+	if device < 1 || device > interceptionKeyboardCount {
+		return fmt.Errorf("Interception keyboard device %d is invalid", device)
+	}
+	index := int(device - 1)
 	down, err := interceptionKeyboardData(key, false)
 	if err != nil {
 		return err
@@ -187,30 +199,38 @@ func (backend *interceptionKeyboardBackend) Press(key uint32, interval time.Dura
 	}
 
 	backend.mu.Lock()
-	defer backend.mu.Unlock()
-	if backend.devices[0] == 0 || backend.devices[0] == windows.InvalidHandle {
+	if backend.devices[index] == 0 || backend.devices[index] == windows.InvalidHandle {
+		backend.mu.Unlock()
 		return errors.New("Interception keyboard backend is closed")
 	}
-	if err := backend.writeLocked(&down); err != nil {
+	if err := backend.writeDeviceLocked(index, &down); err != nil {
+		backend.mu.Unlock()
 		return err
 	}
+	backend.mu.Unlock()
 	if hold := interceptionHoldDuration(interval); hold > 0 {
 		time.Sleep(hold)
 	}
-	if err := backend.writeLocked(&up); err != nil {
+	backend.mu.Lock()
+	defer backend.mu.Unlock()
+	if err := backend.writeDeviceLocked(index, &up); err != nil {
 		// A down edge may already be inside the device stack. Retry the release
 		// once before surfacing the fault so a transient error is less likely
 		// to leave a key logically held.
-		_ = backend.writeLocked(&up)
+		_ = backend.writeDeviceLocked(index, &up)
 		return err
 	}
 	return nil
 }
 
-func (backend *interceptionKeyboardBackend) writeLocked(data *interceptionKeyboardInput) error {
+func (backend *interceptionKeyboardBackend) writeDeviceLocked(index int, data *interceptionKeyboardInput) error {
+	if index < 0 || index >= interceptionKeyboardCount ||
+		backend.devices[index] == 0 || backend.devices[index] == windows.InvalidHandle {
+		return errors.New("Interception keyboard device is unavailable")
+	}
 	var written uint32
 	err := windows.DeviceIoControl(
-		backend.devices[0],
+		backend.devices[index],
 		interceptionWriteIOCTL,
 		(*byte)(unsafe.Pointer(data)),
 		uint32(unsafe.Sizeof(*data)),
@@ -224,6 +244,120 @@ func (backend *interceptionKeyboardBackend) writeLocked(data *interceptionKeyboa
 	}
 	if written != uint32(unsafe.Sizeof(*data)) {
 		return fmt.Errorf("Interception keyboard write accepted %d of %d bytes", written, unsafe.Sizeof(*data))
+	}
+	return nil
+}
+
+// CaptureKeyboard makes the driver's pre-user-mode keyboard strokes the sole
+// physical truth for repeat held state. Every captured stroke is written back
+// to the same logical device before it is observed by the worker, so unrelated
+// keys and the user's original trigger edges remain transparent to Windows.
+func (backend *interceptionKeyboardBackend) CaptureKeyboard(done <-chan struct{}, observe func(uint32, interceptionKeyboardInput)) error {
+	if backend == nil {
+		return errors.New("Interception keyboard backend is unavailable")
+	}
+	if err := backend.setKeyboardFilter(interceptionFilterKeyAll); err != nil {
+		return err
+	}
+	defer func() { _ = backend.setKeyboardFilter(0) }()
+
+	handles := make([]windows.Handle, interceptionKeyboardCount)
+	backend.mu.Lock()
+	for index := range interceptionKeyboardCount {
+		handles[index] = backend.events[index]
+	}
+	backend.mu.Unlock()
+
+	for {
+		select {
+		case <-done:
+			return nil
+		default:
+		}
+		wait, err := windows.WaitForMultipleObjects(handles, false, 50)
+		if err != nil {
+			return fmt.Errorf("wait for Interception keyboard stroke: %w", err)
+		}
+		if wait == uint32(windows.WAIT_TIMEOUT) {
+			continue
+		}
+		index := int(wait - uint32(windows.WAIT_OBJECT_0))
+		if index < 0 || index >= interceptionKeyboardCount {
+			return fmt.Errorf("Interception keyboard wait returned unexpected index %#x", wait)
+		}
+
+		backend.mu.Lock()
+		var data interceptionKeyboardInput
+		var read uint32
+		err = windows.DeviceIoControl(
+			backend.devices[index],
+			interceptionReadIOCTL,
+			nil,
+			0,
+			(*byte)(unsafe.Pointer(&data)),
+			uint32(unsafe.Sizeof(data)),
+			&read,
+			nil,
+		)
+		if err == nil && read == uint32(unsafe.Sizeof(data)) {
+			err = backend.writeDeviceLocked(index, &data)
+		}
+		backend.mu.Unlock()
+		if err != nil {
+			return fmt.Errorf("receive/forward Interception keyboard device %d: %w", index+1, err)
+		}
+		if read == 0 {
+			continue
+		}
+		if read != uint32(unsafe.Sizeof(data)) {
+			return fmt.Errorf("Interception keyboard read returned %d of %d bytes", read, unsafe.Sizeof(data))
+		}
+		if observe != nil {
+			observe(uint32(index+1), data)
+		}
+	}
+}
+
+func (backend *interceptionKeyboardBackend) setKeyboardFilter(filter uint16) error {
+	backend.mu.Lock()
+	defer backend.mu.Unlock()
+	for index := range interceptionKeyboardCount {
+		if backend.devices[index] == 0 || backend.devices[index] == windows.InvalidHandle {
+			return fmt.Errorf("Interception keyboard device %d is unavailable", index+1)
+		}
+		var returned uint32
+		value := filter
+		if err := windows.DeviceIoControl(
+			backend.devices[index],
+			interceptionSetFilterIOCTL,
+			(*byte)(unsafe.Pointer(&value)),
+			uint32(unsafe.Sizeof(value)),
+			nil,
+			0,
+			&returned,
+			nil,
+		); err != nil {
+			if filter != 0 {
+				// A partially installed capture would block some keyboards
+				// without a receiver. Roll back every device already changed
+				// before returning the initialization failure.
+				for rollback := 0; rollback < index; rollback++ {
+					none := uint16(0)
+					var ignored uint32
+					_ = windows.DeviceIoControl(
+						backend.devices[rollback],
+						interceptionSetFilterIOCTL,
+						(*byte)(unsafe.Pointer(&none)),
+						uint32(unsafe.Sizeof(none)),
+						nil,
+						0,
+						&ignored,
+						nil,
+					)
+				}
+			}
+			return fmt.Errorf("set Interception keyboard device %d filter 0x%X: %w", index+1, filter, err)
+		}
 	}
 	return nil
 }

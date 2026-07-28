@@ -479,6 +479,103 @@
 - SHA-256：`39cf1d6dc976349b79b04acbc54c8c694d55d0a8f51bf4f65a25ca13bd52fa2b`
 - 条目数：19；无重复条目
 
+## 1.3.9 物理触发边沿透传
+
+- 1.3.8 实机日志确认：F 对应身份码 `582`、扫描码 `0x21`、逻辑键盘 1 和游戏前台 PID
+  均正确；3543 组驱动输出全部成功，7086 个合成 Hook 事件与 down/up 数严格相等，排除了
+  worker 未启动、前台门禁、扫描码、直接 IOCTL ABI 和驱动写入失败。
+- 与 FlairBloom 当前公开实现逐项复核后，保留的关键差异是物理 Hook 返回值：FlairBloom
+  始终调用 `CallNextHookEx`，旧 worker 则在匹配游戏前台配置键后返回 `1`。新版完全取消
+  worker 的吞键路径；物理 down/up 先原样进入游戏，worker 只维护 held/generation 并附加
+  带 marker 的 Interception 重复。
+- 主进程仍在 worker 活跃时忽略配置键的 Raw Input 合成回流，因此物理边沿透传不会恢复
+  1.3.7 的 UI 状态振荡。
+- `go test -race ./internal/input ./internal/shell -count=1` 于 2026-07-28 通过。
+- `./scripts/test-s13-release.ps1 -ShellIterations 1 -SkipOnlineProvider` 于
+  2026-07-28 通过：全量普通/race、格式、vet、双配置构建、PE/图标/权限、Hook 生命周期、
+  S02、S05、S09 和确定性 ZIP 均通过。真实 Interception 捕获因自动化进程为 Medium
+  integrity 而明确跳过，真实原神消费仍属于人工门禁。
+
+- 文件：`artifacts/release/GenshinTools-1.3.9-windows-amd64-portable.zip`
+- 大小：10,916,334 bytes
+- SHA-256：`cf1d801bf5be620a13422781d5f858ae537717a41d64260946b3407b05631ace`
+- 条目数：19；无重复条目
+
+## 1.3.10 Raw Input 物理保持状态
+
+- 1.3.9 已由实机确认 10ms 连发能够被原神消费，但用户保持 F 时按下其他键，worker 仍收到
+  一次无 Interception marker 的 F-up 并错误结束循环；中断记录中的 `triggerUps` 与
+  `repeatStops` 同步增加，而 `outputFailures` 和前台拒绝始终为零。
+- 低级 Hook 不再写入 held/generation，只保留合成回流诊断并始终调用 `CallNextHookEx`。
+  主窗口已注册的设备级 Raw Input 现在把配置键 down/up 按顺序转发给 x86 worker，作为
+  物理保持状态的唯一依据。带 Interception 或项目 SendInput marker 的设备栈回流在转发前
+  丢弃；插件链仅在低级 Hook 层复制出的无标记 F-up 因而不能再终止循环。
+- Raw Input 到 worker 使用有界串行队列和有确认的 IPC；队列溢出时禁用输入并明确报错，
+  不允许漏掉 key-up 后继续输出。worker 停止或重配会清空 held/generation。
+- 新增回归用例覆盖“F down → G down/up → F 仍保持”，并验证两类合成 marker 都不会进入
+  Raw Input 物理队列。
+- `go test -race ./internal/input ./internal/shell -count=1` 和
+  `./scripts/test-s13-release.ps1 -ShellIterations 1 -SkipOnlineProvider` 于
+  2026-07-28 通过；S13 包含全量普通/race、格式、vet、确定性双配置构建、PE/图标/权限、
+  200 次 Hook 生命周期、鼠标八组短节拍、S02、S05、S09 和 ZIP 复核。真实 Interception
+  捕获因自动化进程为 Medium integrity 而明确跳过，本次“其他键不打断”仍需真实原神复验。
+
+- 文件：`artifacts/release/GenshinTools-1.3.10-windows-amd64-portable.zip`
+- 大小：10,919,471 bytes
+- SHA-256：`ca4d738a7cf7a332471aab559590b04b552fcc55a6ed6fc234f152fde0908393`
+- 条目数：19；无重复条目
+
+## 1.4.0 Interception 驱动物理账本与启动窗口保持
+
+- 1.3.10 实机日志再次确认 Raw Input 不是物理真值：10ms 输出期间仍出现无 marker 的
+  F-up，`triggerUps`、`repeatStops` 同步增长且 `outputFailures=0`。因此低级 Hook 和
+  Raw Input 均不再具有修改 held/generation 的权限。
+- x86 worker 对十个 Interception 键盘设备事务式设置 `FILTER_KEY_ALL`，等待设备事件后
+  通过 `IOCTL_READ` 取得驱动 stroke，先向同一逻辑设备原样 `IOCTL_WRITE`，再把匹配的
+  配置键交给 held 状态机。其他键只透明转发，不访问配置键状态；合成重复的 WRITE 不会
+  重新进入同一读取队列。
+- 过滤器部分安装失败会回滚已经设置的设备；READ/WRITE 失败会终止 worker，进程和设备
+  句柄关闭负责解除过滤。正常关闭以 50ms 有界等待观察 shutdown，避免 worker 已退出但
+  全局键盘仍被过滤。
+- 纯净启动和注入启动都把本次 launch snapshot 的 `PostBehavior` 固定为 `PostKeep`；
+  无论持久化设置曾为最小化还是退出，点击这两个显式启动按钮后都保持启动器当前窗口状态。
+- 新增驱动协议 ABI/IOCTL、F down 期间 G down/up 不修改 held，以及三种旧 PostBehavior
+  均归一为 PostKeep 的回归测试。
+- `go test -race ./internal/input ./internal/shell -count=1` 和
+  `./scripts/test-s13-release.ps1 -ShellIterations 1 -SkipOnlineProvider` 于
+  2026-07-28 通过；S13 覆盖全量普通/race、格式、vet、确定性双配置构建、x86 worker、
+  PE/图标/权限、200 次 Hook 生命周期、托盘生命周期、鼠标八组短节拍、S02、S05、S09
+  和 ZIP 复核。真实驱动 READ 与原神组合仍属于本次人工复验门禁。
+
+- 文件：`artifacts/release/GenshinTools-1.4.0-windows-amd64-portable.zip`
+- 大小：10,920,001 bytes
+- SHA-256：`4b7814041c70b486198efbe736e6a74e7b8f8c6d89407559e95e1da533301d5e`
+- 条目数：19；无重复条目
+
+## 1.4.1 首次 down 立即输出与跨键伪 up 隔离
+
+- 1.4.0 实机确认驱动读取路径能够在其他键打断后恢复，但恢复依赖 Windows 再次发送 F 的
+  长按重复 down，延迟明显。日志同时显示停止边沿来自逻辑设备 4，而持续 down 和旧输出
+  设备显示为逻辑设备 1，证明输入链存在跨设备重路由。
+- 删除 repeat goroutine 的 1ms 启动等待；Interception 捕获路径已经先原样回写物理 down，
+  因此首次 F-down 可立即发送第一组输出，不存在点按/长按判定。
+- 每次按下记录其真实 Interception 输入设备，重复 down/up 写回同一设备，不再固定使用
+  逻辑键盘 1。诊断拆分 `lastDevice`、`lastOutputDevice` 和与 `heldKeys` 对齐的
+  `heldDevices`。
+- F-up 使用 3ms settle 和 25ms 跨键邻接历史判断；若它与其他键 stroke 紧邻，则记为
+  插件/虚拟设备切换副产物并丢弃，不清 held、不推进 generation、不停止原循环。独立真实
+  F-up 结束本次按下；后续每个 F-down 无论点按、连按或间隔按都会立即开始新一轮。
+- 新增 `releaseChecks`、`releaseSuppressed` 日志，并增加首次 down 无长按等待、物理输出
+  设备保持和“F down → G down/up → 伪 F-up 不停止”的回归测试。
+- `./scripts/test-s13-release.ps1 -ShellIterations 1 -SkipOnlineProvider` 于
+  2026-07-28 通过；覆盖全量普通/race、格式、vet、x86/x64 双构建、PE/图标/权限、托盘、
+  200 次 Hook 生命周期、鼠标八组短节拍、S02、S05、S09 和确定性 ZIP。
+
+- 文件：`artifacts/release/GenshinTools-1.4.1-windows-amd64-portable.zip`
+- 大小：10,923,411 bytes
+- SHA-256：`e78ff89061f4af79f0f4b96ed9d7c8a974f97b5358860068c18d56e582ad0f34`
+- 条目数：19；无重复条目
+
 ## 尚未关闭的人工门禁
 
 1. 真实原神/反作弊环境下的输入、截图、覆盖层、启动和可选插件/注入组合。
