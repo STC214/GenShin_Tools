@@ -121,7 +121,6 @@ type application struct {
 	recording               int
 	inputRepeatScroll       int
 	inputUIError            string
-	interceptionDriver      input.InterceptionDriverStatus
 	gameUpdates             chan gameUpdate
 	gameState               gameViewState
 	gameTask                uint64
@@ -749,7 +748,6 @@ func (app *application) handleMessage(hwnd win32.HWND, message uint32, wParam, l
 				if previous != launch.StateRunning && app.launchSnap.State == launch.StateRunning {
 					injectedLaunch := app.injectionLaunching
 					keepForInputManagement := app.settings.Game.AHKWithGame ||
-						(app.settings.Input.Enabled && app.settings.Input.Mode == input.ModeKeyboard) ||
 						(injectedLaunch && len(app.pendingInputTools()) != 0)
 					if app.injectionLaunching {
 						app.injectionStatus = fmt.Sprintf(app.texts.Text("injection.status.launchSuccess"), app.launchSnap.PID)
@@ -1547,20 +1545,23 @@ func (app *application) paint(hwnd win32.HWND) {
 }
 
 func (app *application) startInput() error {
-	app.interceptionDriver = input.ProbeInterceptionDriver()
-	app.logger.Info("Interception driver probe", map[string]any{
-		"installed":  app.interceptionDriver.Installed,
-		"accessible": app.interceptionDriver.Accessible,
-		"busy":       app.interceptionDriver.Busy,
-		"error":      app.interceptionDriver.Error,
-	})
+	if !input.BuiltInKeyboardRepeatEnabled && app.settings.Input.Mode == input.ModeKeyboard {
+		app.settings.Input.Mode = input.ModeMouseLeft
+		app.settings.Input.Enabled = false
+		if err := config.Save(app.layout.Config, app.settings); err != nil {
+			app.logger.Error("persist retired built-in keyboard repeat migration", map[string]any{"error": err.Error()})
+		} else {
+			app.logger.Info("retired built-in keyboard repeat configuration migrated to mouse mode", nil)
+		}
+	}
+	app.logger.Info("built-in keyboard repeat disabled; bundled AHK is the keyboard repeat path", nil)
 	var lastLoggedState atomic.Uint32
 	var native *input.Native
 	lastLoggedState.Store(^uint32(0))
 	var err error
 	native, err = input.NewNative(func(snapshot input.Snapshot) {
 		if lastLoggedState.Swap(uint32(snapshot.State)) != uint32(snapshot.State) {
-			keyboardBackend := "Interception worker unavailable"
+			keyboardBackend := "disabled; bundled AHK only"
 			keyboardWorkerPID := 0
 			workerActive := native != nil && native.KeyboardWorkerActive()
 			if workerActive {
@@ -1794,13 +1795,11 @@ func (app *application) applyCaptureHotkey() error {
 	if !app.settings.Capture.Enabled {
 		return nil
 	}
-	inputKeys := app.settings.Input.RepeatKeys.Slice()
-	inputKeys = append(inputKeys,
+	inputKeys := []uint32{
 		app.settings.Input.StopKey,
-		app.settings.Input.KeyboardToggleKey,
 		app.settings.Input.MouseLeftToggleKey,
 		app.settings.Input.MouseRightToggleKey,
-	)
+	}
 	if app.settings.Capture.ConflictsWith(inputKeys...) {
 		return errors.New(app.texts.Text("media.error.hotkeyConflict"))
 	}
@@ -4110,11 +4109,14 @@ func (app *application) inputClick(x, y int) {
 		app.inputNative.SetCaptureMode(false)
 		app.recording = 0
 		mode := -1
-		modeWidth := win32.Scale(132, app.dpi)
-		for index := 0; index <= int(input.ModeMouseRight); index++ {
-			rect := win32.Rect{Left: int32(left) + int32(index)*modeWidth, Top: win32.Scale(226, app.dpi), Right: int32(left) + int32(index+1)*modeWidth - win32.Scale(8, app.dpi), Bottom: win32.Scale(266, app.dpi)}
+		right := win32.GetClientRect(app.hwnd).Right - win32.Scale(42, app.dpi)
+		gap := win32.Scale(8, app.dpi)
+		modes := productInputModes()
+		modeWidth := (right - int32(left) + gap) / int32(len(modes))
+		for index, productMode := range modes {
+			rect := win32.Rect{Left: int32(left) + int32(index)*modeWidth, Top: win32.Scale(226, app.dpi), Right: int32(left) + int32(index+1)*modeWidth - gap, Bottom: win32.Scale(266, app.dpi)}
 			if pointInButton(rect, int32(x), int32(y)) {
-				mode = index
+				mode = int(productMode)
 				break
 			}
 		}
@@ -4129,39 +4131,6 @@ func (app *application) inputClick(x, y int) {
 				persistedChange = true
 			}
 		}
-	case y >= sy(276) && y < sy(354) && config.Mode == input.ModeKeyboard:
-		clientRight := win32.GetClientRect(app.hwnd).Right - win32.Scale(42, app.dpi)
-		if keyIndex, deleteRow, hit := inputRepeatHitTest(x, y, int32(left), clientRight, app.dpi, config.RepeatKeys.Len(), app.inputRepeatScroll); hit {
-			if deleteRow {
-				app.inputNative.Enable(false)
-				config = app.inputNative.Snapshot().Config
-				config.RepeatKeys.Delete(keyIndex)
-				config.Enabled = false
-				app.recording = 0
-				app.inputNative.SetCaptureMode(false)
-				if err := app.inputNative.Configure(config); err != nil {
-					app.inputUIError = err.Error()
-				} else {
-					app.inputUIError = ""
-					persistedChange = true
-					app.clampInputRepeatScroll(config.RepeatKeys.Len())
-				}
-			} else {
-				app.inputNative.Enable(false)
-				app.inputNative.SetCaptureMode(true)
-				app.recording = inputRepeatRecordingBase + keyIndex
-			}
-		}
-	case y >= sy(360) && y < sy(396) && config.Mode == input.ModeKeyboard:
-		if config.RepeatKeys.Len() < input.MaxRepeatKeys {
-			app.inputNative.Enable(false)
-			app.inputNative.SetCaptureMode(true)
-			app.recording = 2
-		}
-	case y >= sy(402) && y < sy(438):
-		app.inputNative.Enable(false)
-		app.inputNative.SetCaptureMode(true)
-		app.recording = 4
 	case y >= sy(444) && y < sy(480):
 		app.inputNative.Enable(false)
 		app.inputNative.SetCaptureMode(true)
@@ -4189,15 +4158,7 @@ func (app *application) inputClick(x, y int) {
 		}
 	case y >= sy(612) && y < sy(648):
 		clientRight := win32.GetClientRect(app.hwnd).Right - win32.Scale(42, app.dpi)
-		outputRect, optionRect, _ := inputFooterRects(int32(left), clientRight, app.dpi)
-		if pointInButton(outputRect, int32(x), int32(y)) && !app.interceptionDriver.Accessible {
-			if err := openInterceptionReleaseURL(input.InterceptionReleaseURL); err != nil {
-				app.inputUIError = err.Error()
-				app.logger.Error("open Interception release", map[string]any{"error": err.Error()})
-			}
-			win32.Invalidate(app.hwnd)
-			return
-		}
+		_, optionRect, _ := inputFooterRects(int32(left), clientRight, app.dpi)
 		if pointInButton(optionRect, int32(x), int32(y)) {
 			app.setAHKWithGame(!app.settings.Game.AHKWithGame)
 			return
@@ -4341,8 +4302,6 @@ func (app *application) paintInput(dc win32.HDC, client win32.Rect, left int32) 
 	defer win32.DeleteObject(uintptr(buttonBrush))
 	greenBrush := win32.CreateSolidBrush(win32.Color(42, 139, 103))
 	defer win32.DeleteObject(uintptr(greenBrush))
-	dangerBrush := win32.CreateSolidBrush(win32.Color(105, 48, 58))
-	defer win32.DeleteObject(uintptr(dangerBrush))
 
 	snapshot := app.inputSnap
 	if app.inputNative != nil {
@@ -4376,54 +4335,24 @@ func (app *application) paintInput(dc win32.HDC, client win32.Rect, left int32) 
 	}
 	draw(fmt.Sprintf(app.texts.Text("input.toggle"), inputStateText(app.texts, snapshot.State), action), row(170, 216, toggleBrush), win32.Color(235, 238, 248))
 
-	modeWidth := win32.Scale(132, app.dpi)
-	modeNames := []string{app.texts.Text("input.mode.keyboard"), app.texts.Text("input.mode.mouseLeft"), app.texts.Text("input.mode.mouseRight")}
-	for index, name := range modeNames {
-		rect := win32.Rect{Left: left + int32(index)*modeWidth, Top: win32.Scale(226, app.dpi), Right: left + int32(index+1)*modeWidth - win32.Scale(8, app.dpi), Bottom: win32.Scale(266, app.dpi)}
+	modeGap := win32.Scale(8, app.dpi)
+	modes := productInputModes()
+	modeWidth := (right - left + modeGap) / int32(len(modes))
+	for index, mode := range modes {
+		name := app.texts.Text("input.mode.mouseLeft")
+		if mode == input.ModeMouseRight {
+			name = app.texts.Text("input.mode.mouseRight")
+		}
+		rect := win32.Rect{Left: left + int32(index)*modeWidth, Top: win32.Scale(226, app.dpi), Right: left + int32(index+1)*modeWidth - modeGap, Bottom: win32.Scale(266, app.dpi)}
 		brush := buttonBrush
-		if int(config.Mode) == index {
+		if config.Mode == mode {
 			brush = activeBrush
 		}
 		app.paintButtonSurface(dc, rect, brush)
 		draw(name, rect, win32.Color(225, 229, 242))
 	}
-	if config.Mode == input.ModeKeyboard {
-		app.clampInputRepeatScroll(config.RepeatKeys.Len())
-		repeatRight := right
-		if config.RepeatKeys.Len() > inputRepeatVisible {
-			repeatRight -= win32.Scale(22, app.dpi)
-		}
-		for visible := 0; visible < inputRepeatVisible; visible++ {
-			index := app.inputRepeatScroll + visible
-			top := int32(276 + visible*42)
-			if index >= config.RepeatKeys.Len() {
-				continue
-			}
-			full := win32.Rect{Left: left, Top: win32.Scale(top, app.dpi), Right: repeatRight, Bottom: win32.Scale(top+36, app.dpi)}
-			app.paintButtonSurface(dc, full, buttonBrush)
-			deleteRect := full
-			deleteRect.Left = deleteRect.Right - win32.Scale(104, app.dpi)
-			app.paintButtonSurface(dc, deleteRect, dangerBrush)
-			keyRect := full
-			keyRect.Right = deleteRect.Left - win32.Scale(6, app.dpi)
-			name := fmt.Sprintf(app.texts.Text("input.repeat.row"), index+1)
-			recording := app.recording == inputRepeatRecordingBase+index
-			label := fmt.Sprintf(app.texts.Text("input.record.ready"), name, win32.KeyName(config.RepeatKeys.At(index)))
-			if recording {
-				label = fmt.Sprintf(app.texts.Text("input.record.pending"), name)
-			}
-			draw(label, keyRect, win32.Color(225, 229, 242))
-			draw(app.texts.Text("input.repeat.delete"), deleteRect, win32.Color(255, 220, 225))
-		}
-		addText := fmt.Sprintf(app.texts.Text("input.repeat.add"), config.RepeatKeys.Len(), input.MaxRepeatKeys)
-		if app.recording == 2 {
-			addText = app.texts.Text("input.repeat.addPending")
-		}
-		draw(addText, row(360, 396, buttonBrush), win32.Color(225, 229, 242))
-	} else {
-		draw(app.texts.Text("input.mouseTrigger"), staticRow(276, 396, cardBrush), win32.Color(166, 174, 197))
-	}
-	draw(recordLabel(app.texts, "input.key.toggleKeyboard", config.KeyboardToggleKey, app.recording == 4), row(402, 438, buttonBrush), win32.Color(225, 229, 242))
+	draw(app.texts.Text("input.mouseTrigger"), staticRow(276, 396, cardBrush), win32.Color(166, 174, 197))
+	draw(app.texts.Text("input.keyboard.externalOnly"), staticRow(402, 438, cardBrush), win32.Color(166, 174, 197))
 	draw(recordLabel(app.texts, "input.key.toggleMouseLeft", config.MouseLeftToggleKey, app.recording == 5), row(444, 480, buttonBrush), win32.Color(225, 229, 242))
 	draw(recordLabel(app.texts, "input.key.toggleMouseRight", config.MouseRightToggleKey, app.recording == 6), row(486, 522, buttonBrush), win32.Color(225, 229, 242))
 	draw(recordLabel(app.texts, "input.key.stop", config.StopKey, app.recording == 3), row(528, 564, buttonBrush), win32.Color(225, 229, 242))
@@ -4432,15 +4361,8 @@ func (app *application) paintInput(dc win32.HDC, client win32.Rect, left int32) 
 	if visibleError == "" {
 		visibleError = app.inputUIError
 	}
-	if visibleError == "" && app.inputNative != nil {
-		visibleError = app.inputNative.KeyboardWorkerError()
-	}
 	outputRect, optionRect, ahkRect := inputFooterRects(left, right, app.dpi)
-	if app.interceptionDriver.Accessible {
-		app.paintStaticSurface(dc, outputRect, cardBrush)
-	} else {
-		app.paintButtonSurface(dc, outputRect, dangerBrush)
-	}
+	app.paintStaticSurface(dc, outputRect, cardBrush)
 	optionBrush := buttonBrush
 	if app.settings.Game.AHKWithGame {
 		optionBrush = greenBrush
@@ -4449,20 +4371,6 @@ func (app *application) paintInput(dc win32.HDC, client win32.Rect, left int32) 
 	app.paintStaticSurface(dc, ahkRect, cardBrush)
 	if visibleError != "" {
 		draw(fmt.Sprintf(app.texts.Text("input.error"), visibleError), outputRect, win32.Color(255, 126, 126))
-	} else if !app.interceptionDriver.Accessible {
-		driverText := app.texts.Text("input.driver.download")
-		if app.interceptionDriver.Busy {
-			driverText = app.texts.Text("input.driver.busy")
-		} else if app.interceptionDriver.Installed {
-			driverText = app.texts.Text("input.driver.admin")
-		}
-		draw(driverText, outputRect, win32.Color(255, 220, 225))
-	} else if config.Mode == input.ModeKeyboard {
-		driverText := app.texts.Text("input.driver.ready")
-		if len(app.inputNative.GameProcessIDs()) != 0 && !app.inputHooksReady.Load() {
-			driverText = app.texts.Text("input.driver.waiting")
-		}
-		draw(driverText, outputRect, win32.Color(145, 154, 180))
 	} else {
 		draw(fmt.Sprintf(app.texts.Text("input.outputCount"), snapshot.OutputCount), outputRect, win32.Color(145, 154, 180))
 	}
@@ -4478,6 +4386,10 @@ func (app *application) paintInput(dc win32.HDC, client win32.Rect, left int32) 
 		}
 	}
 	draw(ahkText, ahkRect, ahkColor)
+}
+
+func productInputModes() []input.Mode {
+	return []input.Mode{input.ModeMouseLeft, input.ModeMouseRight}
 }
 
 func inputFooterRects(left, right int32, dpi uint32) (output, option, status win32.Rect) {
@@ -4828,16 +4740,18 @@ func (app *application) schedulePostLaunchInputHooks() {
 			return
 		}
 		logger.Info("reinstalled native observation hooks at final launch stage", map[string]any{"postInjectionDelayMS": postInjectionRepeatDelay.Milliseconds()})
-		if err := native.SetKeyboardBackendReady(true); err != nil {
-			logger.Error("install built-in keyboard hook at final launch stage", map[string]any{"error": err.Error()})
-			return
+		if input.BuiltInKeyboardRepeatEnabled {
+			if err := native.SetKeyboardBackendReady(true); err != nil {
+				logger.Error("install built-in keyboard hook at final launch stage", map[string]any{"error": err.Error()})
+				return
+			}
 		} else {
-			inputSnapshot := native.Snapshot()
-			logger.Info("installed built-in keyboard hook at final launch stage", map[string]any{
-				"keyboardWorkerPID":    native.KeyboardWorkerPID(),
+			if err := native.SetKeyboardBackendReady(true); err != nil {
+				logger.Error("release post-launch mouse hotkey gate", map[string]any{"error": err.Error()})
+				return
+			}
+			logger.Info("skipped retired built-in keyboard repeat; bundled AHK remains last", map[string]any{
 				"postInjectionDelayMS": postInjectionRepeatDelay.Milliseconds(),
-				"repeatKeys":           inputSnapshot.Config.RepeatKeys.Slice(),
-				"intervalMS":           inputSnapshot.Config.IntervalMS,
 				"gamePIDs":             native.GameProcessIDs(),
 			})
 		}
@@ -6315,25 +6229,28 @@ func (app *application) startBackgroundDiagnostics() {
 				} else {
 					lastKeyboardDiagnosticError = ""
 					app.logger.Info("built-in keyboard worker diagnostics", map[string]any{
-						"keyboardWorkerPID":    native.KeyboardWorkerPID(),
-						"configuredKeyEvents":  workerSnapshot.ConfiguredKeyEvents,
-						"foregroundMisses":     workerSnapshot.ForegroundMisses,
-						"foregroundPID":        workerSnapshot.ForegroundPID,
-						"heldKeys":             workerSnapshot.HeldKeys,
-						"heldDevices":          workerSnapshot.HeldDevices,
-						"lastDevice":           workerSnapshot.LastDevice,
-						"lastOutputDevice":     workerSnapshot.LastOutputDevice,
-						"lastKey":              workerSnapshot.LastKey,
-						"lastScanCodeAndFlags": workerSnapshot.LastScanCode,
-						"outputFailures":       workerSnapshot.OutputFailures,
-						"outputGateMisses":     workerSnapshot.OutputGateMisses,
-						"outputPairs":          workerSnapshot.OutputPairs,
-						"repeatStarts":         workerSnapshot.RepeatStarts,
-						"repeatStops":          workerSnapshot.RepeatStops,
-						"releaseChecks":        workerSnapshot.ReleaseChecks,
-						"syntheticHookEvents":  workerSnapshot.SyntheticHookEvents,
-						"triggerDowns":         workerSnapshot.TriggerDowns,
-						"triggerUps":           workerSnapshot.TriggerUps,
+						"keyboardWorkerPID":     native.KeyboardWorkerPID(),
+						"configuredKeyEvents":   workerSnapshot.ConfiguredKeyEvents,
+						"foregroundMisses":      workerSnapshot.ForegroundMisses,
+						"foregroundPID":         workerSnapshot.ForegroundPID,
+						"heldKeys":              workerSnapshot.HeldKeys,
+						"heldDevices":           workerSnapshot.HeldDevices,
+						"lastDevice":            workerSnapshot.LastDevice,
+						"lastOutputDevice":      workerSnapshot.LastOutputDevice,
+						"lastKey":               workerSnapshot.LastKey,
+						"lastScanCodeAndFlags":  workerSnapshot.LastScanCode,
+						"outputFailures":        workerSnapshot.OutputFailures,
+						"outputGateMisses":      workerSnapshot.OutputGateMisses,
+						"outputPairs":           workerSnapshot.OutputPairs,
+						"physicalSuppressed":    workerSnapshot.PhysicalSuppressed,
+						"repeatStarts":          workerSnapshot.RepeatStarts,
+						"repeatStops":           workerSnapshot.RepeatStops,
+						"releaseChecks":         workerSnapshot.ReleaseChecks,
+						"hookTriggerUpsIgnored": workerSnapshot.HookTriggerUpsIgnored,
+						"crossDeviceUpsIgnored": workerSnapshot.CrossDeviceUpsIgnored,
+						"syntheticHookEvents":   workerSnapshot.SyntheticHookEvents,
+						"triggerDowns":          workerSnapshot.TriggerDowns,
+						"triggerUps":            workerSnapshot.TriggerUps,
 					})
 				}
 			} else {

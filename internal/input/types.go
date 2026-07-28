@@ -10,6 +10,12 @@ import (
 
 type Mode uint8
 
+// BuiltInKeyboardRepeatEnabled is deliberately false for the product path.
+// Keyboard repeat is provided only by the bundled AHK_F.exe lifecycle.
+// The legacy engine and worker code remain buildable for compatibility tests,
+// but Native never exposes or starts them.
+const BuiltInKeyboardRepeatEnabled = false
+
 const (
 	ModeKeyboard Mode = iota
 	ModeMouseLeft

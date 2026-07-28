@@ -319,6 +319,10 @@ func (n *Native) runHookThread(ready chan<- error) {
 }
 
 func (n *Native) Configure(config Config) error {
+	if !BuiltInKeyboardRepeatEnabled && config.Mode == ModeKeyboard {
+		config.Enabled = false
+		config.Mode = ModeMouseLeft
+	}
 	before := n.engine.Snapshot().State
 	err := n.engine.Configure(config)
 	if err == nil {
@@ -565,7 +569,7 @@ func (n *Native) syncKeyboardWorker(snapshot Snapshot) error {
 	}
 	n.targetsMu.RUnlock()
 	return n.keyboardWorker.Configure(keyboardWorkerRequest{
-		Enabled:       snapshot.Config.Enabled && snapshot.Config.Mode == ModeKeyboard,
+		Enabled:       BuiltInKeyboardRepeatEnabled && snapshot.Config.Enabled && snapshot.Config.Mode == ModeKeyboard,
 		RepeatKeys:    snapshot.Config.RepeatKeys.Slice(),
 		IntervalMS:    snapshot.Config.IntervalMS,
 		GameProcesses: processes,
@@ -760,13 +764,11 @@ func (n *Native) keyboardPoller() {
 
 func (n *Native) pollKeyboardOnce(states map[uint32]bool) {
 	config := n.engine.Snapshot().Config
-	keys := config.RepeatKeys.Slice()
-	keys = append(keys,
-		config.StopKey,
-		config.KeyboardToggleKey,
-		config.MouseLeftToggleKey,
-		config.MouseRightToggleKey,
-	)
+	keys := []uint32{config.StopKey, config.MouseLeftToggleKey, config.MouseRightToggleKey}
+	if BuiltInKeyboardRepeatEnabled {
+		keys = append(keys, config.KeyboardToggleKey)
+		keys = append(keys, config.RepeatKeys.Slice()...)
+	}
 	capturing := n.capturing.Load()
 	if capturing {
 		// Protected input paths may not deliver WH_KEYBOARD_LL events even
@@ -1178,6 +1180,11 @@ func (n *Native) clearHookStateLocked() {
 }
 
 func (n *Native) processPhysicalEventLocked(event PhysicalEvent) {
+	before := n.engine.Snapshot()
+	if !BuiltInKeyboardRepeatEnabled && event.Kind == EventKey &&
+		SameKey(event.Code, before.Config.KeyboardToggleKey) {
+		return
+	}
 	// Once a verified game lifetime exists, no keyboard trigger or toggle may
 	// reach Engine until the post-injection finalizer releases the keyboard
 	// backend. The polling fallback remains alive while observation hooks are
@@ -1186,7 +1193,6 @@ func (n *Native) processPhysicalEventLocked(event PhysicalEvent) {
 	if event.Kind == EventKey && n.keyboardInputHeldForLaunch() {
 		return
 	}
-	before := n.engine.Snapshot()
 	// The dedicated worker owns keyboard-repeat state and output counters.
 	// handleRawKeyboard filters marked Interception records before this point;
 	// ignoring the remaining main-process copy of configured keys keeps the

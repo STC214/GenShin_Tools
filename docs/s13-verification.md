@@ -694,6 +694,56 @@
 - SHA-256：`70b3c6b2b014f088b43900fb354cc625b0e6bd73c249f7f4e9960874ff9049bc`
 - 条目数：19；无重复条目
 
+## 1.4.7 驱动物理触发隔离与设备 1 输出合并
+
+- 根据 1.4.6 实机日志，低级 Hook 在按住 F 并操作其他键时收到无
+  `ExtraInformation` 标记的 F-up；该事件与 `repeatStops` 一一对应，而驱动输出、
+  前台门禁和输出频率均正常。低级 Hook 因此降为纯诊断来源，不再具有改变
+  held/generation 的权限。
+- 恢复生产 worker 的 Interception `FILTER_KEY_ALL`/`IOCTL_READ` 链路。非配置键同步
+  写回原物理设备；游戏前台的配置键物理 down/up 被消费，只用于建立或结束与来源设备
+  绑定的 held 会话。跨设备配置键 up 被抑制且不会推进 generation。
+- 保留已由 1.4.5 实机确认频率正常的逻辑设备 1 输出：第一次物理 down 立即创建循环，
+  游戏只接收设备 1 上带 `0x51485844` marker 的平衡 down/up，不再同时接收物理 F 和
+  合成 F。切出游戏时配置键恢复物理透传，匹配来源设备的 release 仍会清理旧会话。
+- 新增 `physicalSuppressed`、`hookTriggerUpsIgnored` 和
+  `crossDeviceUpsIgnored` 诊断字段；回归覆盖无标记 Hook F-up、其他键透传、跨设备
+  F-up、同设备真实 F-up、立即首发、设备 1 路由和游戏外透传。
+- 2026-07-29 自动门禁通过：全项目测试与 race、格式/vet 策略、三轮 Win32 shell
+  生命周期、S03 短矩阵、S05 真实进程启动、S09 有界注入、Debug/Release/x86 worker
+  构建、PE/图标/权限和确定性 ZIP 均通过。执行终端为 Medium integrity，因此真实
+  Interception 驱动捕获按设计跳过，真实原神内同时按住 F 和其他键仍是人工门禁。
+
+- 文件：`artifacts/release/GenshinTools-1.4.7-windows-amd64-portable.zip`
+- 大小：10,923,377 bytes
+- SHA-256：`105340f41fb8e145cb88c33fef0c02e013680431f3c88943d269870f9a4cfc58`
+- 条目数：19；无重复条目
+
+## 1.4.8 内置键盘连发退休
+
+- 根据连续实机结论，内置键盘连发不再作为产品功能提供；键盘连发唯一产品路径为便携包
+  `AHK_F.exe` 及其“随游戏启动/关闭”生命周期托管。鼠标左/右键连点继续保留。
+- 输入增强页删除键盘模式、连发键列表、添加/删除入口、键盘模式开关热键设置和
+  Interception 驱动状态/下载入口；只显示左键连点、右键连点、各自开关、全局停止、
+  间隔、AHK 生命周期选项及 AHK 激活状态。
+- 旧配置若保存 `ModeKeyboard`，启动时迁移为 `ModeMouseLeft + Enabled=false` 并持久化。
+  Native `Configure` 重复执行同一失败关闭转换，旧键盘开关热键在 Hook/Raw
+  Input/轮询路径均被忽略，worker 同步请求固定 `Enabled=false`。即使游戏 PID 和
+  注入后五秒门禁都已放行，也不会创建 `GenshinTools-input.exe` 进程。
+- 注入最终化仍释放鼠标热键门禁，但明确跳过内置键盘 worker；顺序收敛为
+  “主观察 Hook → 捕获的外部输入工具 → 便携 AHK”，AHK 仍保持最后加载。
+- 新增回归覆盖产品模式列表仅含左右鼠标、旧键盘配置迁移、键盘热键 Hook/轮询无效，
+  以及最终化门禁后 worker PID 仍为零。
+- 2026-07-29 自动门禁通过：全项目测试与 race、格式/vet 策略、三轮 Win32 shell
+  生命周期、S05 真实进程启动、S09 有界注入、Debug/Release 构建、PE/图标/权限和
+  确定性 ZIP 均通过。S03 的真实桌面鼠标捕获因前台被其他桌面进程抢占而明确跳过；
+  鼠标单元/race 与全项目回归通过，未把跳过写成实机成功。
+
+- 文件：`artifacts/release/GenshinTools-1.4.8-windows-amd64-portable.zip`
+- 大小：10,912,037 bytes
+- SHA-256：`4d9d6332ffcc75ac1749892657c22a4d14fb54c63f2206e1b8b4bd2ca9870629`
+- 条目数：19；无重复条目
+
 ## 尚未关闭的人工门禁
 
 1. 真实原神/反作弊环境下的输入、截图、覆盖层、启动和可选插件/注入组合。

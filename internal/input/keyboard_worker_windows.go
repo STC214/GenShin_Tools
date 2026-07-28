@@ -38,24 +38,27 @@ type keyboardWorkerResponse struct {
 // Counters are monotonic for one worker lifetime, allowing the parent log to
 // distinguish hook capture, foreground gating and driver delivery failures.
 type KeyboardWorkerDiagnostics struct {
-	ConfiguredKeyEvents uint64   `json:"configuredKeyEvents"`
-	ForegroundMisses    uint64   `json:"foregroundMisses"`
-	OutputGateMisses    uint64   `json:"outputGateMisses"`
-	TriggerDowns        uint64   `json:"triggerDowns"`
-	TriggerUps          uint64   `json:"triggerUps"`
-	RepeatStarts        uint64   `json:"repeatStarts"`
-	RepeatStops         uint64   `json:"repeatStops"`
-	OutputPairs         uint64   `json:"outputPairs"`
-	OutputFailures      uint64   `json:"outputFailures"`
-	SyntheticHookEvents uint64   `json:"syntheticHookEvents"`
-	ReleaseChecks       uint64   `json:"releaseChecks"`
-	LastKey             uint32   `json:"lastKey"`
-	LastScanCode        uint32   `json:"lastScanCode"`
-	LastDevice          uint32   `json:"lastDevice"`
-	LastOutputDevice    uint32   `json:"lastOutputDevice"`
-	ForegroundPID       uint32   `json:"foregroundPid"`
-	HeldKeys            []uint32 `json:"heldKeys,omitempty"`
-	HeldDevices         []uint32 `json:"heldDevices,omitempty"`
+	ConfiguredKeyEvents   uint64   `json:"configuredKeyEvents"`
+	ForegroundMisses      uint64   `json:"foregroundMisses"`
+	OutputGateMisses      uint64   `json:"outputGateMisses"`
+	TriggerDowns          uint64   `json:"triggerDowns"`
+	TriggerUps            uint64   `json:"triggerUps"`
+	RepeatStarts          uint64   `json:"repeatStarts"`
+	RepeatStops           uint64   `json:"repeatStops"`
+	OutputPairs           uint64   `json:"outputPairs"`
+	OutputFailures        uint64   `json:"outputFailures"`
+	SyntheticHookEvents   uint64   `json:"syntheticHookEvents"`
+	ReleaseChecks         uint64   `json:"releaseChecks"`
+	PhysicalSuppressed    uint64   `json:"physicalSuppressed"`
+	HookTriggerUpsIgnored uint64   `json:"hookTriggerUpsIgnored"`
+	CrossDeviceUpsIgnored uint64   `json:"crossDeviceUpsIgnored"`
+	LastKey               uint32   `json:"lastKey"`
+	LastScanCode          uint32   `json:"lastScanCode"`
+	LastDevice            uint32   `json:"lastDevice"`
+	LastOutputDevice      uint32   `json:"lastOutputDevice"`
+	ForegroundPID         uint32   `json:"foregroundPid"`
+	HeldKeys              []uint32 `json:"heldKeys,omitempty"`
+	HeldDevices           []uint32 `json:"heldDevices,omitempty"`
 }
 
 type synchronizedBuffer struct {
@@ -392,42 +395,46 @@ func (worker *keyboardWorkerController) stopLocked() {
 }
 
 type keyboardWorkerConfig struct {
-	enabled   bool
-	keys      map[uint32]struct{}
-	interval  time.Duration
-	processes map[uint32]struct{}
+	enabled    bool
+	keys       map[uint32]struct{}
+	strokeKeys map[uint32]uint32
+	interval   time.Duration
+	processes  map[uint32]struct{}
 }
 
 type keyboardWorkerRuntime struct {
-	config              atomic.Pointer[keyboardWorkerConfig]
-	held                [1024]atomic.Bool
-	heldDevice          [1024]atomic.Uint32
-	generation          [1024]atomic.Uint64
-	done                chan struct{}
-	wg                  sync.WaitGroup
-	faultMu             sync.Mutex
-	fault               error
-	outputMu            sync.Mutex
-	backend             *interceptionKeyboardBackend
-	threadID            uint32
-	gameForegroundTest  func(*keyboardWorkerConfig) bool
-	emitTest            func(uint32, time.Duration) error
-	configuredKeyEvents atomic.Uint64
-	foregroundMisses    atomic.Uint64
-	outputGateMisses    atomic.Uint64
-	triggerDowns        atomic.Uint64
-	triggerUps          atomic.Uint64
-	repeatStarts        atomic.Uint64
-	repeatStops         atomic.Uint64
-	outputPairs         atomic.Uint64
-	outputFailures      atomic.Uint64
-	syntheticHookEvents atomic.Uint64
-	releaseChecks       atomic.Uint64
-	lastKey             atomic.Uint32
-	lastScanCode        atomic.Uint32
-	lastDevice          atomic.Uint32
-	lastOutputDevice    atomic.Uint32
-	foregroundPID       atomic.Uint32
+	config                atomic.Pointer[keyboardWorkerConfig]
+	held                  [1024]atomic.Bool
+	heldDevice            [1024]atomic.Uint32
+	generation            [1024]atomic.Uint64
+	done                  chan struct{}
+	wg                    sync.WaitGroup
+	faultMu               sync.Mutex
+	fault                 error
+	outputMu              sync.Mutex
+	backend               *interceptionKeyboardBackend
+	threadID              uint32
+	gameForegroundTest    func(*keyboardWorkerConfig) bool
+	emitTest              func(uint32, time.Duration) error
+	configuredKeyEvents   atomic.Uint64
+	foregroundMisses      atomic.Uint64
+	outputGateMisses      atomic.Uint64
+	triggerDowns          atomic.Uint64
+	triggerUps            atomic.Uint64
+	repeatStarts          atomic.Uint64
+	repeatStops           atomic.Uint64
+	outputPairs           atomic.Uint64
+	outputFailures        atomic.Uint64
+	syntheticHookEvents   atomic.Uint64
+	releaseChecks         atomic.Uint64
+	physicalSuppressed    atomic.Uint64
+	hookTriggerUpsIgnored atomic.Uint64
+	crossDeviceUpsIgnored atomic.Uint64
+	lastKey               atomic.Uint32
+	lastScanCode          atomic.Uint32
+	lastDevice            atomic.Uint32
+	lastOutputDevice      atomic.Uint32
+	foregroundPID         atomic.Uint32
 }
 
 func RunKeyboardWorker(input io.Reader, output io.Writer) error {
@@ -459,6 +466,17 @@ func RunKeyboardWorker(input io.Reader, output io.Writer) error {
 	defer procUnhookWindowsHookEx.Call(hook)
 	threadID := windows.GetCurrentThreadId()
 	worker.threadID = threadID
+	worker.wg.Add(1)
+	go func() {
+		defer worker.wg.Done()
+		if captureErr := backend.CaptureKeyboard(worker.done, worker.interceptInterceptionStroke, nil); captureErr != nil {
+			select {
+			case <-worker.done:
+			default:
+				worker.fail(captureErr)
+			}
+		}
+	}()
 	go worker.readConfigurations(input, output, threadID)
 	var msg message
 	var loopError error
@@ -496,6 +514,7 @@ func (worker *keyboardWorkerRuntime) readConfigurations(input io.Reader, output 
 			response.Error = "keyboard worker interval must be 1..5000 ms"
 		} else {
 			keys := make(map[uint32]struct{}, len(request.RepeatKeys))
+			strokeKeys := make(map[uint32]uint32, len(request.RepeatKeys))
 			for _, key := range request.RepeatKeys {
 				if !ValidKeyCode(key) {
 					response.OK = false
@@ -503,13 +522,14 @@ func (worker *keyboardWorkerRuntime) readConfigurations(input io.Reader, output 
 					break
 				}
 				key = NormalizeKeyCode(key)
-				_, err := interceptionKeyboardData(key, false)
+				data, err := interceptionKeyboardData(key, false)
 				if err != nil {
 					response.OK = false
 					response.Error = fmt.Sprintf("map keyboard worker repeat key 0x%X: %v", key, err)
 					break
 				}
 				keys[key] = struct{}{}
+				strokeKeys[interceptionStrokeSignature(data)] = key
 			}
 			processes := make(map[uint32]struct{}, len(request.GameProcesses))
 			for _, processID := range request.GameProcesses {
@@ -520,10 +540,11 @@ func (worker *keyboardWorkerRuntime) readConfigurations(input io.Reader, output 
 			if response.OK {
 				worker.releaseHeldKeys()
 				worker.config.Store(&keyboardWorkerConfig{
-					enabled:   request.Enabled,
-					keys:      keys,
-					interval:  time.Duration(request.IntervalMS) * time.Millisecond,
-					processes: processes,
+					enabled:    request.Enabled,
+					keys:       keys,
+					strokeKeys: strokeKeys,
+					interval:   time.Duration(request.IntervalMS) * time.Millisecond,
+					processes:  processes,
 				})
 				for index := range worker.held {
 					worker.held[index].Store(false)
@@ -537,6 +558,60 @@ func (worker *keyboardWorkerRuntime) readConfigurations(input io.Reader, output 
 			return
 		}
 	}
+}
+
+func interceptionStrokeSignature(data interceptionKeyboardInput) uint32 {
+	return uint32(data.MakeCode) | uint32(data.Flags&(interceptionKeyE0|interceptionKeyE1))<<16
+}
+
+// interceptInterceptionStroke owns the physical ledger. While the verified
+// game is foreground, configured trigger edges are consumed here and replaced
+// by balanced output on logical keyboard 1. Every unrelated stroke remains a
+// synchronous pass-through. WH_KEYBOARD_LL is deliberately not authoritative:
+// another hook may replay a trigger up without preserving ExtraInformation.
+func (worker *keyboardWorkerRuntime) interceptInterceptionStroke(device uint32, data interceptionKeyboardInput) bool {
+	if worker == nil || data.ExtraInformation == uint32(interceptionMarker) {
+		return true
+	}
+	config := worker.config.Load()
+	if config == nil || !config.enabled {
+		return true
+	}
+	key, configured := config.strokeKeys[interceptionStrokeSignature(data)]
+	if !configured {
+		return true
+	}
+	worker.lastDevice.Store(device)
+	key = NormalizeKeyCode(key)
+	index := int(key & 0x3ff)
+	down := data.Flags&interceptionKeyUp == 0
+	foregroundPID, foreground := worker.gameForegroundPID(config)
+	worker.foregroundPID.Store(foregroundPID)
+
+	if !foreground {
+		// A release after focus leaves the game must still terminate an old
+		// held session, but the user's physical edge belongs to the new
+		// foreground application and therefore remains a pass-through.
+		if !down && (!worker.held[index].Load() || worker.heldDevice[index].Load() == device) {
+			worker.handlePhysicalDeviceState(key, false, device, config, foregroundPID, false)
+		}
+		return true
+	}
+
+	if !down {
+		worker.releaseChecks.Add(1)
+		if worker.held[index].Load() {
+			heldDevice := worker.heldDevice[index].Load()
+			if heldDevice != 0 && heldDevice != device {
+				worker.crossDeviceUpsIgnored.Add(1)
+				worker.physicalSuppressed.Add(1)
+				return false
+			}
+		}
+	}
+	worker.handlePhysicalDeviceState(key, down, device, config, foregroundPID, true)
+	worker.physicalSuppressed.Add(1)
+	return false
 }
 
 var activeKeyboardWorker atomic.Pointer[keyboardWorkerRuntime]
@@ -572,16 +647,15 @@ func (worker *keyboardWorkerRuntime) handleKeyboardHookEvent(message uintptr, da
 	if !down && !up {
 		return
 	}
-	key := EncodeKeyCode(data.VirtualKey, data.Flags&llkhfExtended != 0)
 	if up {
 		config := worker.config.Load()
 		if config != nil {
+			key := EncodeKeyCode(data.VirtualKey, data.Flags&llkhfExtended != 0)
 			if _, configured := config.keys[NormalizeKeyCode(key)]; configured {
-				worker.releaseChecks.Add(1)
+				worker.hookTriggerUpsIgnored.Add(1)
 			}
 		}
 	}
-	worker.handlePhysicalDevice(key, down, 0)
 }
 
 func (worker *keyboardWorkerRuntime) handlePhysical(key uint32, down bool) {
@@ -589,6 +663,23 @@ func (worker *keyboardWorkerRuntime) handlePhysical(key uint32, down bool) {
 }
 
 func (worker *keyboardWorkerRuntime) handlePhysicalDevice(key uint32, down bool, device uint32) {
+	config := worker.config.Load()
+	var foregroundPID uint32
+	var foreground bool
+	if config != nil {
+		foregroundPID, foreground = worker.gameForegroundPID(config)
+	}
+	worker.handlePhysicalDeviceState(key, down, device, config, foregroundPID, foreground)
+}
+
+func (worker *keyboardWorkerRuntime) handlePhysicalDeviceState(
+	key uint32,
+	down bool,
+	device uint32,
+	config *keyboardWorkerConfig,
+	foregroundPID uint32,
+	foreground bool,
+) {
 	key = NormalizeKeyCode(key)
 	index := int(key & 0x3ff)
 	if !down {
@@ -597,7 +688,6 @@ func (worker *keyboardWorkerRuntime) handlePhysicalDevice(key uint32, down bool,
 		}
 		worker.heldDevice[index].Store(0)
 	}
-	config := worker.config.Load()
 	if config == nil || !config.enabled {
 		return
 	}
@@ -606,7 +696,6 @@ func (worker *keyboardWorkerRuntime) handlePhysicalDevice(key uint32, down bool,
 	}
 	worker.configuredKeyEvents.Add(1)
 	worker.lastKey.Store(key)
-	foregroundPID, foreground := worker.gameForegroundPID(config)
 	worker.foregroundPID.Store(foregroundPID)
 	if !foreground {
 		worker.foregroundMisses.Add(1)
@@ -634,10 +723,10 @@ func (worker *keyboardWorkerRuntime) repeatKey(key uint32, generation uint64) {
 	defer worker.wg.Done()
 	defer worker.repeatStops.Add(1)
 	index := int(key & 0x3ff)
-	// The capture path forwards the original physical make stroke first. Each
-	// iteration emits the balanced make/break pair consumed by the game. A
-	// quarantined physical break does not change held/generation, so an
-	// unrelated key cannot pause this loop while release is being confirmed.
+	// The capture path consumes the configured physical edge while the game is
+	// foreground. Each iteration emits the complete balanced make/break pair
+	// consumed by the game on logical device 1; unrelated physical keys remain
+	// independent pass-through records.
 	for worker.held[index].Load() && worker.generation[index].Load() == generation {
 		config := worker.config.Load()
 		if config == nil || !config.enabled {
@@ -729,22 +818,25 @@ func (worker *keyboardWorkerRuntime) gameForegroundPID(config *keyboardWorkerCon
 
 func (worker *keyboardWorkerRuntime) diagnostics() KeyboardWorkerDiagnostics {
 	diagnostics := KeyboardWorkerDiagnostics{
-		ConfiguredKeyEvents: worker.configuredKeyEvents.Load(),
-		ForegroundMisses:    worker.foregroundMisses.Load(),
-		OutputGateMisses:    worker.outputGateMisses.Load(),
-		TriggerDowns:        worker.triggerDowns.Load(),
-		TriggerUps:          worker.triggerUps.Load(),
-		RepeatStarts:        worker.repeatStarts.Load(),
-		RepeatStops:         worker.repeatStops.Load(),
-		OutputPairs:         worker.outputPairs.Load(),
-		OutputFailures:      worker.outputFailures.Load(),
-		SyntheticHookEvents: worker.syntheticHookEvents.Load(),
-		ReleaseChecks:       worker.releaseChecks.Load(),
-		LastKey:             worker.lastKey.Load(),
-		LastScanCode:        worker.lastScanCode.Load(),
-		LastDevice:          worker.lastDevice.Load(),
-		LastOutputDevice:    worker.lastOutputDevice.Load(),
-		ForegroundPID:       worker.foregroundPID.Load(),
+		ConfiguredKeyEvents:   worker.configuredKeyEvents.Load(),
+		ForegroundMisses:      worker.foregroundMisses.Load(),
+		OutputGateMisses:      worker.outputGateMisses.Load(),
+		TriggerDowns:          worker.triggerDowns.Load(),
+		TriggerUps:            worker.triggerUps.Load(),
+		RepeatStarts:          worker.repeatStarts.Load(),
+		RepeatStops:           worker.repeatStops.Load(),
+		OutputPairs:           worker.outputPairs.Load(),
+		OutputFailures:        worker.outputFailures.Load(),
+		SyntheticHookEvents:   worker.syntheticHookEvents.Load(),
+		ReleaseChecks:         worker.releaseChecks.Load(),
+		PhysicalSuppressed:    worker.physicalSuppressed.Load(),
+		HookTriggerUpsIgnored: worker.hookTriggerUpsIgnored.Load(),
+		CrossDeviceUpsIgnored: worker.crossDeviceUpsIgnored.Load(),
+		LastKey:               worker.lastKey.Load(),
+		LastScanCode:          worker.lastScanCode.Load(),
+		LastDevice:            worker.lastDevice.Load(),
+		LastOutputDevice:      worker.lastOutputDevice.Load(),
+		ForegroundPID:         worker.foregroundPID.Load(),
 	}
 	config := worker.config.Load()
 	if config != nil {

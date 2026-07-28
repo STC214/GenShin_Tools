@@ -400,14 +400,14 @@ func TestCancellingCaptureImmediatelyRestoresShortcuts(t *testing.T) {
 	}
 	n.SetCaptureMode(true)
 	n.SetCaptureMode(false)
-	n.enqueue(PhysicalEvent{Kind: EventKey, Code: config.KeyboardToggleKey, Down: true})
+	n.enqueue(PhysicalEvent{Kind: EventKey, Code: config.MouseLeftToggleKey, Down: true})
 	n.drain()
-	if snapshot := engine.Snapshot(); !snapshot.Config.Enabled || snapshot.Config.Mode != ModeKeyboard {
+	if snapshot := engine.Snapshot(); !snapshot.Config.Enabled || snapshot.Config.Mode != ModeMouseLeft {
 		t.Fatalf("shortcut remained suppressed after capture cancellation: %+v", snapshot)
 	}
 }
 
-func TestKeyboardPollingFallbackDrivesToggleHoldAndRelease(t *testing.T) {
+func TestKeyboardPollingFallbackIgnoresRetiredKeyboardToggle(t *testing.T) {
 	injector := &fakeInjector{}
 	engine, err := NewEngine(injector, nil)
 	if err != nil {
@@ -429,34 +429,8 @@ func TestKeyboardPollingFallbackDrivesToggleHoldAndRelease(t *testing.T) {
 
 	pressed[config.KeyboardToggleKey] = true
 	n.pollKeyboardOnce(states)
-	if snapshot := engine.Snapshot(); !snapshot.Config.Enabled || snapshot.Config.Mode != ModeKeyboard || snapshot.State != StateArmed {
-		t.Fatalf("poll toggle snapshot = %+v", snapshot)
-	}
-	pressed[config.KeyboardToggleKey] = false
-	n.pollKeyboardOnce(states)
-
-	pressed[config.OutputKey] = true
-	n.pollKeyboardOnce(states)
-	deadline := time.Now().Add(250 * time.Millisecond)
-	for {
-		if emits, _ := injector.counts(); emits >= 2 {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("polled hold produced no repeated output: snapshot=%+v", engine.Snapshot())
-		}
-		time.Sleep(time.Millisecond)
-	}
-	pressed[config.OutputKey] = false
-	n.pollKeyboardOnce(states)
-	if snapshot := engine.Snapshot(); snapshot.State != StateArmed || !snapshot.Config.Enabled {
-		t.Fatalf("polled release snapshot = %+v", snapshot)
-	}
-	before, _ := injector.counts()
-	time.Sleep(20 * time.Millisecond)
-	after, _ := injector.counts()
-	if after != before {
-		t.Fatalf("polled release left late output: %d -> %d", before, after)
+	if snapshot := engine.Snapshot(); snapshot.Config.Enabled || snapshot.State != StateDisabled {
+		t.Fatalf("retired keyboard toggle changed state through polling: %+v", snapshot)
 	}
 }
 
@@ -540,7 +514,7 @@ func TestHookOwnershipClearsWhenInputSessionStopsOrReconfigures(t *testing.T) {
 	}
 }
 
-func TestKeyboardPollingFallbackAndHookDoNotDoubleToggle(t *testing.T) {
+func TestKeyboardHookIgnoresRetiredKeyboardToggle(t *testing.T) {
 	injector := &fakeInjector{}
 	engine, err := NewEngine(injector, nil)
 	if err != nil {
@@ -561,8 +535,8 @@ func TestKeyboardPollingFallbackAndHookDoNotDoubleToggle(t *testing.T) {
 	n.processPhysicalEvent(PhysicalEvent{Kind: EventKey, Code: config.KeyboardToggleKey, Down: true})
 	pressed[config.KeyboardToggleKey] = true
 	n.pollKeyboardOnce(states)
-	if snapshot := engine.Snapshot(); !snapshot.Config.Enabled || snapshot.Config.Mode != ModeKeyboard {
-		t.Fatalf("hook plus poll double-toggled feature: %+v", snapshot)
+	if snapshot := engine.Snapshot(); snapshot.Config.Enabled || snapshot.State != StateDisabled {
+		t.Fatalf("retired keyboard toggle changed state through hook/poll: %+v", snapshot)
 	}
 	n.processPhysicalEvent(PhysicalEvent{Kind: EventKey, Code: config.KeyboardToggleKey, Down: false})
 	pressed[config.KeyboardToggleKey] = false
@@ -599,43 +573,32 @@ func TestKeyboardPollingFallbackStartsMouseModeInExternalForeground(t *testing.T
 	}
 }
 
-func TestInputOnlyStartsInConfiguredGameProcess(t *testing.T) {
-	injector := &fakeInjector{}
-	engine, err := NewEngine(injector, nil)
+func TestNativeRetiresBuiltInKeyboardConfiguration(t *testing.T) {
+	n, err := NewNative(nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var foreground atomic.Uintptr
-	foreground.Store(2)
-	n := &Native{
-		engine:         engine,
-		foreground:     func() windows.HWND { return windows.HWND(foreground.Load()) },
-		windowPID:      func(window windows.HWND) uint32 { return uint32(window) },
-		processCreated: func(processID uint32) int64 { return int64(processID) * 10 },
-	}
-	n.SetGameProcesses([]GameProcess{{PID: 1, CreationTime: 10}})
-	n.keyboardReady.Store(true)
+	defer n.Close()
 	config := DefaultConfig()
 	config.Enabled = true
 	config.Interval = 5 * time.Millisecond
 	if err := n.Configure(config); err != nil {
 		t.Fatal(err)
 	}
-	n.processPhysicalEvent(PhysicalEvent{Kind: EventKey, Code: config.OutputKey, Down: true})
-	if snapshot := engine.Snapshot(); snapshot.State != StateArmed {
-		t.Fatalf("keyboard repeat started outside configured game process: %+v", snapshot)
+	snapshot := n.Snapshot()
+	if snapshot.Config.Enabled || snapshot.Config.Mode != ModeMouseLeft || snapshot.State != StateDisabled {
+		t.Fatalf("legacy keyboard configuration was not retired: %+v", snapshot)
 	}
-
-	foreground.Store(1)
-	n.processPhysicalEvent(PhysicalEvent{Kind: EventKey, Code: config.OutputKey, Down: true})
-	deadline := time.Now().Add(250 * time.Millisecond)
-	for engine.Snapshot().State != StateRunning && time.Now().Before(deadline) {
-		time.Sleep(time.Millisecond)
+	if n.KeyboardWorkerActive() || n.KeyboardWorkerPID() != 0 {
+		t.Fatalf("retired keyboard configuration started worker: active=%t pid=%d", n.KeyboardWorkerActive(), n.KeyboardWorkerPID())
 	}
-	if snapshot := engine.Snapshot(); snapshot.State != StateRunning {
-		t.Fatalf("keyboard repeat did not start in configured game process: %+v", snapshot)
+	n.SetGameProcesses([]GameProcess{{PID: 42, CreationTime: 84}})
+	if err := n.SetKeyboardBackendReady(true); err != nil {
+		t.Fatal(err)
 	}
-	n.processPhysicalEvent(PhysicalEvent{Kind: EventKey, Code: config.OutputKey, Down: false})
+	if n.KeyboardWorkerActive() || n.KeyboardWorkerPID() != 0 {
+		t.Fatalf("post-launch readiness started retired worker: active=%t pid=%d", n.KeyboardWorkerActive(), n.KeyboardWorkerPID())
+	}
 }
 
 func TestConfiguredGameProcessRejectsReusedPID(t *testing.T) {
@@ -829,7 +792,7 @@ func TestMainEngineIgnoresInterceptionRawInputEcho(t *testing.T) {
 	n.processPhysicalEvent(PhysicalEvent{Kind: EventKey, Code: config.OutputKey, Down: true})
 	n.processPhysicalEvent(PhysicalEvent{Kind: EventKey, Code: config.OutputKey, Down: false})
 	snapshot := n.Snapshot()
-	if snapshot.State != StateArmed || snapshot.OutputCount != 0 {
+	if snapshot.State != StateDisabled || snapshot.Config.Mode != ModeMouseLeft || snapshot.OutputCount != 0 {
 		t.Fatalf("Interception Raw Input echo changed main-engine state: %+v", snapshot)
 	}
 }

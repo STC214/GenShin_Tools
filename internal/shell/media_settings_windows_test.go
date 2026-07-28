@@ -150,6 +150,18 @@ func TestInputFooterRectsReserveIndependentAHKOptionAndStatus(t *testing.T) {
 	}
 }
 
+func TestProductInputModesExcludeBuiltInKeyboardRepeat(t *testing.T) {
+	modes := productInputModes()
+	if len(modes) != 2 || modes[0] != input.ModeMouseLeft || modes[1] != input.ModeMouseRight {
+		t.Fatalf("product input modes = %v, want mouse left/right only", modes)
+	}
+	for _, mode := range modes {
+		if mode == input.ModeKeyboard {
+			t.Fatal("retired built-in keyboard repeat remains in product modes")
+		}
+	}
+}
+
 func TestInputPageMinimumHeightAlsoAppliesToRestoredBounds(t *testing.T) {
 	got := enforceMinimumWindowSize(config.WindowConfig{Width: 320, Height: 560})
 	if got.Width != minimumWindowWidth || got.Height != minimumWindowHeight {

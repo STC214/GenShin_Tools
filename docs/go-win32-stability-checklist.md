@@ -64,6 +64,8 @@
 
 ## D. 输入 hook、热键与 SendInput（P0 专项）
 
+> 1.4.8 起内置键盘连发已从产品路径退休。D18～D20、D23、D32～D35 的 Interception 项目保留为历史实现审计；生产门禁是旧配置迁移、隐藏入口、忽略旧键盘热键及 worker 永不启动。鼠标连点和便携 AHK 生命周期仍按本节相关条目执行。
+
 | ID | 风险/典型表现 | 预防与验证 | 级别 |
 |---|---|---|---:|
 | D01 | hook 线程无消息循环或线程退出，连点偶尔完全无效 | 独立 LockOSThread + GetMessage + 健康心跳 | P0 |
@@ -98,9 +100,9 @@
 | D30 | 便携 AHK 已创建但健康检查或 Job 绑定失败，清理错误被忽略并按秒重复创建未托管进程 | 失败结果保留 PID/路径/创建时间并合并清理根因；调用方精确重试回滚，无法安全终止时停止后续拉起 | P0 |
 | D31 | 原神恢复运行后保护机制拒绝 `TH32CS_SNAPMODULE`，严格驻留复核永久阻断内外部连发 | 模块枚举和 LoadLibrary 结果核验只在 helper 恢复游戏线程前完成；恢复后不再枚举受保护进程，以 helper/Running 双屏障、可选主动就绪和独立五秒延时完成最终化 | P0 |
 | D32 | Interception 合成键带真实设备句柄回到 Raw Input，被主状态机误判成新的物理 down/up，界面反复切换且诊断计数失真 | worker 活跃时主状态机忽略配置连发键的 Raw Input 回流；held 只接受 Interception 驱动 READ 的原始 stroke，并以两秒有界快照记录驱动触发、保持、输出和失败各层计数 | P0 |
-| D33 | worker 吞掉物理首个 down，只留下 Interception 合成对；驱动写入和 Windows Hook 均成功但游戏不建立原始物理键状态 | 对齐 FlairBloom：worker Hook 始终调用 `CallNextHookEx`，物理 down/up 原样进入游戏；held/generation 只用于附加合成重复，marker 继续阻止递归 | P0 |
-| D34 | Interception `SET_FILTER` 后 worker 未及时 READ/WRITE、部分设备初始化失败或退出等待卡住，导致全局键盘输入冻结 | 只在注入后最终阶段创建 worker；十个键盘设备过滤器事务式安装、失败回滚；每个 stroke 先向原设备原样回写再更新 held；50ms 有界等待检查 shutdown；读取/回写失败触发 worker 退出并由句柄关闭解除过滤 | P0 |
-| D35 | 插件/虚拟设备在按其他键时生成跨设备配置键 up，循环停止后只能等待 Windows 长按重复 down 才恢复 | 首次 down 立即锁存并在同一物理 Interception 设备输出；删除启动延时；以 3ms settle/25ms 跨键邻接窗口丢弃切键副产物 up，不推进 held/generation；诊断分别记录输入设备、输出设备、检查和丢弃计数 | P0 |
+| D33 | 物理 F 与合成 F 同时进入游戏输入栈后互相竞争，或下游 Hook 重放无 marker 的 F-up 并错误结束 held | 游戏前台时由驱动层消费配置键物理边沿，只把它用于 held/generation；游戏仅接收逻辑设备 1 的平衡合成对。低级 Hook 只诊断，任何 Hook up 都无权结束 held | P0 |
+| D34 | Interception `SET_FILTER` 后 worker 未及时 READ/WRITE、部分设备初始化失败或退出等待卡住，导致全局键盘输入冻结 | 只在注入后最终阶段创建 worker；十个键盘设备过滤器事务式安装、失败回滚；非配置 stroke 立即向原设备回写，配置 stroke 仅在游戏前台被替换；50ms 有界等待检查 shutdown；读取/回写失败触发 worker 退出并由句柄关闭解除过滤 | P0 |
+| D35 | 插件/虚拟设备在按其他键时生成跨设备配置键 up，循环停止后只能等待 Windows 长按重复 down 才恢复 | 首次物理 down 立即锁存来源设备，合成输出固定使用逻辑设备 1；只有同一扫描码且与 held 来源相同的驱动 up 能推进 generation，跨设备 up 被抑制并单独计数 | P0 |
 
 ## E. GDI、DWM、DPI 与窗口资源
 

@@ -96,7 +96,7 @@ func TestKeyboardWorkerTracksOnlyConfiguredDriverTrigger(t *testing.T) {
 	}
 }
 
-func TestKeyboardWorkerHookKeepsConfiguredKeyIndependent(t *testing.T) {
+func TestKeyboardWorkerHookTriggerUpIsDiagnosticOnly(t *testing.T) {
 	key := EncodeKeyCode('F', false)
 	worker := &keyboardWorkerRuntime{
 		done:               make(chan struct{}),
@@ -108,23 +108,143 @@ func TestKeyboardWorkerHookKeepsConfiguredKeyIndependent(t *testing.T) {
 		keys:     map[uint32]struct{}{key: {}},
 		interval: time.Hour,
 	})
+	worker.held[int(key&0x3ff)].Store(true)
+	worker.heldDevice[int(key&0x3ff)].Store(4)
 	f := keyboardHook{VirtualKey: 'F'}
 	g := keyboardHook{VirtualKey: 'G'}
 	worker.handleKeyboardHookEvent(wMKeyDown, &f)
 	worker.handleKeyboardHookEvent(wMKeyDown, &g)
 	worker.handleKeyboardHookEvent(wMKeyUp, &g)
-	if !worker.held[int(key&0x3ff)].Load() {
-		t.Fatal("unrelated hook key changed the configured physical ledger")
-	}
 	worker.handleKeyboardHookEvent(wMKeyUp, &f)
+	if !worker.held[int(key&0x3ff)].Load() {
+		t.Fatal("unmarked hook key-up changed the driver-owned physical ledger")
+	}
+	worker.held[int(key&0x3ff)].Store(false)
+	close(worker.done)
+	worker.wg.Wait()
+	if got := worker.hookTriggerUpsIgnored.Load(); got != 1 {
+		t.Fatalf("ignored hook release count = %d, want 1", got)
+	}
+}
+
+func TestKeyboardWorkerDriverSuppressesTriggerAndKeepsDeviceOneOutput(t *testing.T) {
+	key := EncodeKeyCode('F', false)
+	fDown := interceptionKeyboardInput{MakeCode: 0x21}
+	fUp := fDown
+	fUp.Flags = interceptionKeyUp
+	gDown := interceptionKeyboardInput{MakeCode: 0x22}
+	emitted := make(chan struct{}, 1)
+	worker := &keyboardWorkerRuntime{
+		done:               make(chan struct{}),
+		gameForegroundTest: func(*keyboardWorkerConfig) bool { return true },
+		emitTest: func(uint32, time.Duration) error {
+			select {
+			case emitted <- struct{}{}:
+			default:
+			}
+			return nil
+		},
+	}
+	worker.config.Store(&keyboardWorkerConfig{
+		enabled:    true,
+		keys:       map[uint32]struct{}{key: {}},
+		strokeKeys: map[uint32]uint32{interceptionStrokeSignature(fDown): key},
+		interval:   time.Hour,
+	})
+
+	if forward := worker.interceptInterceptionStroke(4, fDown); forward {
+		t.Fatal("physical trigger down was forwarded to the game")
+	}
+	select {
+	case <-emitted:
+	case <-time.After(50 * time.Millisecond):
+		t.Fatal("suppressed physical trigger did not start immediate replacement output")
+	}
+	if forward := worker.interceptInterceptionStroke(4, gDown); !forward {
+		t.Fatal("unrelated driver key was not passed through")
+	}
+	if !worker.held[int(key&0x3ff)].Load() {
+		t.Fatal("unrelated driver key interrupted the trigger")
+	}
+
+	worker.handleKeyboardHookEvent(wMKeyUp, &keyboardHook{VirtualKey: 'F'})
+	if !worker.held[int(key&0x3ff)].Load() {
+		t.Fatal("unmarked hook F-up interrupted the driver-owned trigger")
+	}
+	if forward := worker.interceptInterceptionStroke(5, fUp); forward {
+		t.Fatal("cross-device configured release leaked an orphan edge")
+	}
+	if !worker.held[int(key&0x3ff)].Load() {
+		t.Fatal("cross-device configured release interrupted the trigger")
+	}
+	if forward := worker.interceptInterceptionStroke(4, fUp); forward {
+		t.Fatal("matching physical trigger release was forwarded to the game")
+	}
 	if worker.held[int(key&0x3ff)].Load() {
-		t.Fatal("configured hook key remained held after its own release")
+		t.Fatal("matching driver/device release did not stop the trigger")
 	}
 	close(worker.done)
 	worker.wg.Wait()
-	if got := worker.releaseChecks.Load(); got != 1 {
-		t.Fatalf("hook release count = %d, want 1", got)
+
+	diagnostics := worker.diagnostics()
+	if diagnostics.PhysicalSuppressed != 3 || diagnostics.ReleaseChecks != 2 ||
+		diagnostics.CrossDeviceUpsIgnored != 1 || diagnostics.HookTriggerUpsIgnored != 1 ||
+		diagnostics.LastDevice != 4 || diagnostics.LastOutputDevice != 1 {
+		t.Fatalf("unexpected isolated-driver diagnostics: %+v", diagnostics)
 	}
+}
+
+func TestKeyboardWorkerDriverPassesTriggerOutsideGame(t *testing.T) {
+	key := EncodeKeyCode('F', false)
+	fDown := interceptionKeyboardInput{MakeCode: 0x21}
+	worker := &keyboardWorkerRuntime{
+		done:               make(chan struct{}),
+		gameForegroundTest: func(*keyboardWorkerConfig) bool { return false },
+	}
+	worker.config.Store(&keyboardWorkerConfig{
+		enabled:    true,
+		keys:       map[uint32]struct{}{key: {}},
+		strokeKeys: map[uint32]uint32{interceptionStrokeSignature(fDown): key},
+		interval:   time.Millisecond,
+	})
+	if forward := worker.interceptInterceptionStroke(4, fDown); !forward {
+		t.Fatal("configured key was suppressed outside the game")
+	}
+	if worker.held[int(key&0x3ff)].Load() {
+		t.Fatal("configured key became held outside the game")
+	}
+	close(worker.done)
+}
+
+func TestKeyboardWorkerDriverUsesOneForegroundDecisionPerStroke(t *testing.T) {
+	key := EncodeKeyCode('F', false)
+	fDown := interceptionKeyboardInput{MakeCode: 0x21}
+	var foregroundChecks atomic.Int32
+	worker := &keyboardWorkerRuntime{
+		done: make(chan struct{}),
+		gameForegroundTest: func(*keyboardWorkerConfig) bool {
+			return foregroundChecks.Add(1) == 1
+		},
+		emitTest: func(uint32, time.Duration) error { return nil },
+	}
+	worker.config.Store(&keyboardWorkerConfig{
+		enabled:    true,
+		keys:       map[uint32]struct{}{key: {}},
+		strokeKeys: map[uint32]uint32{interceptionStrokeSignature(fDown): key},
+		interval:   time.Hour,
+	})
+	if forward := worker.interceptInterceptionStroke(4, fDown); forward {
+		t.Fatal("one verified foreground decision did not suppress the physical trigger")
+	}
+	if got := foregroundChecks.Load(); got != 1 {
+		t.Fatalf("foreground checked %d times for one captured stroke, want 1", got)
+	}
+	if !worker.held[int(key&0x3ff)].Load() {
+		t.Fatal("foreground changed between duplicate checks and lost the trigger")
+	}
+	worker.held[int(key&0x3ff)].Store(false)
+	close(worker.done)
+	worker.wg.Wait()
 }
 
 func TestKeyboardWorkerFirstDownEmitsWithoutLongPressDelay(t *testing.T) {
