@@ -17,6 +17,7 @@ const (
 	whKeyboardLL   = 13
 	whMouseLL      = 14
 	wMQuit         = 0x0012
+	wMHookControl  = 0x8051
 	pmNoRemove     = 0x0000
 	ridInput       = 0x10000003
 	rimTypeKey     = 1
@@ -119,6 +120,19 @@ type rawKeyboard struct {
 	ExtraInformation uint32
 }
 
+type hookControlRequest struct {
+	ready  bool
+	state  atomic.Uint32
+	result chan error
+}
+
+const (
+	hookControlPending uint32 = iota
+	hookControlClaimed
+	hookControlCanceled
+	hookControlDone
+)
+
 // winInput mirrors INPUT on both 32-bit and 64-bit Windows. The explicit
 // uintptr alignment before Data is what gives x64 its required 40-byte size.
 type winInput struct {
@@ -147,6 +161,7 @@ type keyboardSuppressionSnapshot struct {
 type Native struct {
 	engine    *Engine
 	lifecycle sync.Mutex
+	hookMu    sync.Mutex
 	physical  sync.Mutex
 	queueMu   sync.Mutex
 	targetsMu sync.RWMutex
@@ -160,21 +175,25 @@ type Native struct {
 	monitorStop chan struct{}
 	monitorDone chan struct{}
 	pollDone    chan struct{}
+	hookControl chan *hookControlRequest
 
-	threadID       atomic.Uint32
-	started        atomic.Bool
-	closed         atomic.Bool
-	overflow       atomic.Bool
-	safetyDisabled atomic.Bool
-	capturing      atomic.Bool
-	pollCaptureNew atomic.Bool
-	captureKey     atomic.Uint32
-	runTarget      atomic.Uintptr
-	armTarget      atomic.Uintptr
-	rawRegistered  atomic.Bool
-	hookTargets    atomic.Pointer[hookTargetSnapshot]
-	suppression    atomic.Pointer[keyboardSuppressionSnapshot]
-	keyboardWorker *keyboardWorkerController
+	threadID         atomic.Uint32
+	started          atomic.Bool
+	closed           atomic.Bool
+	overflow         atomic.Bool
+	safetyDisabled   atomic.Bool
+	capturing        atomic.Bool
+	pollCaptureNew   atomic.Bool
+	captureKey       atomic.Uint32
+	runTarget        atomic.Uintptr
+	armTarget        atomic.Uintptr
+	rawRegistered    atomic.Bool
+	keyboardReady    atomic.Bool
+	observationReady atomic.Bool
+	observationDirty atomic.Bool
+	hookTargets      atomic.Pointer[hookTargetSnapshot]
+	suppression      atomic.Pointer[keyboardSuppressionSnapshot]
+	keyboardWorker   *keyboardWorkerController
 
 	keyboardCallback uintptr
 	mouseCallback    uintptr
@@ -226,6 +245,7 @@ func NewNative(onChange func(Snapshot)) (*Native, error) {
 		monitorStop:    make(chan struct{}),
 		monitorDone:    make(chan struct{}),
 		pollDone:       make(chan struct{}),
+		hookControl:    make(chan *hookControlRequest, 1),
 		foreground:     windows.GetForegroundWindow,
 		windowPID:      windowProcessID,
 		processCreated: processCreationTime,
@@ -238,13 +258,13 @@ func NewNative(onChange func(Snapshot)) (*Native, error) {
 		return nil, err
 	}
 	injector.allowed = func() bool {
-		return n.isGameWindowFast(n.foreground())
+		return !n.keyboardInputHeldForLaunch() && n.isGameWindowFast(n.foreground())
 	}
 	n.keyboardWorker = newKeyboardWorkerController()
 	injector.externalKeyboard = n.keyboardWorker.Active
 	engine, err := NewEngine(injector, func(snapshot Snapshot) {
 		n.publishKeyboardSuppression(snapshot)
-		n.syncKeyboardWorker(snapshot)
+		_ = n.syncKeyboardWorker(snapshot)
 		if onChange != nil {
 			onChange(snapshot)
 		}
@@ -332,11 +352,91 @@ func (n *Native) KeyboardWorkerError() string {
 	return n.keyboardWorker.LastError()
 }
 
-// RefreshKeyboardBackend reinstalls the x86 worker hook after injected modules
-// have completed their own hook setup.
+// SetKeyboardBackendReady is the hard post-launch gate for the x86 keyboard
+// hook. Game discovery may configure target PIDs early, but it must not install
+// the hook until launch and every injected module have completed.
+func (n *Native) SetKeyboardBackendReady(ready bool) error {
+	if n == nil || n.keyboardWorker == nil {
+		return errors.New("keyboard worker is unavailable")
+	}
+	if !ready && n.engine != nil {
+		// Stop any active mouse/legacy output loop while preserving the user's
+		// enabled configuration. No synthetic input may survive into the
+		// suspended launch or plugin initialization interval.
+		n.engine.stop(false)
+	}
+	n.keyboardReady.Store(ready)
+	return n.syncKeyboardWorker(n.engine.Snapshot())
+}
+
+// SetObservationHooksReady controls the main-process low-level keyboard and
+// mouse observation hooks on their owning message-loop thread. Disabling them
+// before injection and reinstalling them during finalization ensures even the
+// non-suppressing physical-event hooks are younger than injected plugin hooks.
+func (n *Native) SetObservationHooksReady(ready bool) error {
+	if n == nil {
+		return errors.New("native input is unavailable")
+	}
+	n.hookMu.Lock()
+	defer n.hookMu.Unlock()
+	if n.closed.Load() || !n.started.Load() {
+		return errors.New("native input hook thread is not running")
+	}
+	if n.observationReady.Load() == ready && !n.observationDirty.Load() {
+		return nil
+	}
+	request := &hookControlRequest{ready: ready, result: make(chan error, 1)}
+	select {
+	case n.hookControl <- request:
+	default:
+		return errors.New("native input hook control is busy")
+	}
+	result, _, callErr := procPostThreadMessageW.Call(uintptr(n.threadID.Load()), wMHookControl, 0, 0)
+	if result == 0 {
+		select {
+		case <-n.hookControl:
+		default:
+		}
+		return fmt.Errorf("post native input hook control: %w", normalizeCallError(callErr))
+	}
+	select {
+	case err := <-request.result:
+		return err
+	case <-n.done:
+		return errors.New("native input hook thread stopped during control request")
+	case <-time.After(2 * time.Second):
+		// Cancellation wins only while the hook thread has not claimed the
+		// request. If it already started applying the state, wait for its
+		// acknowledgement so no request can take effect after this method
+		// reports a timeout to the caller.
+		if request.state.CompareAndSwap(hookControlPending, hookControlCanceled) {
+			select {
+			case <-n.hookControl:
+			default:
+			}
+			return errors.New("native input hook control timed out before execution")
+		}
+		select {
+		case err := <-request.result:
+			return err
+		case <-n.done:
+			return errors.New("native input hook thread stopped after claiming control request")
+		}
+	}
+}
+
+func (n *Native) ObservationHooksReady() bool {
+	return n != nil && n.observationReady.Load() && !n.observationDirty.Load()
+}
+
+// RefreshKeyboardBackend reinstalls an already released x86 worker hook. The
+// caller cannot bypass the post-launch readiness gate.
 func (n *Native) RefreshKeyboardBackend() error {
 	if n == nil || n.keyboardWorker == nil {
 		return errors.New("keyboard worker is unavailable")
+	}
+	if !n.keyboardReady.Load() {
+		return errors.New("keyboard worker is waiting for post-launch input finalization")
 	}
 	return n.keyboardWorker.Restart()
 }
@@ -433,21 +533,23 @@ func (n *Native) SetGameProcesses(processes []GameProcess) {
 	n.targetsMu.Unlock()
 	n.hookTargets.Store(&hookTargetSnapshot{configured: true, processes: hookProcesses})
 	if n.engine != nil {
-		n.syncKeyboardWorker(n.engine.Snapshot())
+		_ = n.syncKeyboardWorker(n.engine.Snapshot())
 	}
 }
 
-func (n *Native) syncKeyboardWorker(snapshot Snapshot) {
+func (n *Native) syncKeyboardWorker(snapshot Snapshot) error {
 	if n.keyboardWorker == nil {
-		return
+		return nil
 	}
 	n.targetsMu.RLock()
 	processes := make([]uint32, 0, len(n.gameProcesses))
-	for processID := range n.gameProcesses {
-		processes = append(processes, processID)
+	if n.keyboardReady.Load() {
+		for processID := range n.gameProcesses {
+			processes = append(processes, processID)
+		}
 	}
 	n.targetsMu.RUnlock()
-	_ = n.keyboardWorker.Configure(keyboardWorkerRequest{
+	return n.keyboardWorker.Configure(keyboardWorkerRequest{
 		Enabled:       snapshot.Config.Enabled && snapshot.Config.Mode == ModeKeyboard,
 		RepeatKeys:    snapshot.Config.RepeatKeys.Slice(),
 		IntervalMS:    snapshot.Config.IntervalMS,
@@ -824,18 +926,72 @@ func (n *Native) hookThread(ready chan<- error) {
 		ready <- fmt.Errorf("GetModuleHandleW: %w", normalizeCallError(callErr))
 		return
 	}
-	keyboard, _, callErr := procSetWindowsHookExW.Call(whKeyboardLL, n.keyboardCallback, module, 0)
-	if keyboard == 0 {
-		ready <- fmt.Errorf("install keyboard hook: %w", normalizeCallError(callErr))
+	var keyboard, mouse uintptr
+	install := func() error {
+		if keyboard != 0 && mouse != 0 {
+			n.observationReady.Store(true)
+			n.observationDirty.Store(false)
+			return nil
+		}
+		installedKeyboard := false
+		if keyboard == 0 {
+			var callErr error
+			keyboard, _, callErr = procSetWindowsHookExW.Call(whKeyboardLL, n.keyboardCallback, module, 0)
+			if keyboard == 0 {
+				return fmt.Errorf("install keyboard hook: %w", normalizeCallError(callErr))
+			}
+			installedKeyboard = true
+		}
+		if mouse == 0 {
+			var callErr error
+			mouse, _, callErr = procSetWindowsHookExW.Call(whMouseLL, n.mouseCallback, module, 0)
+			if mouse == 0 {
+				result := fmt.Errorf("install mouse hook: %w", normalizeCallError(callErr))
+				if installedKeyboard {
+					ok, _, rollbackErr := procUnhookWindowsHookEx.Call(keyboard)
+					if ok == 0 {
+						result = errors.Join(result, fmt.Errorf("rollback keyboard hook: %w", normalizeCallError(rollbackErr)))
+					} else {
+						keyboard = 0
+					}
+				}
+				n.observationReady.Store(false)
+				n.observationDirty.Store(true)
+				return result
+			}
+		}
+		n.observationReady.Store(true)
+		n.observationDirty.Store(false)
+		return nil
+	}
+	uninstall := func() error {
+		n.observationReady.Store(false)
+		var result error
+		if mouse != 0 {
+			ok, _, callErr := procUnhookWindowsHookEx.Call(mouse)
+			if ok == 0 {
+				result = errors.Join(result, fmt.Errorf("uninstall mouse hook: %w", normalizeCallError(callErr)))
+			} else {
+				mouse = 0
+			}
+		}
+		if keyboard != 0 {
+			ok, _, callErr := procUnhookWindowsHookEx.Call(keyboard)
+			if ok == 0 {
+				result = errors.Join(result, fmt.Errorf("uninstall keyboard hook: %w", normalizeCallError(callErr)))
+			} else {
+				keyboard = 0
+			}
+		}
+		n.clearHookState()
+		n.observationDirty.Store(result != nil)
+		return result
+	}
+	defer func() { _ = uninstall() }()
+	if err := install(); err != nil {
+		ready <- err
 		return
 	}
-	defer procUnhookWindowsHookEx.Call(keyboard)
-	mouse, _, callErr := procSetWindowsHookExW.Call(whMouseLL, n.mouseCallback, module, 0)
-	if mouse == 0 {
-		ready <- fmt.Errorf("install mouse hook: %w", normalizeCallError(callErr))
-		return
-	}
-	defer procUnhookWindowsHookEx.Call(mouse)
 	ready <- nil
 
 	var msg message
@@ -848,6 +1004,28 @@ func (n *Native) hookThread(ready chan<- error) {
 		if result == -1 {
 			n.engine.Fail(fmt.Errorf("input hook GetMessageW: %w", normalizeCallError(callErr)))
 			return
+		}
+		if msg.Message == wMHookControl {
+			var request *hookControlRequest
+			select {
+			case request = <-n.hookControl:
+			default:
+				continue
+			}
+			if request == nil || !request.state.CompareAndSwap(hookControlPending, hookControlClaimed) {
+				if request != nil {
+					request.result <- errors.New("native input hook control request was canceled")
+				}
+				continue
+			}
+			var err error
+			if request.ready {
+				err = install()
+			} else {
+				err = uninstall()
+			}
+			request.state.Store(hookControlDone)
+			request.result <- err
 		}
 	}
 }
@@ -985,6 +1163,14 @@ func (n *Native) clearHookStateLocked() {
 }
 
 func (n *Native) processPhysicalEventLocked(event PhysicalEvent) {
+	// Once a verified game lifetime exists, no keyboard trigger or toggle may
+	// reach Engine until the post-injection finalizer releases the keyboard
+	// backend. The polling fallback remains alive while observation hooks are
+	// deliberately unloaded, so this gate prevents an early key press from
+	// faulting Engine or starting output before the worker is installed.
+	if event.Kind == EventKey && n.keyboardInputHeldForLaunch() {
+		return
+	}
 	before := n.engine.Snapshot()
 	if before.State == StateArmed && before.Config.Enabled && before.Config.Mode == ModeKeyboard &&
 		event.Kind == EventKey && event.Down && before.Config.IsRepeatKey(event.Code) && !n.isGameWindow(n.foreground()) {
@@ -1013,6 +1199,14 @@ func (n *Native) processPhysicalEventLocked(event PhysicalEvent) {
 		}
 	}
 	n.updateActivationTargets(before.State, after)
+}
+
+func (n *Native) keyboardInputHeldForLaunch() bool {
+	if n == nil || n.keyboardReady.Load() {
+		return false
+	}
+	targets := n.hookTargets.Load()
+	return targets != nil && targets.configured && len(targets.processes) != 0
 }
 
 func (n *Native) enqueue(event PhysicalEvent) {

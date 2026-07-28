@@ -69,6 +69,53 @@ func CaptureExternalCompatibilityTools() []ExternalCompatibilityTool {
 	return tools
 }
 
+// StopExternalCompatibilityTools removes captured user input hooks before the
+// suspended game is created and plugins are injected. The exact captured
+// identities are retained so the caller can restart them only after every
+// injected module has finished loading.
+func StopExternalCompatibilityTools(tools []ExternalCompatibilityTool) error {
+	var result error
+	for _, tool := range tools {
+		if !supportedCompatibilityTool(filepath.Base(tool.Path)) || !filepath.IsAbs(tool.Path) ||
+			tool.PID == 0 || tool.CreationTime == 0 {
+			result = errors.Join(result, fmt.Errorf("reject invalid captured compatibility tool %q PID %d", tool.Path, tool.PID))
+			continue
+		}
+		if err := stopCapturedCompatibilityTool(tool); err != nil {
+			result = errors.Join(result, fmt.Errorf("stop pre-injection %s PID %d: %w", filepath.Base(tool.Path), tool.PID, err))
+		}
+	}
+	return result
+}
+
+// StopRestartedCompatibilityTools rolls back replacements created by
+// RestartExternalCompatibilityTools when the launch epoch becomes stale before
+// the caller can commit them. A replacement is stopped only by its exact
+// path/PID/creation-time identity.
+func StopRestartedCompatibilityTools(results []ExternalToolRestartResult) error {
+	var result error
+	for _, restarted := range results {
+		if restarted.NewPID == 0 {
+			CloseExternalCompatibilityJob(restarted.Job)
+			continue
+		}
+		identity := ExternalCompatibilityTool{
+			PID:          restarted.NewPID,
+			Path:         restarted.Path,
+			CreationTime: restarted.NewCreationTime,
+		}
+		if identity.CreationTime == 0 {
+			identity.CreationTime = processCreationTime(identity.PID)
+		}
+		err := stopCapturedCompatibilityTool(identity)
+		if err != nil {
+			result = errors.Join(result, fmt.Errorf("stop stale replacement %s PID %d: %w", filepath.Base(restarted.Path), restarted.NewPID, err))
+		}
+		CloseExternalCompatibilityJob(restarted.Job)
+	}
+	return result
+}
+
 // unsafeSizeofProcessEntry32 is isolated so the selection logic remains easy
 // to exercise without exposing unsafe outside this Win32 boundary.
 func unsafeSizeofProcessEntry32() uintptr {
@@ -145,13 +192,14 @@ func RestartExternalCompatibilityTools(tools []ExternalCompatibilityTool) []Exte
 		time.Sleep(300 * time.Millisecond)
 		result.NewPID, result.Error = startReplacementCompatibilityTool(result.Path)
 		if result.Error == nil {
+			result.NewCreationTime = processCreationTime(result.NewPID)
 			result.Error = verifyReplacementCompatibilityTool(result.Path, result.NewPID, time.Second)
-			if result.Error == nil {
-				result.NewCreationTime = processCreationTime(result.NewPID)
-				if result.NewCreationTime == 0 {
-					result.Error = fmt.Errorf("replacement PID %d has no verifiable creation time", result.NewPID)
-				}
+			if result.Error == nil && result.NewCreationTime == 0 {
+				result.Error = fmt.Errorf("replacement PID %d has no verifiable creation time", result.NewPID)
 			}
+		}
+		if result.Error != nil {
+			cleanupFailedReplacement(&result)
 		}
 		results = append(results, result)
 	}
@@ -169,12 +217,45 @@ func restartAHKCompatibilityTool(captured []ExternalCompatibilityTool, result *E
 		verifyReplacementCompatibilityTool,
 		stopCapturedCompatibilityTool,
 	)
-	if result.Error == nil {
+	if result.NewPID != 0 {
 		result.NewCreationTime = processCreationTime(result.NewPID)
+	}
+	if result.Error == nil {
 		if result.NewCreationTime == 0 {
 			result.Error = fmt.Errorf("replacement PID %d has no verifiable creation time", result.NewPID)
 		}
 	}
+	if result.Error != nil {
+		cleanupFailedReplacement(result)
+	}
+}
+
+func cleanupFailedReplacement(result *ExternalToolRestartResult) {
+	cleanupFailedReplacementWith(result, processCreationTime, stopCapturedCompatibilityTool)
+}
+
+func cleanupFailedReplacementWith(
+	result *ExternalToolRestartResult,
+	creationTime func(uint32) int64,
+	stop func(ExternalCompatibilityTool) error,
+) {
+	if result == nil || result.NewPID == 0 || !filepath.IsAbs(result.Path) {
+		return
+	}
+	identity := ExternalCompatibilityTool{
+		PID:          result.NewPID,
+		Path:         result.Path,
+		CreationTime: result.NewCreationTime,
+	}
+	if identity.CreationTime == 0 {
+		identity.CreationTime = creationTime(identity.PID)
+	}
+	if err := stop(identity); err != nil {
+		result.Error = errors.Join(result.Error, fmt.Errorf("clean up failed replacement PID %d: %w", result.NewPID, err))
+		return
+	}
+	result.NewPID = 0
+	result.NewCreationTime = 0
 }
 
 func restartAHKCompatibilityToolWith(
@@ -260,15 +341,11 @@ func StartBundledAHK(runtimePath string, processIDs []uint32) ExternalToolRestar
 	if result.Error == nil {
 		result.Job, result.Error = attachKillOnCloseJob(result.NewPID)
 	}
-	if result.Error != nil && result.NewPID != 0 {
-		creationTime := processCreationTime(result.NewPID)
-		if creationTime != 0 {
-			_ = stopCapturedCompatibilityTool(ExternalCompatibilityTool{
-				PID:          result.NewPID,
-				Path:         runtimePath,
-				CreationTime: creationTime,
-			})
-		}
+	if result.Error != nil {
+		// Preserve the exact identity when cleanup cannot be proven, and join
+		// that failure into Error. Callers can then retry rollback and must not
+		// blindly start another instance.
+		cleanupFailedReplacement(&result)
 	}
 	return result
 }

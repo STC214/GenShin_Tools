@@ -103,6 +103,21 @@ func TestAuditModuleAcceptsExactFixture(t *testing.T) {
 	}
 }
 
+func TestReadyEventNameUsesAuditedModuleAndProcessLifetime(t *testing.T) {
+	fixture := newModuleFixture(t)
+	fixture.manifest.ReadyEvent = `Local\GenshinTools.PluginReady.fixture.{pid}`
+	name, err := ReadyEventName(fixture.manifest, 4321)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if name != `Local\GenshinTools.PluginReady.fixture.4321` {
+		t.Fatalf("ready event name = %q", name)
+	}
+	if _, err := ReadyEventName(fixture.manifest, 0); err == nil {
+		t.Fatal("zero-PID readiness event unexpectedly accepted")
+	}
+}
+
 func TestAuditModuleFailsClosed(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -113,6 +128,9 @@ func TestAuditModuleFailsClosed(t *testing.T) {
 		{name: "missing export", change: func(f *moduleFixture) { f.manifest.RequiredExports = []string{"DefinitelyMissingExport"} }},
 		{name: "wrong file version", change: func(f *moduleFixture) { f.manifest.FileVersion = "0.0.0.0" }},
 		{name: "unversioned lie", change: func(f *moduleFixture) { f.manifest.FileVersion, f.manifest.AllowUnversioned = "", true }},
+		{name: "foreign readiness event", change: func(f *moduleFixture) {
+			f.manifest.ReadyEvent = `Local\Foreign.PluginReady.fixture.{pid}`
+		}},
 		{name: "candidate path mismatch", change: func(f *moduleFixture) {
 			f.candidate.ExeName = "GenshinImpact.exe"
 			f.manifest.GameExecutables = []string{"GenshinImpact.exe"}

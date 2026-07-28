@@ -51,6 +51,7 @@ Win32 UI / launch engine
 - 文件版本；没有 VERSIONINFO 的模块必须显式声明 `allowUnversioned=true`。
 - 明确的游戏版本列表、允许的 `YuanShen.exe`/`GenshinImpact.exe` 列表。
 - 可选的必需导出名；声明后逐项核验 PE export table。
+- 可选 `readyEvent` 必须严格为 `Local\GenshinTools.PluginReady.<id>.{pid}`。选择该协议的模块应创建手动复位事件，并仅在异步初始化和 Hook 安装全部结束后置位；PID 占位符由启动器按本次游戏生命周期展开。未声明该字段的旧模块保持兼容，但最终输入 Hook 还要等待完整模块集合与游戏前台连续稳定。
 - 普通和延迟导入表必须可有界解析；同目录/游戏目录旁加载副本一律拒绝，非 API-set 依赖只接受 System32 实物。
 
 manifest 只提供完整性和兼容声明，不等同于代码签名或可信背书。S10 才负责从审计来源安装/更新模块；S09 不联网下载任何 DLL。

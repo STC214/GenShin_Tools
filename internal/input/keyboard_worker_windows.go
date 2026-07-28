@@ -109,7 +109,7 @@ func (worker *keyboardWorkerController) Configure(request keyboardWorkerRequest)
 	// The keyboard hook and Interception device handle must not exist before
 	// a verified game process exists. Stopping the worker here also unloads
 	// the complete repeat module when the last game process exits.
-	if len(request.GameProcesses) == 0 {
+	if len(request.GameProcesses) == 0 || !request.Enabled || len(request.RepeatKeys) == 0 {
 		worker.stopLocked()
 		worker.lastError = ""
 		return nil

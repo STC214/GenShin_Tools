@@ -1,9 +1,12 @@
 package injection
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"path/filepath"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -154,20 +157,135 @@ func injectRemoteDLL(process windows.Handle, processID uint32, dllPath string, d
 }
 
 func remoteModuleLoaded(pid uint32, dllPath string) (bool, error) {
-	snapshot, err := windows.CreateToolhelp32Snapshot(th32csSnapModule|th32csSnapModule32, pid)
+	modules, err := loadedModules(pid)
 	if err != nil {
 		return false, err
 	}
-	defer windows.CloseHandle(snapshot)
 	want := filepath.Clean(dllPath)
-	entry := windows.ModuleEntry32{Size: uint32(unsafe.Sizeof(windows.ModuleEntry32{}))}
-	for err = windows.Module32First(snapshot, &entry); err == nil; err = windows.Module32Next(snapshot, &entry) {
-		if strings.EqualFold(filepath.Clean(windows.UTF16ToString(entry.ExePath[:])), want) {
+	for _, module := range modules {
+		if strings.EqualFold(module.path, want) {
 			return true, nil
 		}
 	}
-	if errors.Is(err, windows.ERROR_NO_MORE_FILES) {
-		return false, nil
+	return false, nil
+}
+
+type loadedModule struct {
+	path string
+	base uintptr
+	size uint32
+}
+
+func loadedModules(pid uint32) ([]loadedModule, error) {
+	if pid == 0 {
+		return nil, errors.New("game PID is required")
 	}
-	return false, err
+	snapshot, err := windows.CreateToolhelp32Snapshot(th32csSnapModule|th32csSnapModule32, pid)
+	if err != nil {
+		return nil, err
+	}
+	defer windows.CloseHandle(snapshot)
+	modules := make([]loadedModule, 0, 64)
+	entry := windows.ModuleEntry32{Size: uint32(unsafe.Sizeof(windows.ModuleEntry32{}))}
+	for err = windows.Module32First(snapshot, &entry); err == nil; err = windows.Module32Next(snapshot, &entry) {
+		path := filepath.Clean(windows.UTF16ToString(entry.ExePath[:]))
+		if path != "." && path != "" {
+			modules = append(modules, loadedModule{path: path, base: entry.ModBaseAddr, size: entry.ModBaseSize})
+		}
+	}
+	if errors.Is(err, windows.ERROR_NO_MORE_FILES) {
+		return modules, nil
+	}
+	return nil, err
+}
+
+// ModulesLoaded verifies that every audited injection target is still present
+// in the exact game process. The launcher uses this after helper completion so
+// input hooks cannot be finalized from a stale success result after a module
+// immediately unloaded or the process lifetime changed.
+func ModulesLoaded(pid uint32, dllPaths []string) (bool, error) {
+	loaded, _, err := ModuleReadiness(pid, dllPaths)
+	return loaded, err
+}
+
+// ModuleReadiness verifies the audited injection targets and fingerprints the
+// complete module set from one Toolhelp snapshot. A changing fingerprint means
+// plugin initialization is still loading native dependencies, so the launcher
+// restarts its continuous stabilization window before installing input hooks.
+func ModuleReadiness(pid uint32, dllPaths []string) (loaded bool, fingerprint string, err error) {
+	if pid == 0 || len(dllPaths) == 0 {
+		return false, "", errors.New("game PID and injected module paths are required")
+	}
+	modules, err := loadedModules(pid)
+	if err != nil {
+		return false, "", err
+	}
+	normalized := make(map[string]struct{}, len(modules))
+	for _, module := range modules {
+		lower := strings.ToLower(filepath.Clean(module.path))
+		normalized[lower] = struct{}{}
+	}
+	fingerprint = moduleSetFingerprint(modules)
+	for _, dllPath := range dllPaths {
+		if !filepath.IsAbs(dllPath) {
+			return false, "", fmt.Errorf("injected module path is not absolute: %q", dllPath)
+		}
+		if _, exists := normalized[strings.ToLower(filepath.Clean(dllPath))]; !exists {
+			return false, fingerprint, nil
+		}
+	}
+	return true, fingerprint, nil
+}
+
+func moduleSetFingerprint(modules []loadedModule) string {
+	fingerprintModules := make([]string, 0, len(modules))
+	for _, module := range modules {
+		lower := strings.ToLower(filepath.Clean(module.path))
+		// Include the mapped address and image size as well as the path. A DLL
+		// unloaded and reloaded from the same file is a new module lifetime and
+		// must restart the input-hook stabilization interval.
+		fingerprintModules = append(fingerprintModules, fmt.Sprintf("%s\x00%x:%d", lower, module.base, module.size))
+	}
+	sort.Strings(fingerprintModules)
+	hash := sha256.New()
+	for _, module := range fingerprintModules {
+		_, _ = hash.Write([]byte(module))
+		_, _ = hash.Write([]byte{0})
+	}
+	return hex.EncodeToString(hash.Sum(nil))
+}
+
+// ReadyEventSignaled checks an opt-in module readiness handshake without
+// creating or mutating the event. Modules should create a manual-reset event
+// and signal it only after all asynchronous initialization and hook setup has
+// completed.
+func ReadyEventSignaled(name string) (bool, error) {
+	if !strings.HasPrefix(name, `Local\GenshinTools.PluginReady.`) ||
+		strings.ContainsAny(name, "\x00/{}") {
+		return false, errors.New("module readiness event name is invalid")
+	}
+	nameUTF16, err := windows.UTF16PtrFromString(name)
+	if err != nil {
+		return false, err
+	}
+	event, err := windows.OpenEvent(windows.SYNCHRONIZE, false, nameUTF16)
+	if err != nil {
+		if errors.Is(err, windows.ERROR_FILE_NOT_FOUND) {
+			return false, nil
+		}
+		return false, err
+	}
+	defer windows.CloseHandle(event)
+	status, err := windows.WaitForSingleObject(event, 0)
+	if err != nil {
+		return false, err
+	}
+	switch status {
+	case waitObject0:
+		return true, nil
+	case waitTimeout:
+		return false, nil
+	default:
+		return false, fmt.Errorf("unexpected readiness event wait status 0x%08X", status)
+	}
 }

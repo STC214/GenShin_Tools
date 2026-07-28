@@ -26,6 +26,55 @@ func TestSupportedCompatibilityToolIsExact(t *testing.T) {
 	}
 }
 
+func TestStopExternalCompatibilityToolsRejectsUnverifiableIdentity(t *testing.T) {
+	err := StopExternalCompatibilityTools([]ExternalCompatibilityTool{{
+		PID:  42,
+		Path: `D:\tools\AHK_F.exe`,
+	}})
+	if err == nil {
+		t.Fatal("captured tool without a creation time was accepted")
+	}
+}
+
+func TestStopRestartedCompatibilityToolsIgnoresFailedResult(t *testing.T) {
+	err := StopRestartedCompatibilityTools([]ExternalToolRestartResult{{
+		Path:  `D:\tools\AHK_F.exe`,
+		Error: errors.New("replacement was never created"),
+	}})
+	if err != nil {
+		t.Fatalf("failed result without a replacement should be ignored: %v", err)
+	}
+}
+
+func TestFailedReplacementWithPIDIsCleanedUp(t *testing.T) {
+	verifyFailure := errors.New("replacement health check failed")
+	result := ExternalToolRestartResult{
+		Path:   `D:\tools\AHK_F.exe`,
+		NewPID: 84,
+		Error:  verifyFailure,
+	}
+	var stopped ExternalCompatibilityTool
+	cleanupFailedReplacementWith(
+		&result,
+		func(pid uint32) int64 {
+			if pid != 84 {
+				t.Fatalf("creation time queried for PID %d", pid)
+			}
+			return 1234
+		},
+		func(tool ExternalCompatibilityTool) error {
+			stopped = tool
+			return nil
+		},
+	)
+	if stopped.PID != 84 || stopped.CreationTime != 1234 || stopped.Path != result.Path {
+		t.Fatalf("failed replacement cleanup identity = %+v", stopped)
+	}
+	if result.NewPID != 0 || result.NewCreationTime != 0 || !errors.Is(result.Error, verifyFailure) {
+		t.Fatalf("failed replacement cleanup result = %+v", result)
+	}
+}
+
 func TestCompatibilityShellExecuteInfoABIAMD64(t *testing.T) {
 	if size := unsafe.Sizeof(shellExecuteInfo{}); size != 112 {
 		t.Fatalf("SHELLEXECUTEINFOW size = %d, want 112", size)

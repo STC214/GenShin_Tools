@@ -83,7 +83,7 @@
 | D15 | RDP、锁屏、切用户、休眠后状态错误 | session/power 通知统一停止并重新武装 | P0 |
 | D16 | 杀进程前无法释放正在按下的虚拟键 | 正常退出强制 release；异常退出后下次启动提示（OS 通常会清状态但不依赖它） | P0 |
 | D17 | hook ready 前线程消息队列尚未建立，立即 Close 的 WM_QUIT 丢失并永久等待 | ready 前 `PeekMessage` 建队列；Start/Close 生命周期锁；并发回归 | P0 |
-| D18 | 物理触发键持续 down 与合成重复同时进入游戏，或 hook 安装早于注入模块 | 游戏启动后才创建 x86 Interception worker；仅在已核验游戏前台吞掉配置触发键，以带专用防递归标记的驱动扫描码替换，并在注入完成且游戏前台稳定后重装 hook | P0 |
+| D18 | 物理触发键持续 down 与合成重复同时进入游戏，或 hook 安装早于注入模块 | 游戏发现只登记目标；注入前卸载主观察 Hook；helper 完成、游戏 Running、全部注入 DLL 持续驻留和连续前台 8 秒均通过后，先重装观察 Hook，再创建 x86 Interception worker；Raw Input/轮询路径受同一门禁约束；仅在已核验游戏前台吞掉配置触发键，以带专用防递归标记的驱动扫描码替换 | P0 |
 | D19 | Interception UpperFilter 安装/卸载失败导致整机键鼠不可用，或未重启即误判可用 | UI 明示官方 v1.0.1、管理员安装和强制重启；不静默安装/卸载；只读探测完整 20 设备上下文；保留系统恢复说明 | P0 |
 | D20 | Interception 输出重新进入低级 hook 造成递归连发，或并发多键交错破坏 down/up | `ExtraInformation=0x51485844` 在 x86/x64 两层 hook 最前过滤；单一驱动 context 以互斥边界串行提交完整 down/hold/up，失败补发 up 并终止 worker | P0 |
 | D21 | 中权限主程序关闭高权限 AHK 后无法重启，或被 UIPI 阻止发送 Suspend | Release 主程序声明 `requireAdministrator`；AHK 替代实例先启动并通过存活/路径校验后才清理旧实例，提升取消时保留原 AHK | P0 |
@@ -91,7 +91,11 @@
 | D23 | Interception 驱动写入失败只退出 helper，主程序仍显示可用 | worker 保存首个根因、平衡结束 goroutine 后以非零退出；父进程收集 stderr 并清除 active/配置状态，UI 显示真实错误 | P0 |
 | D24 | 构建生成的 `app.syso` 污染后续 `go test`，或自动化直接启动 `requireAdministrator` 成品造成 UAC 遗留进程 | 构建 `finally` 清理全部资源对象；S02/S05 使用独立 asInvoker GUI harness 和独立单实例命名；正式清单由 PE 审计单独验证 | P0 |
 | D25 | 改配置后旧连发循环尚在睡眠，快速重新按同一键时旧循环误认新的 `held=true` 并产生双重输出 | 每个规范化键位维护单调 generation；配置切换、松开和新一轮按下均推进围栏，循环同时核对 held 与所属 generation | P0 |
-| D19 | 点击“设置”后鼠标左键被全键盘轮询录成 Unknown key | 录制轮询排除所有鼠标虚拟键；鼠标按住+键盘按下回归 | P0 |
+| D26 | 游戏扫描先于插件注入完成便启动内置/AHK hook，后装插件抢占 hook 顺序导致游戏内连发失效 | 注入前停止主观察 Hook、内置 worker、便携及精确捕获的外部 AHK/QuickInput；helper 完成 + Running + 注入 DLL 持续驻留；连续前台 8 秒；严格按主观察 Hook、内置 worker、外部工具、便携 AHK 顺序加载；代际所有权和提交锁阻止取消路径提前恢复、并发最终化或旧任务清除新资产 | P0 |
+| D27 | 插件在 `LoadLibrary` 返回后异步安装 Hook，固定延时仍可能让输入 Hook 抢先；Hook 控制超时后迟到执行又会破坏顺序 | 模块可声明按 PID 隔离的手动复位就绪事件；旧模块要求完整模块集合持续稳定；Hook 控制请求采用 pending/claimed/canceled/done 状态确认，未领取请求才允许超时取消，已领取请求必须等待执行结果 | P0 |
+| D28 | 点击“设置”后鼠标左键被全键盘轮询录成 Unknown key | 录制轮询排除所有鼠标虚拟键；鼠标按住+键盘按下回归 | P0 |
+| D29 | `UnhookWindowsHookEx` 失败却清零句柄并继续注入，残留旧 Hook 与新 Hook 重叠且时序错误 | 安装/卸载逐句柄确认；失败句柄保留并标记 dirty 以便重试；注入与最终化在不能确认全部观察 Hook 已卸载时失败关闭 | P0 |
+| D30 | 便携 AHK 已创建但健康检查或 Job 绑定失败，清理错误被忽略并按秒重复创建未托管进程 | 失败结果保留 PID/路径/创建时间并合并清理根因；调用方精确重试回滚，无法安全终止时停止后续拉起 | P0 |
 
 ## E. GDI、DWM、DPI 与窗口资源
 

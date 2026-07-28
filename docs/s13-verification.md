@@ -224,6 +224,7 @@
 - 大小：11,464,634 bytes
 - SHA-256：`89035204fbdc0019d7d117bbadc0e0e3672f1be61eaba75f923d217330c07e24`
 - 条目数：19
+
 - PE 校验：主程序为 x64 GUI/`requireAdministrator`；注入 helper、更新器为 x64 GUI/`asInvoker`；输入 helper 与内置 AHK 运行时为 x86 GUI；项目程序版本统一为 `1.2.0`
 
 ## 1.3.0 Interception 游戏模式键盘连发
@@ -317,6 +318,119 @@
   `fd9d629dbd742cbe1e14c530dd092e32d4ba2a058b97d69d935ea340b61b8c39`
 - GPL-2.0 文本 SHA-256：
   `2f37ec8a6e912402a7d79ea03e5e33eacf54d1bf1fc7e3b0eab3a69bd8b23252`
+
+## 1.3.3 注入完成后的最终 Hook 时序
+
+- 游戏扫描层现在只登记并核验进程生命周期，不能直接创建内置键盘 worker，也不能提前
+  启动便携 AHK。游戏进程集合变化时，程序立即关闭内置键盘后端、停止项目托管的 AHK，
+  并使所有输入 Hook 重新进入等待状态。
+- 注入启动前精确捕获并停止受支持的外部 `AHK_F.exe`/`quickinput.exe`；匹配同时核验
+  文件名、绝对路径、PID 和创建时间，避免误停同名或 PID 复用后的进程。注入失败、取消
+  或最终化中断时按原路径恢复已捕获工具。
+- 注入启动采用双完成屏障：只有注入 helper 已完成所有 DLL 的 `LoadLibrary`，且启动
+  引擎已确认游戏进入 Running，才允许进入输入最终化阶段；两个事件无论先后到达都不会
+  提前放行。
+- 屏障放行后仍要求已核验游戏窗口连续位于前台 5 秒。周期性游戏扫描不会反复取消或重置
+  这段稳定窗口，并在整个窗口持续枚举确认全部注入 DLL 仍驻留于准确游戏 PID。最终加载
+  顺序固定为：主程序键盘/鼠标观察 Hook、内置 Interception 键盘 worker、注入前捕获的
+  外部 AHK/QuickInput、便携 AHK。这样负责拦截的 worker 和所有外部连发 Hook 都安装在
+  插件注入完成以后。
+- 最终化使用代际号和提交互斥保护待处理工具所有权。等待期间出现新游戏生命周期时，旧
+  任务退出前不能启动新任务，外部工具保持停止；若取消发生在工具重启之后，新 PID/创建
+  时间会先被精确停止并转交下一轮。失败且没有游戏进程时才恢复用户工具，不再从取消
+  defer 提前恢复。
+- 输入增强页在等待期间显示“等待启动/插件完成”，便携 AHK 的随游戏启动逻辑也受同一
+  硬门禁约束，不能从游戏发现消息或普通配置刷新路径绕过。
+- `./scripts/test-s13-release.ps1 -ShellIterations 1 -SkipOnlineProvider` 于
+  2026-07-28 通过：全量普通/race 测试、格式、vet、确定性 Debug/Release/helper 构建、
+  PE/图标/清单、S02 生命周期、S03 鼠标实捕与节奏矩阵、S05 真实进程启动、S09 注入
+  helper 边界以及确定性便携包均通过。当前测试进程为 Medium integrity，要求 High
+  integrity 的 Interception 真驱动输出捕获明确跳过；真实原神与插件组合仍保留为人工
+  门禁。
+
+- 文件：`artifacts/release/GenshinTools-1.3.3-windows-amd64-portable.zip`
+- 大小：10,896,019 bytes
+- SHA-256：`655ec4848ec47408c7749caf8e933505515bbcfc3e2539a94c7ff64d65c6c083`
+- 条目数：19
+
+## 1.3.4 最终化状态机完整修复
+
+- 外部 AHK/QuickInput 不再在最终化任务开始时脱离应用状态。每轮捕获、重启和恢复都由
+  generation 标识准确所有权；旧任务只能提交或清理自己创建的 PID/路径/创建时间，
+  不能清空新一轮待处理资产。Hook epoch 的提交与 `hold` 使用同一互斥边界，消除“检查
+  通过后、提交前又发生游戏生命周期变化”的窗口。
+- 等待被取消时不再立即恢复用户工具。若外部工具尚未重启，则继续保持待处理；若已经
+  重启，则精确停止新实例并把新生命周期重新排队。游戏退出或确定启动失败且没有游戏
+  进程时才异步恢复，恢复任务为单飞状态；恢复期间禁止开始新启动，generation 改变时
+  会停止本次错误创建的替代实例。
+- 注入 helper 与 Running 双屏障通过后，连续 8 秒同时要求准确游戏窗口位于前台，并
+  逐次枚举确认本次审计的全部注入 DLL 仍驻留于准确游戏 PID。模块消失或枚举失败时
+  保持关闭，不会按固定延时盲目放行。
+- 主程序的 `WH_KEYBOARD_LL`/`WH_MOUSE_LL` 观察 Hook 现在也在注入前由其所属消息线程
+  卸载，并在最终阶段首先重装；随后才安装 x86 Interception worker、重启外部工具并
+  启动便携 AHK。Raw Input 和键盘轮询备用路径受同一门禁约束，不会在观察 Hook 卸载
+  期间提前触发 Engine、产生输出或把输入模块推进 Fault。
+- 新增测试覆盖：准确模块驻留复核、观察 Hook 反复卸载/重装、门禁前键盘事件隔离、
+  外部工具成功/失败后的生命周期转换、旧 generation 拒绝覆盖及重启后交叠提交、
+  恢复期间拒绝新启动，以及双屏障和连续前台窗口。
+- `./scripts/test-s13-release.ps1 -ShellIterations 1 -SkipOnlineProvider` 于
+  2026-07-28 通过：全量普通/race 测试、格式、vet、确定性构建、PE/图标/清单、
+  200 次主 Hook 安装/卸载、S02、S05、S09 和确定性 ZIP 均通过。矩阵运行时桌面焦点
+  被其他进程抢占，鼠标实捕按设计跳过；随后单独重跑
+  `TestCapturedNativeMousePressReleasePairs` 已通过。Interception 真驱动捕获仍因当前
+  测试进程为 Medium integrity 而明确跳过，真实原神消费仍属于人工门禁。
+
+- 文件：`artifacts/release/GenshinTools-1.3.4-windows-amd64-portable.zip`
+- 大小：10,896,980 bytes
+- SHA-256：`a0d9e8d1f5ef50a95697a0892a5546e80c12f45816c4022a29771fb8ba8cbd78`
+- 条目数：19
+
+## 1.3.5 最终化退出、进程回滚与插件就绪协议
+
+- 启动器退出会先标记 shutdown、收束后台任务，再在独立恢复互斥区内恢复仍由当前 generation
+  持有的 AHK/QuickInput。最终化取消与退出恢复不能并发重复拉起，也不会因为游戏仍存在而把
+  用户原有工具永久留在停止状态。
+- 外部工具替代进程一旦取得 PID 就立即记录创建时间。健康验证失败仍按准确路径、PID 和创建
+  时间清理；错误结果不再被回滚逻辑跳过，避免留下未托管的 AHK/QuickInput。
+- 注入模块清单新增向后兼容的可选 `readyEvent`：
+  `Local\GenshinTools.PluginReady.<id>.{pid}`。主动采用该协议的模块必须在异步初始化和
+  Hook 安装结束后置位手动复位事件；现有 Fufu 模块无须修改，使用“目标 DLL 驻留 + 完整模块
+  集合不再变化 + 前台连续 8 秒”的兼容回退。
+- 主观察 Hook 的跨线程控制使用 pending/claimed/canceled/done 状态确认。只允许取消尚未领取的
+  超时请求；执行线程已经领取时调用方等待明确完成或线程退出，杜绝调用方收到超时后旧请求又
+  迟到安装/卸载 Hook。
+- 外部工具停止、替代启动、generation 所有权转移、取消清理与退出恢复共享同一生命周期互斥
+  边界，关闭过程中不会与后台最终化交错创建重复或迟到的替代进程。
+- `./scripts/test-s13-release.ps1 -ShellIterations 1 -SkipOnlineProvider` 于
+  2026-07-28 通过：全量普通/race、格式、vet、确定性双配置构建、PE/图标/权限、200 次 Hook
+  重装、鼠标八组节拍、S02、S05、S09 和确定性 ZIP 均通过。当前自动化进程为 Medium
+  integrity，真实 Interception 驱动捕获按设计跳过，真实原神消费仍属于人工门禁。
+
+- 文件：`artifacts/release/GenshinTools-1.3.5-windows-amd64-portable.zip`
+- 大小：10,904,433 bytes
+- SHA-256：`096c93f1025f4d344843a053e5920b63dcc40af89f436cc3f64516688f40b45d`
+- 条目数：19
+
+## 1.3.6 发布后复审修复
+
+- 内置 AHK 在进程创建成功但健康检查、创建时间核验或 Job 绑定失败时，统一进入精确替代进程
+  清理路径；清理错误并入原始根因并保留 PID 身份供调用方重试。仍无法安全停止时终止本轮管理
+  任务，不再每秒创建新的未托管实例。
+- 旧插件兼容门禁的完整模块指纹由“规范化路径”提升为“路径 + 映射基址 + 映像大小”。同一路径
+  DLL 卸载后重新加载也会被识别为新模块生命周期并重新开始连续稳定计时。
+- 主观察 Hook 改为逐句柄安装和卸载。`UnhookWindowsHookEx` 失败时不再遗忘真实句柄，而是保留
+  并标记 dirty；后续 hold 会重试。注入启动和最终化都必须再次确认全部旧观察 Hook 已卸载，
+  否则失败关闭，不允许带着残留旧 Hook 进入插件与输入 Hook 排序。
+- 外部工具生命周期互斥改为 defer 释放，即使后台任务 panic 也不会把退出恢复永久锁死。
+- `./scripts/test-s13-release.ps1 -ShellIterations 1 -SkipOnlineProvider` 于
+  2026-07-28 再次通过：全量普通/race、格式、vet、确定性双配置构建、PE/图标/权限、200 次
+  Hook 重装、鼠标八组节拍、S02、S05、S09 和确定性 ZIP 全部通过。真实 Interception 驱动
+  捕获仍因自动化进程为 Medium integrity 而明确跳过，真实原神消费仍保留为人工门禁。
+
+- 文件：`artifacts/release/GenshinTools-1.3.6-windows-amd64-portable.zip`
+- 大小：10,910,586 bytes
+- SHA-256：`f5d9b5b48aa2f893888909e347912ffb4b62130cf5a25ab8e26328ddf638e295`
+- 条目数：19；无重复条目
 
 ## 尚未关闭的人工门禁
 

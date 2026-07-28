@@ -10,13 +10,13 @@
 
 从 1.1.0 起主程序请求管理员权限，以便与游戏和输入工具保持相同完整性级别。Windows 会在主程序启动时显示一次 UAC。
 
-输入增强页提供“AHK随游戏启动/关闭”选项。启用后，程序在发现已核验的原神进程时直接启动便携包内由项目所有者制作并明确授权随项目分发的旧版编译成品 `AHK_F.exe`；游戏进程全部退出后只结束本次记录的准确 PID/路径/创建时间，游戏仍存活而 AHK 意外关闭时会自动重新拉起。热键只在游戏窗口位于前台时生效，切到其他窗口会通过 AHK 自身的暂停命令失活，界面以绿色/红色显示状态。该成品按固定 SHA-256 审计，不使用独立 `.ahk` 脚本；其内嵌的 AutoHotkey v1.0.48.05 运行时仍按 GPL-2.0 提供许可证和对应源码。
+输入增强页提供“AHK随游戏启动/关闭”选项。启用后，程序不会在刚发现游戏进程时立即启动 AHK，而是等待启动状态与注入 helper 双重确认、全部注入 DLL 的 `LoadLibrary` 返回，并持续核验这些 DLL 仍驻留于准确游戏 PID。支持主动就绪协议的模块还必须发出与本次游戏 PID 绑定的命名事件；旧模块则使用包含 DLL 路径、映射基址和映像大小的完整模块生命周期稳定性回退。游戏窗口连续位于前台 8 秒后，程序才会先重装主程序观察 Hook、再安装内置 worker、恢复注入前关闭的外部输入工具，最后启动便携包内由项目所有者制作并明确授权随项目分发的旧版编译成品 `AHK_F.exe`。游戏进程全部退出后只结束本次记录的准确 PID/路径/创建时间，游戏仍存活而 AHK 意外关闭时会自动重新拉起。热键只在游戏窗口位于前台时生效，切到其他窗口会通过 AHK 自身的暂停命令失活，界面以绿色/红色显示状态。该成品按固定 SHA-256 审计，不使用独立 `.ahk` 脚本；其内嵌的 AutoHotkey v1.0.48.05 运行时仍按 GPL-2.0 提供许可证和对应源码。
 
-内置键盘连发采用与 [FlairBloom](https://github.com/x-wink/flair-bloom) 游戏模式等价的 Interception 驱动输入路径，不再回退到游戏无法消费的 `keybd_event`/`SendInput` 键盘模拟。连发 worker 只在发现路径、PID 和创建时间均已核验的原神进程之后启动；仅当前台窗口属于该游戏进程时吞掉配置的物理触发键并发送带防递归标记的扫描码 down/up，切出游戏立即停止输出，游戏全部退出后 worker 和驱动句柄一并关闭。注入启动还会在注入模块完成且游戏前台稳定后重启 worker，确保连发 hook 排在注入模块之后。
+内置键盘连发采用与 [FlairBloom](https://github.com/x-wink/flair-bloom) 游戏模式等价的 Interception 驱动输入路径，不再回退到游戏无法消费的 `keybd_event`/`SendInput` 键盘模拟。游戏扫描只登记路径、PID 和创建时间，不创建 worker；注入前连主程序自身的 `WH_KEYBOARD_LL`/`WH_MOUSE_LL` 观察 Hook 也会卸载，只有统一的启动/注入完成屏障放行后才按顺序重装，负责拦截的 x86 worker 最后安装。worker 仅当前台窗口属于该游戏进程时吞掉配置的物理触发键并发送带防递归标记的扫描码 down/up，切出游戏立即停止输出，游戏全部退出后 worker 和驱动句柄一并关闭。
 
 键盘连发要求用户另行安装 [Interception v1.0.1 官方驱动](https://github.com/oblitum/Interception/releases/tag/v1.0.1)：下载并解压官方发布包，以管理员命令行在 `command line installer` 目录执行 `install-interception.exe /install`，成功后必须重启 Windows。Genshin Tools 本身也需要以管理员权限运行。驱动属于全系统键鼠 UpperFilter，安装前应保留可用的系统恢复方式；本项目不会静默安装、卸载，也不随 MIT 便携包再分发其 DLL、安装器或驱动。
 
-鼠标 down/up 继续使用与开源 [QuickInput](https://github.com/ChiyukiGana/Quickinput) 一致的逐事件 `SendInput` 形态。若关闭“AHK随游戏启动/关闭”，注入兼容流程仍可按捕获到的精确 PID、创建时间和完整路径重启用户已经运行的 `AHK_F.exe` 或 `quickinput.exe`，不会模糊匹配或结束其他 AHK/连点工具。
+鼠标 down/up 继续使用与开源 [QuickInput](https://github.com/ChiyukiGana/Quickinput) 一致的逐事件 `SendInput` 形态。注入启动前会按精确 PID、创建时间和完整路径捕获并停止用户已经运行的 `AHK_F.exe` 或 `quickinput.exe`；插件注入、DLL 持续驻留和 8 秒前台稳定门禁完成后才按原路径重启。等待被新的游戏生命周期打断时，工具所有权会保留到下一轮而不会提前恢复；若重启后才发生取消，则精确停止新实例并以新 PID/创建时间重新排队。注入失败且没有游戏进程时才恢复原工具。
 
 ## FufuLauncher 致敬与引用
 

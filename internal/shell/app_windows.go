@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -42,6 +43,8 @@ import (
 const (
 	windowClass  = "GenshinTools.MainWindow.S02"
 	instanceName = "Local\\GenshinTools.Singleton.S02"
+
+	postLaunchInputStableFor = 8 * time.Second
 
 	messageActivate     = win32.WM_APP + 1
 	messageTray         = win32.WM_APP + 2
@@ -109,102 +112,117 @@ type application struct {
 	pointerInside   bool
 	trackingMouse   bool
 
-	snapshots               chan diagnosticSnapshot
-	lastSnap                diagnosticSnapshot
-	inputNative             *input.Native
-	inputUpdates            chan input.Snapshot
-	physicalEvents          chan input.PhysicalEvent
-	inputSnap               input.Snapshot
-	recording               int
-	inputRepeatScroll       int
-	inputUIError            string
-	interceptionDriver      input.InterceptionDriverStatus
-	gameUpdates             chan gameUpdate
-	gameState               gameViewState
-	gameTask                uint64
-	launchEngine            *launch.Engine
-	launchUpdates           chan launch.Snapshot
-	launchSnap              launch.Snapshot
-	launchUIError           string
-	shortcutStatus          string
-	resourceUpdates         chan resourceUpdate
-	resourceState           resourceViewState
-	resourceTask            uint64
-	localStatus             string
-	betterGITask            uint64
-	serverUpdates           chan serverUpdate
-	serverState             serverViewState
-	serverTask              uint64
-	captureManager          *capture.Manager
-	captureResults          chan capture.Result
-	captureStatus           string
-	captureHotkeyRegistered bool
-	overlaySession          *overlay.Session
-	overlayUpdates          chan overlayUpdate
-	overlayStatsUpdates     chan overlay.Stats
-	overlayStats            overlay.Stats
-	overlayStatus           string
-	mediaTarget             gamewindow.Target
-	mediaTask               uint64
-	injectionUpdates        chan injectionUpdate
-	injectionModules        []injection.Audit
-	injectionWarnings       []string
-	injectionStatus         string
-	injectionAuditTask      uint64
-	injectionLaunchTask     uint64
-	injectionLaunching      bool
-	injectionInputTools     []input.ExternalCompatibilityTool
-	inputCompatibilityTask  uint64
-	pluginLayout            plugins.Layout
-	pluginState             plugins.State
-	pluginItems             []plugins.Item
-	pluginWarnings          []string
-	pluginStatus            string
-	pluginSelected          string
-	storeSelected           string
-	pluginUpdates           chan pluginUpdate
-	pluginTask              uint64
-	pluginBusy              bool
-	pluginDeleteConfirm     string
-	pluginCatalog           plugins.Catalog
-	pluginCatalogPage       plugins.CatalogPage
-	customArgumentsEdit     win32.HWND
-	pluginAliasEdit         win32.HWND
-	pluginTokenEdit         win32.HWND
-	pluginSearchEdit        win32.HWND
-	listScrollbar           win32.HWND
-	inputScrollbar          win32.HWND
-	fufuTarget              plugins.FufuTargetConfig
-	fufuTargetInstalled     bool
-	fufuTargetEnabled       bool
-	fufuEdits               map[string]win32.HWND
-	fufuEditFields          map[uint16]string
-	fufuValues              map[string]string
-	fufuScroll              int
-	pluginListScroll        int
-	storeListScroll         int
-	pluginTargetMode        bool
-	shellStatus             string
-	diagnosticUpdates       chan diagnosticUpdate
-	diagnosticBusy          bool
-	updateUpdates           chan updateCheckUpdate
-	updateTask              uint64
-	updateBusy              bool
-	updateRelease           *selfupdate.Release
-	cpuWarning              atomic.Pointer[cpuWarningConfig]
-	editBrush               win32.HBRUSH
-	sessionNotifications    bool
-	ahkManaged              atomic.Bool
-	ahkActive               atomic.Bool
-	ahkBundled              atomic.Bool
-	ahkStarting             atomic.Bool
-	ahkWithGame             atomic.Bool
-	ahkPID                  atomic.Uint32
-	ahkCreation             atomic.Int64
-	bundledAHKTask          uint64
-	shutdown                sync.Once
-	cleanExit               bool
-	fatal                   bool
+	snapshots                chan diagnosticSnapshot
+	lastSnap                 diagnosticSnapshot
+	inputNative              *input.Native
+	inputUpdates             chan input.Snapshot
+	physicalEvents           chan input.PhysicalEvent
+	inputSnap                input.Snapshot
+	recording                int
+	inputRepeatScroll        int
+	inputUIError             string
+	interceptionDriver       input.InterceptionDriverStatus
+	gameUpdates              chan gameUpdate
+	gameState                gameViewState
+	gameTask                 uint64
+	launchEngine             *launch.Engine
+	launchUpdates            chan launch.Snapshot
+	launchSnap               launch.Snapshot
+	launchUIError            string
+	shortcutStatus           string
+	resourceUpdates          chan resourceUpdate
+	resourceState            resourceViewState
+	resourceTask             uint64
+	localStatus              string
+	betterGITask             uint64
+	serverUpdates            chan serverUpdate
+	serverState              serverViewState
+	serverTask               uint64
+	captureManager           *capture.Manager
+	captureResults           chan capture.Result
+	captureStatus            string
+	captureHotkeyRegistered  bool
+	overlaySession           *overlay.Session
+	overlayUpdates           chan overlayUpdate
+	overlayStatsUpdates      chan overlay.Stats
+	overlayStats             overlay.Stats
+	overlayStatus            string
+	mediaTarget              gamewindow.Target
+	mediaTask                uint64
+	injectionUpdates         chan injectionUpdate
+	injectionModules         []injection.Audit
+	injectionWarnings        []string
+	injectionStatus          string
+	injectionAuditTask       uint64
+	injectionLaunchTask      uint64
+	injectionLaunching       bool
+	injectionHelperDone      bool
+	injectionGameRunning     bool
+	injectionExpectedModules []string
+	injectionReadyEvents     []string
+	inputToolsMu             sync.Mutex
+	inputRestoreMu           sync.Mutex
+	inputToolsGeneration     uint64
+	injectionInputTools      []input.ExternalCompatibilityTool
+	inputHookCommitMu        sync.Mutex
+	inputCompatibilityTask   uint64
+	inputGameFingerprint     string
+	inputHooksReady          atomic.Bool
+	inputHookGamePresent     atomic.Bool
+	inputRestoreRunning      atomic.Bool
+	inputHookEpoch           atomic.Uint64
+	inputFinalizingEpoch     atomic.Uint64
+	pluginLayout             plugins.Layout
+	pluginState              plugins.State
+	pluginItems              []plugins.Item
+	pluginWarnings           []string
+	pluginStatus             string
+	pluginSelected           string
+	storeSelected            string
+	pluginUpdates            chan pluginUpdate
+	pluginTask               uint64
+	pluginBusy               bool
+	pluginDeleteConfirm      string
+	pluginCatalog            plugins.Catalog
+	pluginCatalogPage        plugins.CatalogPage
+	customArgumentsEdit      win32.HWND
+	pluginAliasEdit          win32.HWND
+	pluginTokenEdit          win32.HWND
+	pluginSearchEdit         win32.HWND
+	listScrollbar            win32.HWND
+	inputScrollbar           win32.HWND
+	fufuTarget               plugins.FufuTargetConfig
+	fufuTargetInstalled      bool
+	fufuTargetEnabled        bool
+	fufuEdits                map[string]win32.HWND
+	fufuEditFields           map[uint16]string
+	fufuValues               map[string]string
+	fufuScroll               int
+	pluginListScroll         int
+	storeListScroll          int
+	pluginTargetMode         bool
+	shellStatus              string
+	diagnosticUpdates        chan diagnosticUpdate
+	diagnosticBusy           bool
+	updateUpdates            chan updateCheckUpdate
+	updateTask               uint64
+	updateBusy               bool
+	updateRelease            *selfupdate.Release
+	cpuWarning               atomic.Pointer[cpuWarningConfig]
+	editBrush                win32.HBRUSH
+	sessionNotifications     bool
+	ahkManaged               atomic.Bool
+	ahkActive                atomic.Bool
+	ahkBundled               atomic.Bool
+	ahkStarting              atomic.Bool
+	ahkWithGame              atomic.Bool
+	ahkPID                   atomic.Uint32
+	ahkCreation              atomic.Int64
+	bundledAHKTask           uint64
+	shuttingDown             atomic.Bool
+	shutdown                 sync.Once
+	cleanExit                bool
+	fatal                    bool
 }
 
 type gameViewState struct {
@@ -683,9 +701,10 @@ func (app *application) handleMessage(hwnd win32.HWND, message uint32, wParam, l
 			select {
 			case app.inputSnap = <-app.inputUpdates:
 			default:
-				if app.ahkWithGame.Load() {
+				if app.inputHooksReady.Load() && app.ahkWithGame.Load() {
 					app.scheduleBundledAHK()
 				}
+				app.schedulePostLaunchInputHooks()
 				app.syncInputScrollbar()
 				win32.Invalidate(hwnd)
 				return 0
@@ -713,10 +732,8 @@ func (app *application) handleMessage(hwnd win32.HWND, message uint32, wParam, l
 					app.gameState = update.state
 					app.syncInputGameProcesses()
 					app.reconcileCaptureOverlay(false)
-					if app.settings.Game.AHKWithGame && len(app.gameState.Running) != 0 {
-						app.scheduleBundledAHK()
-					} else if len(app.gameState.Running) == 0 {
-						app.tasks.Cancel(app.bundledAHKTask)
+					if len(app.gameState.Running) != 0 {
+						app.schedulePostLaunchInputHooks()
 					}
 				}
 			default:
@@ -732,25 +749,23 @@ func (app *application) handleMessage(hwnd win32.HWND, message uint32, wParam, l
 			default:
 				if previous != launch.StateRunning && app.launchSnap.State == launch.StateRunning {
 					injectedLaunch := app.injectionLaunching
-					keepForAHKManagement := app.settings.Game.AHKWithGame || (injectedLaunch && capturedAHKTool(app.injectionInputTools))
+					keepForInputManagement := app.settings.Game.AHKWithGame ||
+						(app.settings.Input.Enabled && app.settings.Input.Mode == input.ModeKeyboard) ||
+						(injectedLaunch && len(app.pendingInputTools()) != 0)
 					if app.injectionLaunching {
 						app.injectionStatus = fmt.Sprintf(app.texts.Text("injection.status.launchSuccess"), app.launchSnap.PID)
-						app.injectionLaunching = false
-					}
-					if injectedLaunch {
-						app.scheduleInputCompatibilityRestart()
-					}
-					if app.settings.Game.AHKWithGame {
-						app.scheduleBundledAHK()
+						app.injectionGameRunning = true
+						app.completeInjectionInputBarrier()
+					} else {
+						app.schedulePostLaunchInputHooks()
 					}
 					postBehavior := app.launchSnap.PostBehavior
-					if keepForAHKManagement && postBehavior == launch.PostExit {
-						// Keep the launcher resident until the managed AHK has
-						// started, and retain crash-restart/status management.
-						// The bundled script still owns the PID/foreground
-						// checks if the launcher is later closed from the tray.
+					if keepForInputManagement && postBehavior == launch.PostExit {
+						// Input hooks are deliberately installed only after
+						// launch/injection finalization and remain owned by the
+						// launcher, so PostExit becomes a resident minimize.
 						postBehavior = launch.PostMinimize
-						app.logger.Info("kept launcher resident for managed AutoHotkey foreground state", nil)
+						app.logger.Info("kept launcher resident for post-launch input hook management", nil)
 					}
 					app.applyPostLaunch(postBehavior)
 					app.scheduleBetterGI()
@@ -861,10 +876,25 @@ func (app *application) handleMessage(hwnd win32.HWND, message uint32, wParam, l
 					}
 					if update.err != "" {
 						app.injectionStatus = update.err
-						app.injectionLaunching = false
-						app.injectionInputTools = nil
+						if update.kind == 1 {
+							app.injectionLaunching = false
+							app.injectionHelperDone = false
+							app.injectionGameRunning = false
+							app.injectionExpectedModules = nil
+							app.injectionReadyEvents = nil
+							if app.inputNative != nil && len(app.inputNative.GameProcessIDs()) == 0 {
+								app.schedulePendingInputToolsRestore("restore after injection launch failure")
+								_ = app.inputNative.SetObservationHooksReady(true)
+							} else {
+								app.schedulePostLaunchInputHooks()
+							}
+						}
 					} else if update.status != "" {
 						app.injectionStatus = update.status
+						if update.kind == 1 {
+							app.injectionHelperDone = true
+							app.completeInjectionInputBarrier()
+						}
 					}
 				}
 			default:
@@ -1201,6 +1231,7 @@ func (app *application) restore() {
 
 func (app *application) requestShutdown() {
 	app.shutdown.Do(func() {
+		app.shuttingDown.Store(true)
 		if !app.flushFufuEdits() {
 			app.logger.Error("save pending FuFuPlugin settings during shutdown", map[string]any{"error": app.pluginStatus})
 		}
@@ -1249,6 +1280,11 @@ func (app *application) requestShutdown() {
 		if !app.tasks.Shutdown(2 * time.Second) {
 			app.logger.Error("background task shutdown timed out", nil)
 		}
+		// Injection/finalization deliberately keeps captured user tools stopped
+		// while a verified game exists. Launcher shutdown is the terminal
+		// exception: never leave user-owned AHK_F/QuickInput stopped merely
+		// because the owner of the pending generation is exiting.
+		app.restorePendingCompatibilityTools("restore during launcher shutdown")
 		if app.inputNative != nil {
 			app.inputNative.Close()
 			app.inputNative = nil
@@ -1601,7 +1637,125 @@ func (app *application) syncInputGameProcesses() {
 			processes = append(processes, input.GameProcess{PID: process.PID, CreationTime: process.CreationTime})
 		}
 	}
+	sort.Slice(processes, func(i, j int) bool {
+		if processes[i].PID != processes[j].PID {
+			return processes[i].PID < processes[j].PID
+		}
+		return processes[i].CreationTime < processes[j].CreationTime
+	})
+	app.inputHookGamePresent.Store(len(processes) != 0)
+	fingerprint := inputProcessFingerprint(processes)
+	if fingerprint != app.inputGameFingerprint {
+		app.inputGameFingerprint = fingerprint
+		wasReady := app.inputHooksReady.Load()
+		_ = app.holdPostLaunchInputHooks("verified game process lifetime changed")
+		if wasReady && len(processes) != 0 {
+			// A replacement/additional verified game lifetime invalidates the
+			// previous hook order. The bundled AHK was stopped by hold above;
+			// recapture any remaining user-owned AHK/QuickInput instances and
+			// retain their exact ownership until the new lifetime finalizes.
+			tools := input.CaptureExternalCompatibilityTools()
+			app.setPendingInputTools(tools)
+		}
+	}
 	app.inputNative.SetGameProcesses(processes)
+	if len(processes) == 0 && !app.injectionLaunching && app.launchSnap.State != launch.StateStarting {
+		app.injectionExpectedModules = nil
+		app.injectionReadyEvents = nil
+		app.schedulePendingInputToolsRestore("restore after verified game process exit")
+		if err := app.inputNative.SetObservationHooksReady(true); err != nil {
+			app.logger.Error("restore idle input observation hooks", map[string]any{"error": err.Error()})
+		}
+	}
+}
+
+func inputProcessFingerprint(processes []input.GameProcess) string {
+	var value strings.Builder
+	for _, process := range processes {
+		fmt.Fprintf(&value, "%d:%d;", process.PID, process.CreationTime)
+	}
+	return value.String()
+}
+
+func (app *application) setPendingInputTools(tools []input.ExternalCompatibilityTool) uint64 {
+	app.inputToolsMu.Lock()
+	defer app.inputToolsMu.Unlock()
+	app.inputToolsGeneration++
+	app.injectionInputTools = append([]input.ExternalCompatibilityTool(nil), tools...)
+	return app.inputToolsGeneration
+}
+
+func (app *application) pendingInputToolsSnapshot() (uint64, []input.ExternalCompatibilityTool) {
+	app.inputToolsMu.Lock()
+	defer app.inputToolsMu.Unlock()
+	return app.inputToolsGeneration, append([]input.ExternalCompatibilityTool(nil), app.injectionInputTools...)
+}
+
+func (app *application) pendingInputTools() []input.ExternalCompatibilityTool {
+	_, tools := app.pendingInputToolsSnapshot()
+	return tools
+}
+
+func (app *application) clearPendingInputTools() {
+	app.inputToolsMu.Lock()
+	app.inputToolsGeneration++
+	app.injectionInputTools = nil
+	app.inputToolsMu.Unlock()
+}
+
+func (app *application) clearPendingInputToolsGeneration(generation uint64) bool {
+	app.inputToolsMu.Lock()
+	defer app.inputToolsMu.Unlock()
+	if generation != app.inputToolsGeneration {
+		return false
+	}
+	app.inputToolsGeneration++
+	app.injectionInputTools = nil
+	return true
+}
+
+func (app *application) replacePendingInputToolsGeneration(generation uint64, tools []input.ExternalCompatibilityTool) (uint64, bool) {
+	app.inputToolsMu.Lock()
+	defer app.inputToolsMu.Unlock()
+	if generation != app.inputToolsGeneration {
+		return app.inputToolsGeneration, false
+	}
+	app.inputToolsGeneration++
+	app.injectionInputTools = append([]input.ExternalCompatibilityTool(nil), tools...)
+	return app.inputToolsGeneration, true
+}
+
+func (app *application) holdPostLaunchInputHooks(reason string) error {
+	app.inputHookCommitMu.Lock()
+	app.inputHookEpoch.Add(1)
+	app.inputHooksReady.Store(false)
+	app.inputHookCommitMu.Unlock()
+	app.tasks.Cancel(app.inputCompatibilityTask)
+	app.tasks.Cancel(app.bundledAHKTask)
+	var result error
+	if app.ahkBundled.Load() {
+		processID := app.ahkPID.Load()
+		creationTime := app.ahkCreation.Load()
+		if processID != 0 && creationTime != 0 {
+			path := filepath.Join(app.layout.Root, "AHK_F.exe")
+			if err := input.StopExternalCompatibilityTool(processID, path, creationTime); err != nil {
+				app.logger.Error("stop bundled AHK before launch finalization", map[string]any{"error": err.Error(), "reason": reason, "pid": processID})
+				result = errors.Join(result, fmt.Errorf("stop bundled AHK PID %d: %w", processID, err))
+			}
+		}
+	}
+	if app.inputNative != nil {
+		if err := app.inputNative.SetKeyboardBackendReady(false); err != nil {
+			app.logger.Error("hold built-in keyboard hook before launch finalization", map[string]any{"error": err.Error(), "reason": reason})
+			result = errors.Join(result, fmt.Errorf("hold built-in keyboard hook: %w", err))
+		}
+		if err := app.inputNative.SetObservationHooksReady(false); err != nil {
+			app.logger.Error("hold native observation hooks before launch finalization", map[string]any{"error": err.Error(), "reason": reason})
+			result = errors.Join(result, fmt.Errorf("hold native observation hooks: %w", err))
+		}
+	}
+	app.logger.Info("post-launch input hooks held", map[string]any{"reason": reason})
+	return result
 }
 
 func (app *application) startCaptureOverlay() error {
@@ -2337,6 +2491,10 @@ func (app *application) publishInjection(update injectionUpdate) {
 }
 
 func (app *application) startInjectionAudit() {
+	if app.launchBusy() {
+		app.injectionStatus = app.texts.Text("injection.status.launchBusy")
+		return
+	}
 	if app.gameState.Candidate == nil {
 		app.injectionStatus = app.texts.Text("injection.status.auditNeedGame")
 		return
@@ -2391,16 +2549,59 @@ func (app *application) startInjectionLaunch() {
 		app.injectionStatus = app.texts.Text("injection.status.rejected")
 		return
 	}
+	app.tasks.Cancel(app.injectionAuditTask)
 	app.tasks.Cancel(app.injectionLaunchTask)
 	candidate := *app.gameState.Candidate
-	app.injectionStatus = app.texts.Text("injection.status.starting")
-	app.injectionInputTools = nil
-	if !app.settings.Game.AHKWithGame {
-		app.injectionInputTools = input.CaptureExternalCompatibilityTools()
+	effectiveModuleIDs := append([]string(nil), moduleIDs...)
+	if len(effectiveModuleIDs) == 0 && settings.ModuleID != "" {
+		effectiveModuleIDs = append(effectiveModuleIDs, settings.ModuleID)
 	}
+	expectedModules := make([]string, 0, len(effectiveModuleIDs))
+	readyEvents := make([]string, 0, len(effectiveModuleIDs))
+	for _, moduleID := range effectiveModuleIDs {
+		audit, err := injection.AuditModule(app.layout.Modules, moduleID, candidate)
+		if err != nil {
+			app.injectionStatus = fmt.Sprintf(app.texts.Text("injection.status.launchFailed"), err)
+			return
+		}
+		expectedModules = append(expectedModules, audit.DLLPath)
+		if audit.Manifest.ReadyEvent != "" {
+			readyEvents = append(readyEvents, audit.Manifest.ReadyEvent)
+		}
+	}
+	app.injectionStatus = app.texts.Text("injection.status.starting")
+	// Remove every launcher-owned hook first, then capture user-owned AHK and
+	// QuickInput instances. The background launch task stops those exact
+	// lifetimes before creating the suspended game, so no repeater can install
+	// ahead of the injected plugin chain.
+	if err := app.holdPostLaunchInputHooks("injection launch starting"); err != nil {
+		app.injectionStatus = fmt.Sprintf(app.texts.Text("injection.status.launchFailed"), err)
+		if app.inputNative != nil {
+			_ = app.inputNative.SetObservationHooksReady(true)
+		}
+		return
+	}
+	tools := input.CaptureExternalCompatibilityTools()
+	app.setPendingInputTools(tools)
+	app.injectionExpectedModules = append([]string(nil), expectedModules...)
+	app.injectionReadyEvents = append([]string(nil), readyEvents...)
 	app.injectionLaunching = true
+	app.injectionHelperDone = false
+	app.injectionGameRunning = false
 	texts := app.texts
 	app.injectionLaunchTask = app.tasks.Run(func(ctx context.Context, id uint64) {
+		var stopErr error
+		app.withInputLifecycle(func() {
+			stopErr = input.StopExternalCompatibilityTools(tools)
+		})
+		if stopErr != nil {
+			app.publishInjection(injectionUpdate{
+				taskID: id,
+				kind:   1,
+				err:    fmt.Sprintf(texts.Text("injection.status.launchFailed"), stopErr),
+			})
+			return
+		}
 		starter := injection.Starter{Context: ctx, HelperPath: filepath.Join(app.layout.Root, "GenshinTools-injector.exe"), ModulesRoot: app.layout.Modules, StagingRoot: app.layout.Staging, Config: settings, ModuleIDs: moduleIDs}
 		err := app.launchEngine.LaunchWithStarter(candidate, launchSettings, starter)
 		update := injectionUpdate{taskID: id, kind: 1, status: texts.Text("injection.status.helperDone")}
@@ -2416,8 +2617,25 @@ func injectionBlockedBySafeMode(safeMode bool, moduleIDs []string, fallbackModul
 	return safeMode && (len(moduleIDs) > 0 || strings.TrimSpace(fallbackModuleID) != "")
 }
 
+func injectionInputBarrierReady(launching, helperDone, gameRunning bool) bool {
+	return launching && helperDone && gameRunning
+}
+
+func (app *application) completeInjectionInputBarrier() {
+	if !injectionInputBarrierReady(app.injectionLaunching, app.injectionHelperDone, app.injectionGameRunning) {
+		return
+	}
+	app.injectionLaunching = false
+	app.injectionHelperDone = false
+	app.injectionGameRunning = false
+	app.injectionStatus = fmt.Sprintf(app.texts.Text("injection.status.launchSuccess"), app.launchSnap.PID)
+	app.logger.Info("injection and game launch barrier complete; post-launch input hooks may stabilize", map[string]any{"pid": app.launchSnap.PID})
+	app.schedulePostLaunchInputHooks()
+}
+
 func (app *application) launchBusy() bool {
-	return app.injectionLaunching || app.launchSnap.State == launch.StateStarting || app.launchSnap.State == launch.StateRunning
+	return app.injectionLaunching || app.inputFinalizingEpoch.Load() != 0 || app.inputRestoreRunning.Load() ||
+		app.launchSnap.State == launch.StateStarting || app.launchSnap.State == launch.StateRunning
 }
 
 func (app *application) startCleanLaunch() {
@@ -2433,8 +2651,21 @@ func (app *application) startCleanLaunch() {
 		app.injectionStatus = fmt.Sprintf(app.texts.Text("injection.status.launchConfigFailed"), app.launchUIError)
 		return
 	}
+	app.injectionExpectedModules = nil
+	app.injectionReadyEvents = nil
+	if err := app.holdPostLaunchInputHooks("clean launch starting"); err != nil {
+		app.injectionStatus = fmt.Sprintf(app.texts.Text("injection.status.cleanFailed"), err)
+		if app.inputNative != nil {
+			_ = app.inputNative.SetObservationHooksReady(true)
+		}
+		return
+	}
 	if err := app.launchEngine.Launch(*app.gameState.Candidate, app.settings.Launch); err != nil {
 		app.injectionStatus = fmt.Sprintf(app.texts.Text("injection.status.cleanFailed"), err)
+		if app.inputNative != nil && len(app.inputNative.GameProcessIDs()) == 0 {
+			_ = app.inputNative.SetObservationHooksReady(true)
+		}
+		app.schedulePostLaunchInputHooks()
 		return
 	}
 	app.injectionStatus = app.texts.Text("injection.status.cleanStarted")
@@ -3839,7 +4070,9 @@ func (app *application) setAHKWithGame(enabled bool) {
 	app.ahkWithGame.Store(enabled)
 	app.inputUIError = ""
 	if enabled {
-		app.scheduleBundledAHK()
+		if app.inputHooksReady.Load() {
+			app.scheduleBundledAHK()
+		}
 	} else {
 		app.tasks.Cancel(app.bundledAHKTask)
 		if app.ahkBundled.Load() {
@@ -4224,7 +4457,11 @@ func (app *application) paintInput(dc win32.HDC, client win32.Rect, left int32) 
 		}
 		draw(driverText, outputRect, win32.Color(255, 220, 225))
 	} else if config.Mode == input.ModeKeyboard {
-		draw(app.texts.Text("input.driver.ready"), outputRect, win32.Color(145, 154, 180))
+		driverText := app.texts.Text("input.driver.ready")
+		if len(app.inputNative.GameProcessIDs()) != 0 && !app.inputHooksReady.Load() {
+			driverText = app.texts.Text("input.driver.waiting")
+		}
+		draw(driverText, outputRect, win32.Color(145, 154, 180))
 	} else {
 		draw(fmt.Sprintf(app.texts.Text("input.outputCount"), snapshot.OutputCount), outputRect, win32.Color(145, 154, 180))
 	}
@@ -4493,30 +4730,178 @@ func (app *application) applyPostLaunch(behavior launch.PostBehavior) {
 	}
 }
 
-func (app *application) scheduleInputCompatibilityRestart() {
-	tools := append([]input.ExternalCompatibilityTool(nil), app.injectionInputTools...)
-	app.injectionInputTools = nil
-	app.tasks.Cancel(app.inputCompatibilityTask)
-	logger := app.logger
+func (app *application) schedulePostLaunchInputHooks() {
 	native := app.inputNative
+	if native == nil || app.inputHooksReady.Load() || app.injectionLaunching ||
+		app.launchSnap.State == launch.StateStarting || len(native.GameProcessIDs()) == 0 {
+		return
+	}
+	epoch := app.inputHookEpoch.Load()
+	if epoch == 0 || !app.inputFinalizingEpoch.CompareAndSwap(0, epoch) {
+		return
+	}
+	toolsGeneration, tools := app.pendingInputToolsSnapshot()
+	expectedModules := append([]string(nil), app.injectionExpectedModules...)
+	readyEventTemplates := append([]string(nil), app.injectionReadyEvents...)
+	gamePID := uint32(app.launchSnap.PID)
+	readyEvents := make([]string, 0, len(readyEventTemplates))
+	for _, template := range readyEventTemplates {
+		readyEvents = append(readyEvents, strings.ReplaceAll(template, "{pid}", strconv.FormatUint(uint64(gamePID), 10)))
+	}
+	logger := app.logger
 	app.inputCompatibilityTask = app.tasks.Run(func(ctx context.Context, _ uint64) {
-		// StateRunning only means the suspended game process was resumed. Wait
-		// until a verified game window is actually foreground and stable before
-		// reinstalling hooks, so asynchronous plugin initialization has reached
-		// the player's input phase.
-		if native == nil || !waitForStableGameForeground(ctx, native.GameForeground, 1500*time.Millisecond) {
+		committed := false
+		var restartResults []input.ExternalToolRestartResult
+		defer func() {
+			if !committed {
+				if len(restartResults) != 0 {
+					app.withInputLifecycle(func() {
+						if err := input.StopRestartedCompatibilityTools(restartResults); err != nil {
+							logger.Error("stop external tools after canceled input finalization", map[string]any{"error": err.Error()})
+						}
+					})
+				}
+				_ = native.SetKeyboardBackendReady(false)
+				if app.inputHookGamePresent.Load() && !app.shuttingDown.Load() {
+					_ = native.SetObservationHooksReady(false)
+				} else {
+					reason := "restore after game ended during input finalization"
+					if app.shuttingDown.Load() {
+						reason = "restore after launcher shutdown canceled input finalization"
+					}
+					app.restorePendingCompatibilityTools(reason)
+					if !app.shuttingDown.Load() {
+						_ = native.SetObservationHooksReady(true)
+					}
+				}
+			}
+			app.inputFinalizingEpoch.CompareAndSwap(epoch, 0)
+		}()
+		// Reconfirm the held state inside the finalizer. A process-lifetime
+		// transition may have encountered a transient Unhook failure before
+		// this task was scheduled; never recover by merely marking the
+		// surviving old hook ready, because that would preserve the wrong
+		// installation order.
+		if err := native.SetObservationHooksReady(false); err != nil {
+			logger.Error("confirm native observation hooks are fully held before stabilization", map[string]any{"error": err.Error()})
 			return
 		}
-		if err := native.RefreshKeyboardBackend(); err != nil {
-			logger.Error("refresh built-in keyboard backend after injection", map[string]any{"error": err.Error()})
-		} else {
-			logger.Info("refreshed built-in keyboard backend after injection", map[string]any{"keyboardWorkerPID": native.KeyboardWorkerPID()})
+		var stopErr error
+		app.withInputLifecycle(func() {
+			stopErr = input.StopExternalCompatibilityTools(tools)
+		})
+		if stopErr != nil {
+			logger.Error("stop pending external tools before input stabilization", map[string]any{"error": stopErr.Error()})
+			return
 		}
-		results := input.RestartExternalCompatibilityTools(tools)
+		// Launch StateRunning is published only after every injected DLL has
+		// returned from LoadLibrary and the suspended game thread was resumed.
+		// Keep every repeater unloaded for an additional continuous foreground
+		// stabilization window so asynchronous plugin hook setup also wins the
+		// installation order. Input hooks are the final launch-stage feature.
+		lastModuleError := ""
+		lastModuleFingerprint := ""
+		ready := func() bool {
+			if !native.GameForeground() {
+				return false
+			}
+			if len(expectedModules) == 0 {
+				return true
+			}
+			loaded, fingerprint, err := injection.ModuleReadiness(gamePID, expectedModules)
+			if err != nil {
+				if message := err.Error(); message != lastModuleError {
+					lastModuleError = message
+					logger.Error("verify injected modules before input finalization", map[string]any{"error": message, "pid": gamePID})
+				}
+				return false
+			}
+			lastModuleError = ""
+			if !loaded {
+				return false
+			}
+			// The first complete snapshot and every later module-set change
+			// begin a new continuous stabilization interval.
+			if fingerprint == "" || fingerprint != lastModuleFingerprint {
+				lastModuleFingerprint = fingerprint
+				return false
+			}
+			for _, event := range readyEvents {
+				signaled, err := injection.ReadyEventSignaled(event)
+				if err != nil {
+					if message := err.Error(); message != lastModuleError {
+						lastModuleError = message
+						logger.Error("verify injected module readiness event", map[string]any{"error": message, "event": event, "pid": gamePID})
+					}
+					return false
+				}
+				if !signaled {
+					return false
+				}
+			}
+			lastModuleError = ""
+			return true
+		}
+		if !waitForStableGameForeground(ctx, ready, postLaunchInputStableFor) ||
+			epoch != app.inputHookEpoch.Load() {
+			return
+		}
+		if err := native.SetObservationHooksReady(true); err != nil {
+			logger.Error("reinstall native observation hooks at final launch stage", map[string]any{"error": err.Error()})
+			return
+		}
+		logger.Info("reinstalled native observation hooks at final launch stage", map[string]any{"stableForMS": postLaunchInputStableFor.Milliseconds()})
+		if err := native.SetKeyboardBackendReady(true); err != nil {
+			logger.Error("install built-in keyboard hook at final launch stage", map[string]any{"error": err.Error()})
+			return
+		} else {
+			logger.Info("installed built-in keyboard hook at final launch stage", map[string]any{
+				"keyboardWorkerPID": native.KeyboardWorkerPID(),
+				"stableForMS":       postLaunchInputStableFor.Milliseconds(),
+			})
+		}
+		if ctx.Err() != nil || epoch != app.inputHookEpoch.Load() {
+			return
+		}
+		currentToolsGeneration, _ := app.pendingInputToolsSnapshot()
+		if currentToolsGeneration != toolsGeneration {
+			return
+		}
+		// Restart and transfer ownership while holding the same lifecycle
+		// mutex used by shutdown restoration. No replacement can be created
+		// after shutdown has already restored and cleared this generation.
+		var (
+			results           []input.ExternalToolRestartResult
+			pendingGeneration uint64
+			replaced          bool
+			restartAborted    bool
+		)
+		app.withInputLifecycle(func() {
+			currentToolsGeneration, _ = app.pendingInputToolsSnapshot()
+			if currentToolsGeneration != toolsGeneration || ctx.Err() != nil ||
+				epoch != app.inputHookEpoch.Load() {
+				restartAborted = true
+				return
+			}
+			results = input.RestartExternalCompatibilityTools(tools)
+			restartResults = append([]input.ExternalToolRestartResult(nil), results...)
+			pendingGeneration, replaced = app.replacePendingInputToolsGeneration(
+				toolsGeneration,
+				pendingToolsAfterRestart(tools, results),
+			)
+		})
+		if restartAborted {
+			return
+		}
+		if !replaced {
+			return
+		}
 		var managedAHK *input.ExternalToolRestartResult
+		restartFailed := false
 		for _, result := range results {
 			fields := map[string]any{"path": result.Path, "oldPIDs": result.OldPIDs, "newPID": result.NewPID}
 			if result.Error != nil {
+				restartFailed = true
 				fields["error"] = result.Error.Error()
 				logger.Error("restart pre-injection input compatibility tool", fields)
 			} else {
@@ -4527,15 +4912,132 @@ func (app *application) scheduleInputCompatibilityRestart() {
 				}
 			}
 		}
+		if restartFailed {
+			return
+		}
+		app.inputHookCommitMu.Lock()
+		if ctx.Err() != nil || epoch != app.inputHookEpoch.Load() ||
+			!app.clearPendingInputToolsGeneration(pendingGeneration) {
+			app.inputHookCommitMu.Unlock()
+			return
+		}
+		app.inputHooksReady.Store(true)
+		committed = true
+		app.inputHookCommitMu.Unlock()
+		logger.Info("post-launch input hook finalization complete", map[string]any{
+			"epoch":              epoch,
+			"externalToolCount":  len(results),
+			"managedExternalAHK": managedAHK != nil,
+		})
+		if managedAHK == nil && app.ahkWithGame.Load() {
+			// Post through the UI queue so bundled AHK is created strictly after
+			// the built-in worker and every captured external tool.
+			win32.PostMessage(app.hwnd, messageInput, 0, 0)
+		}
 		if managedAHK != nil {
 			app.manageExternalAHK(ctx, native, *managedAHK)
 		}
 	})
 }
 
+func (app *application) restorePendingCompatibilityTools(reason string) {
+	app.inputRestoreMu.Lock()
+	defer app.inputRestoreMu.Unlock()
+	generation, tools := app.pendingInputToolsSnapshot()
+	if len(tools) == 0 {
+		return
+	}
+	results := input.RestartExternalCompatibilityTools(tools)
+	failed := make([]input.ExternalCompatibilityTool, 0, len(tools))
+	for _, result := range results {
+		fields := map[string]any{
+			"path":    result.Path,
+			"oldPIDs": result.OldPIDs,
+			"newPID":  result.NewPID,
+			"reason":  reason,
+		}
+		if result.Error != nil {
+			fields["error"] = result.Error.Error()
+			app.logger.Error("restore external input compatibility tool", fields)
+			for _, tool := range tools {
+				if strings.EqualFold(filepath.Clean(tool.Path), filepath.Clean(result.Path)) {
+					failed = append(failed, tool)
+				}
+			}
+		} else {
+			app.logger.Info("restored external input compatibility tool", fields)
+		}
+	}
+	if _, replaced := app.replacePendingInputToolsGeneration(generation, failed); !replaced {
+		app.logger.Error("pending input tool ownership changed during restore", map[string]any{"reason": reason})
+		if err := input.StopRestartedCompatibilityTools(results); err != nil {
+			app.logger.Error("stop stale external tools created during restore", map[string]any{"error": err.Error(), "reason": reason})
+		}
+	}
+}
+
+func (app *application) withInputLifecycle(action func()) {
+	app.inputRestoreMu.Lock()
+	defer app.inputRestoreMu.Unlock()
+	action()
+}
+
+func (app *application) schedulePendingInputToolsRestore(reason string) {
+	if app.inputHookGamePresent.Load() || len(app.pendingInputTools()) == 0 ||
+		!app.inputRestoreRunning.CompareAndSwap(false, true) {
+		return
+	}
+	if taskID := app.tasks.Run(func(ctx context.Context, _ uint64) {
+		defer app.inputRestoreRunning.Store(false)
+		ticker := time.NewTicker(50 * time.Millisecond)
+		defer ticker.Stop()
+		for app.inputFinalizingEpoch.Load() != 0 {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
+		}
+		if ctx.Err() != nil || app.inputHookGamePresent.Load() {
+			return
+		}
+		app.restorePendingCompatibilityTools(reason)
+	}); taskID == 0 {
+		app.inputRestoreRunning.Store(false)
+	}
+}
+
+func pendingToolsAfterRestart(original []input.ExternalCompatibilityTool, results []input.ExternalToolRestartResult) []input.ExternalCompatibilityTool {
+	pending := make([]input.ExternalCompatibilityTool, 0, len(original))
+	seen := make(map[string]bool, len(results))
+	for _, result := range results {
+		key := strings.ToLower(filepath.Clean(result.Path))
+		seen[key] = true
+		if result.Error == nil && result.NewPID != 0 && result.NewCreationTime != 0 {
+			pending = append(pending, input.ExternalCompatibilityTool{
+				PID:          result.NewPID,
+				Path:         result.Path,
+				CreationTime: result.NewCreationTime,
+			})
+			continue
+		}
+		for _, tool := range original {
+			if strings.EqualFold(filepath.Clean(tool.Path), filepath.Clean(result.Path)) {
+				pending = append(pending, tool)
+			}
+		}
+	}
+	for _, tool := range original {
+		if !seen[strings.ToLower(filepath.Clean(tool.Path))] {
+			pending = append(pending, tool)
+		}
+	}
+	return pending
+}
+
 func (app *application) scheduleBundledAHK() {
 	native := app.inputNative
-	if native == nil || !app.ahkWithGame.Load() || len(native.GameProcessIDs()) == 0 ||
+	if native == nil || !app.inputHooksReady.Load() || !app.ahkWithGame.Load() || len(native.GameProcessIDs()) == 0 ||
 		app.ahkManaged.Load() || !app.ahkStarting.CompareAndSwap(false, true) {
 		return
 	}
@@ -4568,6 +5070,19 @@ func (app *application) scheduleBundledAHK() {
 			if result.Error != nil {
 				fields["error"] = result.Error.Error()
 				app.logger.Error("start bundled AHK with game", fields)
+				if result.NewPID != 0 {
+					if err := input.StopRestartedCompatibilityTools([]input.ExternalToolRestartResult{result}); err != nil {
+						app.logger.Error("retry bundled AHK rollback after failed startup", map[string]any{
+							"error": err.Error(),
+							"path":  result.Path,
+							"pid":   result.NewPID,
+						})
+						// A process that cannot be safely identified and
+						// stopped must block retries; otherwise every second
+						// could create another unmanaged AHK instance.
+						return
+					}
+				}
 			} else {
 				app.logger.Info("started bundled AHK with game", fields)
 				if ctx.Err() != nil {
@@ -4724,15 +5239,6 @@ func waitForStableGameForeground(ctx context.Context, foreground func() bool, st
 		case <-ticker.C:
 		}
 	}
-}
-
-func capturedAHKTool(tools []input.ExternalCompatibilityTool) bool {
-	for _, tool := range tools {
-		if strings.EqualFold(filepath.Base(tool.Path), "AHK_F.exe") {
-			return true
-		}
-	}
-	return false
 }
 
 func (app *application) scheduleBetterGI() {

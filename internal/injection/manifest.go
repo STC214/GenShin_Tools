@@ -41,6 +41,7 @@ type Manifest struct {
 	GameVersions     []string `json:"gameVersions"`
 	GameExecutables  []string `json:"gameExecutables"`
 	RequiredExports  []string `json:"requiredExports,omitempty"`
+	ReadyEvent       string   `json:"readyEvent,omitempty"`
 }
 
 type Audit struct {
@@ -238,7 +239,29 @@ func validateManifest(manifest Manifest, requestedID string) error {
 			return errors.New("required export name is invalid")
 		}
 	}
+	if manifest.ReadyEvent != "" {
+		expected := `Local\GenshinTools.PluginReady.` + manifest.ID + `.{pid}`
+		if manifest.ReadyEvent != expected {
+			return fmt.Errorf("readyEvent must be %q", expected)
+		}
+	}
 	return nil
+}
+
+// ReadyEventName expands the optional per-process readiness event declared by
+// a module. The PID is part of the name so a signaled object left by an older
+// game lifetime cannot make a new injection appear ready.
+func ReadyEventName(manifest Manifest, pid uint32) (string, error) {
+	if manifest.ReadyEvent == "" {
+		return "", nil
+	}
+	if pid == 0 {
+		return "", errors.New("game PID is required for a module readiness event")
+	}
+	if err := validateManifest(manifest, manifest.ID); err != nil {
+		return "", err
+	}
+	return strings.ReplaceAll(manifest.ReadyEvent, "{pid}", fmt.Sprint(pid)), nil
 }
 
 func fileSHA256(path string) (string, error) {

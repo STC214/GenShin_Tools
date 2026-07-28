@@ -599,6 +599,7 @@ func TestInputOnlyStartsInConfiguredGameProcess(t *testing.T) {
 		processCreated: func(processID uint32) int64 { return int64(processID) * 10 },
 	}
 	n.SetGameProcesses([]GameProcess{{PID: 1, CreationTime: 10}})
+	n.keyboardReady.Store(true)
 	config := DefaultConfig()
 	config.Enabled = true
 	config.Interval = 5 * time.Millisecond
@@ -639,6 +640,21 @@ func TestConfiguredGameProcessRejectsReusedPID(t *testing.T) {
 	}
 }
 
+func TestKeyboardEventsRemainHeldUntilPostLaunchGate(t *testing.T) {
+	n := &Native{}
+	n.hookTargets.Store(&hookTargetSnapshot{
+		configured: true,
+		processes:  map[uint32]struct{}{42: {}},
+	})
+	if !n.keyboardInputHeldForLaunch() {
+		t.Fatal("verified game target did not hold keyboard input before finalization")
+	}
+	n.keyboardReady.Store(true)
+	if n.keyboardInputHeldForLaunch() {
+		t.Fatal("released post-launch gate still held keyboard input")
+	}
+}
+
 func TestMouseModeWaitsForConfiguredGameProcess(t *testing.T) {
 	injector := &fakeInjector{}
 	engine, err := NewEngine(injector, nil)
@@ -656,6 +672,7 @@ func TestMouseModeWaitsForConfiguredGameProcess(t *testing.T) {
 		processCreated: func(processID uint32) int64 { return int64(processID) * 10 },
 	}
 	n.SetGameProcesses([]GameProcess{{PID: 1, CreationTime: 10}})
+	n.keyboardReady.Store(true)
 	config := DefaultConfig()
 	config.Mode = ModeMouseLeft
 	config.Interval = 5 * time.Millisecond
@@ -796,6 +813,54 @@ func TestNativeHooksStartAndClose(t *testing.T) {
 	n.Close()
 	if activeNative.Load() != nil {
 		t.Fatal("active native hook was not cleared")
+	}
+}
+
+func TestNativeObservationHooksCanBeHeldAndReinstalled(t *testing.T) {
+	n, err := NewNative(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := n.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer n.Close()
+	if !n.ObservationHooksReady() {
+		t.Fatal("observation hooks were not installed at startup")
+	}
+	for cycle := 0; cycle < 10; cycle++ {
+		if err := n.SetObservationHooksReady(false); err != nil {
+			t.Fatalf("hold cycle %d: %v", cycle, err)
+		}
+		if n.ObservationHooksReady() {
+			t.Fatalf("observation hooks remained installed in hold cycle %d", cycle)
+		}
+		if err := n.SetObservationHooksReady(true); err != nil {
+			t.Fatalf("reinstall cycle %d: %v", cycle, err)
+		}
+		if !n.ObservationHooksReady() {
+			t.Fatalf("observation hooks were not reinstalled in cycle %d", cycle)
+		}
+	}
+}
+
+func TestCanceledHookControlCannotBeClaimedLater(t *testing.T) {
+	request := &hookControlRequest{result: make(chan error, 1)}
+	if !request.state.CompareAndSwap(hookControlPending, hookControlCanceled) {
+		t.Fatal("pending hook request could not be canceled")
+	}
+	if request.state.CompareAndSwap(hookControlPending, hookControlClaimed) {
+		t.Fatal("canceled hook request was claimed for late execution")
+	}
+}
+
+func TestClaimedHookControlCannotReportPreExecutionTimeout(t *testing.T) {
+	request := &hookControlRequest{result: make(chan error, 1)}
+	if !request.state.CompareAndSwap(hookControlPending, hookControlClaimed) {
+		t.Fatal("pending hook request could not be claimed")
+	}
+	if request.state.CompareAndSwap(hookControlPending, hookControlCanceled) {
+		t.Fatal("claimed hook request was canceled as if it had not executed")
 	}
 }
 

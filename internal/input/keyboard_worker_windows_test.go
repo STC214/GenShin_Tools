@@ -46,6 +46,23 @@ func TestKeyboardWorkerDoesNotStartBeforeGameProcess(t *testing.T) {
 	}
 }
 
+func TestKeyboardWorkerDoesNotStartWhileFeatureDisabled(t *testing.T) {
+	controller := newKeyboardWorkerController()
+	defer controller.Close()
+	err := controller.Configure(keyboardWorkerRequest{
+		Enabled:       false,
+		RepeatKeys:    []uint32{EncodeKeyCode('F', false)},
+		IntervalMS:    5,
+		GameProcesses: []uint32{42},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if controller.Active() || controller.PID() != 0 {
+		t.Fatalf("disabled worker installed a hook: active=%t pid=%d", controller.Active(), controller.PID())
+	}
+}
+
 func TestKeyboardWorkerSuppressesOnlyConfiguredGameTrigger(t *testing.T) {
 	worker := &keyboardWorkerRuntime{
 		done:               make(chan struct{}),
