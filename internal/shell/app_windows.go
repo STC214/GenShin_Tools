@@ -6331,7 +6331,6 @@ func (app *application) startBackgroundDiagnostics() {
 						"repeatStarts":         workerSnapshot.RepeatStarts,
 						"repeatStops":          workerSnapshot.RepeatStops,
 						"releaseChecks":        workerSnapshot.ReleaseChecks,
-						"releaseSuppressed":    workerSnapshot.ReleaseSuppressed,
 						"syntheticHookEvents":  workerSnapshot.SyntheticHookEvents,
 						"triggerDowns":         workerSnapshot.TriggerDowns,
 						"triggerUps":           workerSnapshot.TriggerUps,

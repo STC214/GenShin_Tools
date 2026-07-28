@@ -223,6 +223,29 @@ func (backend *interceptionKeyboardBackend) PressDevice(device uint32, key uint3
 	return nil
 }
 
+// ReleaseDevice is used only as a shutdown/configuration safety release. The
+// normal repeat path ends with the physical break stroke captured from the
+// keyboard.
+func (backend *interceptionKeyboardBackend) ReleaseDevice(device uint32, key uint32) error {
+	return backend.writeKeyDevice(device, key, true)
+}
+
+func (backend *interceptionKeyboardBackend) writeKeyDevice(device uint32, key uint32, up bool) error {
+	if backend == nil {
+		return errors.New("Interception keyboard backend is unavailable")
+	}
+	if device < 1 || device > interceptionKeyboardCount {
+		return fmt.Errorf("Interception keyboard device %d is invalid", device)
+	}
+	data, err := interceptionKeyboardData(key, up)
+	if err != nil {
+		return err
+	}
+	backend.mu.Lock()
+	defer backend.mu.Unlock()
+	return backend.writeDeviceLocked(int(device-1), &data)
+}
+
 func (backend *interceptionKeyboardBackend) writeDeviceLocked(index int, data *interceptionKeyboardInput) error {
 	if index < 0 || index >= interceptionKeyboardCount ||
 		backend.devices[index] == 0 || backend.devices[index] == windows.InvalidHandle {
@@ -249,10 +272,14 @@ func (backend *interceptionKeyboardBackend) writeDeviceLocked(index int, data *i
 }
 
 // CaptureKeyboard makes the driver's pre-user-mode keyboard strokes the sole
-// physical truth for repeat held state. Every captured stroke is written back
-// to the same logical device before it is observed by the worker, so unrelated
-// keys and the user's original trigger edges remain transparent to Windows.
-func (backend *interceptionKeyboardBackend) CaptureKeyboard(done <-chan struct{}, observe func(uint32, interceptionKeyboardInput)) error {
+// physical truth for repeat held state. Unrelated strokes and configured make
+// strokes are written back before observation. A configured break may be
+// quarantined briefly so a cross-key false release never restarts the loop.
+func (backend *interceptionKeyboardBackend) CaptureKeyboard(
+	done <-chan struct{},
+	intercept func(uint32, interceptionKeyboardInput) bool,
+	observeForwarded func(uint32, interceptionKeyboardInput),
+) error {
 	if backend == nil {
 		return errors.New("Interception keyboard backend is unavailable")
 	}
@@ -299,7 +326,16 @@ func (backend *interceptionKeyboardBackend) CaptureKeyboard(done <-chan struct{}
 			&read,
 			nil,
 		)
-		if err == nil && read == uint32(unsafe.Sizeof(data)) {
+		forward := true
+		if err == nil && read == uint32(unsafe.Sizeof(data)) && intercept != nil {
+			// The callback runs before the original stroke is returned to the
+			// stack. It may quarantine a configured trigger break while every
+			// unrelated keyboard stroke remains a synchronous pass-through.
+			backend.mu.Unlock()
+			forward = intercept(uint32(index+1), data)
+			backend.mu.Lock()
+		}
+		if err == nil && read == uint32(unsafe.Sizeof(data)) && forward {
 			err = backend.writeDeviceLocked(index, &data)
 		}
 		backend.mu.Unlock()
@@ -312,8 +348,8 @@ func (backend *interceptionKeyboardBackend) CaptureKeyboard(done <-chan struct{}
 		if read != uint32(unsafe.Sizeof(data)) {
 			return fmt.Errorf("Interception keyboard read returned %d of %d bytes", read, unsafe.Sizeof(data))
 		}
-		if observe != nil {
-			observe(uint32(index+1), data)
+		if forward && observeForwarded != nil {
+			observeForwarded(uint32(index+1), data)
 		}
 	}
 }

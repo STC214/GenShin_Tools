@@ -96,45 +96,35 @@ func TestKeyboardWorkerTracksOnlyConfiguredDriverTrigger(t *testing.T) {
 	}
 }
 
-func TestKeyboardWorkerDriverStrokeIgnoresUnrelatedKey(t *testing.T) {
+func TestKeyboardWorkerHookKeepsConfiguredKeyIndependent(t *testing.T) {
 	key := EncodeKeyCode('F', false)
-	fStroke := interceptionKeyboardInput{MakeCode: 0x21}
-	gStroke := interceptionKeyboardInput{MakeCode: 0x22}
 	worker := &keyboardWorkerRuntime{
 		done:               make(chan struct{}),
 		gameForegroundTest: func(*keyboardWorkerConfig) bool { return true },
 		emitTest:           func(uint32, time.Duration) error { return nil },
 	}
 	worker.config.Store(&keyboardWorkerConfig{
-		enabled:    true,
-		keys:       map[uint32]struct{}{key: {}},
-		strokeKeys: map[uint32]uint32{interceptionStrokeSignature(fStroke): key},
-		interval:   time.Hour,
+		enabled:  true,
+		keys:     map[uint32]struct{}{key: {}},
+		interval: time.Hour,
 	})
-	worker.handleInterceptionPhysical(1, fStroke)
-	worker.handleInterceptionPhysical(1, gStroke)
-	gStroke.Flags = interceptionKeyUp
-	worker.handleInterceptionPhysical(1, gStroke)
+	f := keyboardHook{VirtualKey: 'F'}
+	g := keyboardHook{VirtualKey: 'G'}
+	worker.handleKeyboardHookEvent(wMKeyDown, &f)
+	worker.handleKeyboardHookEvent(wMKeyDown, &g)
+	worker.handleKeyboardHookEvent(wMKeyUp, &g)
 	if !worker.held[int(key&0x3ff)].Load() {
-		t.Fatal("unrelated driver stroke interrupted held repeat key")
+		t.Fatal("unrelated hook key changed the configured physical ledger")
 	}
-	fStroke.Flags = interceptionKeyUp
-	worker.handleInterceptionPhysical(1, fStroke)
-	time.Sleep(keyboardReleaseSettle + 5*time.Millisecond)
-	if !worker.held[int(key&0x3ff)].Load() {
-		t.Fatal("adjacent cross-key release was not suppressed")
-	}
-	if got := worker.releaseSuppressed.Load(); got != 1 {
-		t.Fatalf("suppressed release count = %d, want 1", got)
-	}
-	time.Sleep(keyboardReleaseLookback)
-	worker.handleInterceptionPhysical(1, fStroke)
-	time.Sleep(keyboardReleaseSettle + 5*time.Millisecond)
+	worker.handleKeyboardHookEvent(wMKeyUp, &f)
 	if worker.held[int(key&0x3ff)].Load() {
-		t.Fatal("matching driver key-up did not end held repeat key")
+		t.Fatal("configured hook key remained held after its own release")
 	}
 	close(worker.done)
 	worker.wg.Wait()
+	if got := worker.releaseChecks.Load(); got != 1 {
+		t.Fatalf("hook release count = %d, want 1", got)
+	}
 }
 
 func TestKeyboardWorkerFirstDownEmitsWithoutLongPressDelay(t *testing.T) {
@@ -164,6 +154,9 @@ func TestKeyboardWorkerFirstDownEmitsWithoutLongPressDelay(t *testing.T) {
 	}
 	if got := worker.heldDevice[int(key&0x3ff)].Load(); got != 4 {
 		t.Fatalf("held output device = %d, want physical device 4", got)
+	}
+	if got := worker.lastOutputDevice.Load(); got != 1 {
+		t.Fatalf("synthetic output device = %d, want reference device 1", got)
 	}
 	worker.handlePhysical(key, false)
 	close(worker.done)

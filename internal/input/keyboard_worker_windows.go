@@ -49,7 +49,6 @@ type KeyboardWorkerDiagnostics struct {
 	OutputFailures      uint64   `json:"outputFailures"`
 	SyntheticHookEvents uint64   `json:"syntheticHookEvents"`
 	ReleaseChecks       uint64   `json:"releaseChecks"`
-	ReleaseSuppressed   uint64   `json:"releaseSuppressed"`
 	LastKey             uint32   `json:"lastKey"`
 	LastScanCode        uint32   `json:"lastScanCode"`
 	LastDevice          uint32   `json:"lastDevice"`
@@ -393,11 +392,10 @@ func (worker *keyboardWorkerController) stopLocked() {
 }
 
 type keyboardWorkerConfig struct {
-	enabled    bool
-	keys       map[uint32]struct{}
-	strokeKeys map[uint32]uint32
-	interval   time.Duration
-	processes  map[uint32]struct{}
+	enabled   bool
+	keys      map[uint32]struct{}
+	interval  time.Duration
+	processes map[uint32]struct{}
 }
 
 type keyboardWorkerRuntime struct {
@@ -405,14 +403,11 @@ type keyboardWorkerRuntime struct {
 	held                [1024]atomic.Bool
 	heldDevice          [1024]atomic.Uint32
 	generation          [1024]atomic.Uint64
-	releaseGeneration   [1024]atomic.Uint64
 	done                chan struct{}
 	wg                  sync.WaitGroup
 	faultMu             sync.Mutex
 	fault               error
-	driverMu            sync.Mutex
-	driverEvents        [32]keyboardDriverEvent
-	driverEventNext     uint32
+	outputMu            sync.Mutex
 	backend             *interceptionKeyboardBackend
 	threadID            uint32
 	gameForegroundTest  func(*keyboardWorkerConfig) bool
@@ -428,23 +423,12 @@ type keyboardWorkerRuntime struct {
 	outputFailures      atomic.Uint64
 	syntheticHookEvents atomic.Uint64
 	releaseChecks       atomic.Uint64
-	releaseSuppressed   atomic.Uint64
 	lastKey             atomic.Uint32
 	lastScanCode        atomic.Uint32
 	lastDevice          atomic.Uint32
 	lastOutputDevice    atomic.Uint32
 	foregroundPID       atomic.Uint32
 }
-
-type keyboardDriverEvent struct {
-	signature uint32
-	at        time.Time
-}
-
-const (
-	keyboardReleaseLookback = 25 * time.Millisecond
-	keyboardReleaseSettle   = 3 * time.Millisecond
-)
 
 func RunKeyboardWorker(input io.Reader, output io.Writer) error {
 	runtime.LockOSThread()
@@ -475,17 +459,6 @@ func RunKeyboardWorker(input io.Reader, output io.Writer) error {
 	defer procUnhookWindowsHookEx.Call(hook)
 	threadID := windows.GetCurrentThreadId()
 	worker.threadID = threadID
-	worker.wg.Add(1)
-	go func() {
-		defer worker.wg.Done()
-		if captureErr := backend.CaptureKeyboard(worker.done, worker.handleInterceptionPhysical); captureErr != nil {
-			select {
-			case <-worker.done:
-			default:
-				worker.fail(captureErr)
-			}
-		}
-	}()
 	go worker.readConfigurations(input, output, threadID)
 	var msg message
 	var loopError error
@@ -501,6 +474,7 @@ func RunKeyboardWorker(input io.Reader, output io.Writer) error {
 	}
 	close(worker.done)
 	worker.wg.Wait()
+	worker.releaseHeldKeys()
 	runtime.KeepAlive(callback)
 	return errors.Join(loopError, worker.runtimeFault())
 }
@@ -522,7 +496,6 @@ func (worker *keyboardWorkerRuntime) readConfigurations(input io.Reader, output 
 			response.Error = "keyboard worker interval must be 1..5000 ms"
 		} else {
 			keys := make(map[uint32]struct{}, len(request.RepeatKeys))
-			strokeKeys := make(map[uint32]uint32, len(request.RepeatKeys))
 			for _, key := range request.RepeatKeys {
 				if !ValidKeyCode(key) {
 					response.OK = false
@@ -530,14 +503,13 @@ func (worker *keyboardWorkerRuntime) readConfigurations(input io.Reader, output 
 					break
 				}
 				key = NormalizeKeyCode(key)
-				data, err := interceptionKeyboardData(key, false)
+				_, err := interceptionKeyboardData(key, false)
 				if err != nil {
 					response.OK = false
 					response.Error = fmt.Sprintf("map keyboard worker repeat key 0x%X: %v", key, err)
 					break
 				}
 				keys[key] = struct{}{}
-				strokeKeys[interceptionStrokeSignature(data)] = key
 			}
 			processes := make(map[uint32]struct{}, len(request.GameProcesses))
 			for _, processID := range request.GameProcesses {
@@ -546,18 +518,17 @@ func (worker *keyboardWorkerRuntime) readConfigurations(input io.Reader, output 
 				}
 			}
 			if response.OK {
+				worker.releaseHeldKeys()
 				worker.config.Store(&keyboardWorkerConfig{
-					enabled:    request.Enabled,
-					keys:       keys,
-					strokeKeys: strokeKeys,
-					interval:   time.Duration(request.IntervalMS) * time.Millisecond,
-					processes:  processes,
+					enabled:   request.Enabled,
+					keys:      keys,
+					interval:  time.Duration(request.IntervalMS) * time.Millisecond,
+					processes: processes,
 				})
 				for index := range worker.held {
 					worker.held[index].Store(false)
 					worker.heldDevice[index].Store(0)
 					worker.generation[index].Add(1)
-					worker.releaseGeneration[index].Add(1)
 				}
 			}
 			response.Diagnostics = worker.diagnostics()
@@ -568,100 +539,49 @@ func (worker *keyboardWorkerRuntime) readConfigurations(input io.Reader, output 
 	}
 }
 
-func interceptionStrokeSignature(data interceptionKeyboardInput) uint32 {
-	return uint32(data.MakeCode) | uint32(data.Flags&(interceptionKeyE0|interceptionKeyE1))<<16
-}
-
-func (worker *keyboardWorkerRuntime) handleInterceptionPhysical(device uint32, data interceptionKeyboardInput) {
-	if data.ExtraInformation == uint32(interceptionMarker) {
-		return
-	}
-	signature := interceptionStrokeSignature(data)
-	at := time.Now()
-	worker.recordDriverEvent(signature, at)
-	config := worker.config.Load()
-	if config == nil {
-		return
-	}
-	key, ok := config.strokeKeys[signature]
-	if !ok {
-		return
-	}
-	worker.lastDevice.Store(device)
-	if data.Flags&interceptionKeyUp == 0 {
-		worker.releaseGeneration[int(key&0x3ff)].Add(1)
-		worker.handlePhysicalDevice(key, true, device)
-		return
-	}
-	worker.deferPhysicalRelease(key, signature, at)
-}
-
-func (worker *keyboardWorkerRuntime) recordDriverEvent(signature uint32, at time.Time) {
-	worker.driverMu.Lock()
-	worker.driverEvents[worker.driverEventNext%uint32(len(worker.driverEvents))] = keyboardDriverEvent{
-		signature: signature,
-		at:        at,
-	}
-	worker.driverEventNext++
-	worker.driverMu.Unlock()
-}
-
-func (worker *keyboardWorkerRuntime) deferPhysicalRelease(key, signature uint32, at time.Time) {
-	index := int(key & 0x3ff)
-	release := worker.releaseGeneration[index].Add(1)
-	worker.releaseChecks.Add(1)
-	worker.wg.Add(1)
-	go func() {
-		defer worker.wg.Done()
-		timer := time.NewTimer(keyboardReleaseSettle)
-		defer timer.Stop()
-		select {
-		case <-worker.done:
-			return
-		case <-timer.C:
-		}
-		if worker.releaseGeneration[index].Load() != release {
-			return
-		}
-		if worker.hasAdjacentOtherDriverEvent(signature, at) {
-			worker.releaseSuppressed.Add(1)
-			return
-		}
-		worker.handlePhysical(key, false)
-	}()
-}
-
-func (worker *keyboardWorkerRuntime) hasAdjacentOtherDriverEvent(signature uint32, at time.Time) bool {
-	earliest := at.Add(-keyboardReleaseLookback)
-	latest := at.Add(keyboardReleaseSettle)
-	worker.driverMu.Lock()
-	defer worker.driverMu.Unlock()
-	for _, event := range worker.driverEvents {
-		if event.signature != 0 && event.signature != signature &&
-			!event.at.Before(earliest) && !event.at.After(latest) {
-			return true
-		}
-	}
-	return false
-}
-
 var activeKeyboardWorker atomic.Pointer[keyboardWorkerRuntime]
 
 func keyboardWorkerHookCallback(code int, message, dataPointer uintptr) uintptr {
 	if code >= 0 && dataPointer != 0 {
 		data := (*keyboardHook)(unsafe.Pointer(dataPointer))
 		worker := activeKeyboardWorker.Load()
-		// Interception inserts into the keyboard device stack and therefore is
-		// not guaranteed to carry LLKHF_INJECTED. The dedicated information
-		// marker is the recursion boundary used by the driver backend.
-		if data.ExtraInfo == interceptionMarker {
-			if worker != nil {
-				worker.syntheticHookEvents.Add(1)
-			}
+		if worker != nil {
+			worker.handleKeyboardHookEvent(message, data)
 		}
 	}
 	result, _, _ := procCallNextHookEx.Call(0, uintptr(code), message, dataPointer)
 	return result
+}
+
+func (worker *keyboardWorkerRuntime) handleKeyboardHookEvent(message uintptr, data *keyboardHook) {
+	if worker == nil || data == nil {
+		return
+	}
+	// Interception inserts into the keyboard device stack and therefore is
+	// not guaranteed to carry LLKHF_INJECTED. The information marker is the
+	// same recursion boundary used by FlairBloom.
+	if data.ExtraInfo == interceptionMarker {
+		worker.syntheticHookEvents.Add(1)
+		return
+	}
+	if data.Flags&llkhfInjected != 0 {
+		return
+	}
+	down := message == wMKeyDown || message == wMSysKeyDown
+	up := message == wMKeyUp || message == wMSysKeyUp
+	if !down && !up {
+		return
+	}
+	key := EncodeKeyCode(data.VirtualKey, data.Flags&llkhfExtended != 0)
+	if up {
+		config := worker.config.Load()
+		if config != nil {
+			if _, configured := config.keys[NormalizeKeyCode(key)]; configured {
+				worker.releaseChecks.Add(1)
+			}
+		}
+	}
+	worker.handlePhysicalDevice(key, down, 0)
 }
 
 func (worker *keyboardWorkerRuntime) handlePhysical(key uint32, down bool) {
@@ -714,9 +634,10 @@ func (worker *keyboardWorkerRuntime) repeatKey(key uint32, generation uint64) {
 	defer worker.wg.Done()
 	defer worker.repeatStops.Add(1)
 	index := int(key & 0x3ff)
-	// The Interception capture path forwards the original driver stroke before
-	// calling handlePhysical, so the first replacement pair can be dispatched
-	// immediately without a long-press or hook-return delay.
+	// The capture path forwards the original physical make stroke first. Each
+	// iteration emits the balanced make/break pair consumed by the game. A
+	// quarantined physical break does not change held/generation, so an
+	// unrelated key cannot pause this loop while release is being confirmed.
 	for worker.held[index].Load() && worker.generation[index].Load() == generation {
 		config := worker.config.Load()
 		if config == nil || !config.enabled {
@@ -732,14 +653,23 @@ func (worker *keyboardWorkerRuntime) repeatKey(key uint32, generation uint64) {
 			if data, err := interceptionKeyboardData(key, false); err == nil {
 				worker.lastScanCode.Store(uint32(data.MakeCode) | uint32(data.Flags&^interceptionKeyUp)<<16)
 			}
-			worker.lastOutputDevice.Store(worker.heldDevice[index].Load())
-			if err := worker.emitKey(key, config.interval); err != nil {
+			worker.lastOutputDevice.Store(1)
+			worker.outputMu.Lock()
+			active := worker.held[index].Load() && worker.generation[index].Load() == generation
+			var emitErr error
+			if active {
+				emitErr = worker.emitKey(key, config.interval)
+			}
+			worker.outputMu.Unlock()
+			if emitErr != nil {
 				worker.held[index].Store(false)
 				worker.outputFailures.Add(1)
-				worker.fail(fmt.Errorf("Interception output for key 0x%X failed: %w", key, err))
+				worker.fail(fmt.Errorf("Interception output for key 0x%X failed: %w", key, emitErr))
 				return
 			}
-			worker.outputPairs.Add(1)
+			if active {
+				worker.outputPairs.Add(1)
+			}
 		} else {
 			worker.outputGateMisses.Add(1)
 		}
@@ -810,7 +740,6 @@ func (worker *keyboardWorkerRuntime) diagnostics() KeyboardWorkerDiagnostics {
 		OutputFailures:      worker.outputFailures.Load(),
 		SyntheticHookEvents: worker.syntheticHookEvents.Load(),
 		ReleaseChecks:       worker.releaseChecks.Load(),
-		ReleaseSuppressed:   worker.releaseSuppressed.Load(),
 		LastKey:             worker.lastKey.Load(),
 		LastScanCode:        worker.lastScanCode.Load(),
 		LastDevice:          worker.lastDevice.Load(),
@@ -836,9 +765,32 @@ func (worker *keyboardWorkerRuntime) emitKey(key uint32, interval time.Duration)
 	if worker.backend == nil {
 		return errors.New("Interception keyboard backend is unavailable")
 	}
-	device := worker.heldDevice[int(NormalizeKeyCode(key)&0x3ff)].Load()
-	if device == 0 {
-		device = 1
+	// FlairBloom's audited Interception backend selects the first logical
+	// keyboard returned by find_keyboard(), which is device 1. Keep output
+	// independent from the physical trigger device for identical routing.
+	return worker.backend.PressDevice(1, key, interval)
+}
+
+func (worker *keyboardWorkerRuntime) releaseHeldKeys() {
+	for index := range worker.held {
+		if !worker.held[index].Swap(false) {
+			continue
+		}
+		worker.generation[index].Add(1)
+		worker.heldDevice[index].Store(0)
+		if worker.backend == nil {
+			continue
+		}
+		key := uint32(index)
+		worker.releaseKeyDevice(key, 1)
 	}
-	return worker.backend.PressDevice(device, key, interval)
+}
+
+func (worker *keyboardWorkerRuntime) releaseKeyDevice(key, device uint32) {
+	if worker.backend == nil || device == 0 {
+		return
+	}
+	worker.outputMu.Lock()
+	_ = worker.backend.ReleaseDevice(device, key)
+	worker.outputMu.Unlock()
 }

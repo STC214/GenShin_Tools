@@ -576,6 +576,124 @@
 - SHA-256：`e78ff89061f4af79f0f4b96ed9d7c8a974f97b5358860068c18d56e582ad0f34`
 - 条目数：19；无重复条目
 
+## 1.4.2 硬件式 make 重复与跨键零重启
+
+- **实机结论：失败，不应作为候选版本继续使用。** 驱动日志显示 make 持续输出且无
+  IOCTL 故障，但原神不消费缺少配对 break 的重复 stroke；该路径已在 1.4.3 撤销。
+- 实机日志确认 1.4.1 的邻接过滤无法可靠识别伪 F-up：20 次候选中仅过滤 9 次，其余
+  候选均结束 repeat goroutine；后续恢复依赖 Windows 的长按重复延时，因此出现约两秒
+  的跨键中断。
+- 内置连发改为标准键盘 typematic 形态：物理 F-down 原样透传后，每个间隔只向同一
+  Interception 逻辑设备发送一个 make（down）stroke，不再为每次重复合成 break（up）。
+  用户的真实物理 F-up 是本次保持会话的唯一正常结束边沿。
+- 删除 3ms settle、25ms 邻接历史及其异步判断。第一次物理 down 立即建立会话并立即
+  输出；G/WASD 等其他键只执行原样 READ/WRITE 转发，不访问 F 的 held/generation，
+  也不会触发新的长按判断。
+- 重复输出不再在驱动互斥锁外休眠。真实释放、配置切换和 worker 退出时，使用与输出
+  共用的短临界区串行发送最终安全 break，保证最后一个在途 make 不会造成粘键，同时
+  不阻塞其他物理键。
+- 诊断字段由 `outputPairs` 改为 `outputMakes`，准确表示驱动收到的连续 make 数；
+  `releaseChecks` 继续记录真实驱动读取路径观察到的配置键 break，供下一次实机日志
+  区分保持会话和输出故障。
+- `./scripts/test-s13-release.ps1 -ShellIterations 1 -SkipOnlineProvider` 于
+  2026-07-28 通过；覆盖全量普通/race、格式、vet、x86/x64 双构建、PE/图标/权限、
+  Hook 生命周期、S02、S03、S05、S09 和确定性 ZIP。
+
+- 文件：`artifacts/release/GenshinTools-1.4.2-windows-amd64-portable.zip`
+- 大小：10,921,186 bytes
+- SHA-256：`87264ee109ef3224ff9c0cf0bd3a9c486038994d01be6a1b76e61491aced6510`
+- 条目数：19；无重复条目
+
+## 1.4.3 配对输出恢复与释放边沿前置隔离
+
+- 1.4.2 实机日志确认约 16 秒内成功写入 1240 个 make，前台门禁和驱动错误均为零，
+  但原神内没有产生连发效果，因此恢复已由实机验证可用的 Interception down/up 配对。
+- 捕获线程不再先把配置键 F-up 交给 Windows 再猜测其来源。F-up 在驱动读取边界先进入
+  50ms 释放确认区，期间 held/generation 和原连发 goroutine 完全不变，配对输出持续。
+- 确认窗口内观察到后续物理 F-down 时，候选 up 被判为跨键/设备切换产生的伪释放并
+  丢弃；不会停止旧循环、不会创建新循环，也不会等待 Windows 的长按重复延迟。确认无
+  后续 down 才停止循环，并把暂存的真实 up 按原逻辑设备顺序写回。
+- G/WASD 等非配置键不进入确认状态机，仍在 Interception READ 后同步原样 WRITE。
+  输出互斥只包围单个配对发送及最终释放；`PressDevice` 在 down/up 间不会持有驱动锁，
+  因此其他物理键可在连发周期中即时穿过。
+- 新增回归用例验证“F-up 确认期间输出计数持续增长”和“后续 F-down 取消候选但不重启
+  会话”；input/shell race、S02、S03、S05、S09、双架构构建、PE/图标/权限及确定性
+  ZIP 均于 2026-07-28 通过。
+
+- 文件：`artifacts/release/GenshinTools-1.4.3-windows-amd64-portable.zip`
+- 大小：10,925,329 bytes
+- SHA-256：`2f2958df660f76511a6ab1c0e3c2f78c5df2027fbda0b8bffd3f72a07fb53aa8`
+- 条目数：19；无重复条目
+
+## 1.4.4 物理触发抑制与合成脉冲独占
+
+- **实机结论：失败，不应作为候选版本继续使用。** 日志确认驱动高速输出和物理抑制
+  都已生效，但游戏消费频率没有恢复；进一步与 FlairBloom 源码逐行对照后发现合成输出
+  仍错误地跟随物理设备 4，而参考实现固定使用逻辑键盘 1。
+- 1.4.3 实机日志证明用户感知降频时 repeat 会话没有停止：每两秒仍稳定新增约
+  190–194 组 down/up，`repeatStarts/repeatStops`、前台 PID 和设备号不变，驱动失败
+  为零。因此根因不是调度暂停，而是游戏在“物理 F 保持 + 合成 F 脉冲 + 其他键”
+  的组合状态下只消费极少数合成脉冲。
+- 游戏前台时，Interception 捕获的物理配置键 F down/up 现在只控制 held 会话，不再
+  回写到游戏输入栈；游戏只收到同一逻辑键盘设备上的完整、平衡合成 down/up。该行为
+  对齐 AHK 热键用物理触发替换合成输出的语义，避免物理 typematic 与合成脉冲竞争。
+- 非配置键不进入抑制路径，仍在驱动 READ 后立即原样 WRITE；游戏不在前台时配置键
+  也正常透传。焦点切换后收到的真实 F-up 会清理旧会话，不会在其他程序中继续输出。
+- 新增 `physicalSuppressed` 诊断计数，可直接确认物理 F 被替换而非送入游戏；
+  `outputPairs` 继续表示游戏实际收到的平衡合成组数。
+- 全量普通测试、input/shell race、Debug/Release 与 x86 worker 构建、PE/图标/权限和
+  便携包复核于 2026-07-28 通过。
+
+- 文件：`artifacts/release/GenshinTools-1.4.4-windows-amd64-portable.zip`
+- 大小：10,924,750 bytes
+- SHA-256：`530575891eedbf0c420a58a6615dd30b76e75a67939dcdef3287f3a2706dda4b`
+- 条目数：19；无重复条目
+
+## 1.4.5 FlairBloom 逻辑键盘路由对齐
+
+- **实机结论：频率恢复，但仍会被其他按键产生的 F-up 打断，因此不能作为最终候选。**
+  日志确认设备 1 路由有效，同时 9 次 release 候选仅 1 次被取消，其余 8 次推进了
+  `repeatStops`；生产路径额外安装的 Interception 全量物理过滤仍与参考实现不同。
+- 复核固定上游提交
+  `research/upstream/flair-bloom-3873b4b90499457a0fe321f09a3a6d34c10462a3`：
+  `packages/win-input/src/interception.rs` 的 `find_keyboard()` 从 1 开始并返回第一个
+  Interception 键盘，因此其所有合成键盘输出固定走逻辑设备 1；物理 Hook 最终始终
+  `CallNextHookEx`，不吞物理触发。
+- 本机日志持续显示物理设备与旧合成设备均为 4。1.4.5 撤销 1.4.4 的物理 F 抑制，
+  配置键 make 先原样回到物理设备再建立 held 会话；合成 down/up 和清理 up 则严格
+  固定写入设备 1。`lastDevice` 与 `heldDevices` 保留物理设备，`lastOutputDevice`
+  必须显示 1。
+- 调度相位继续与上游 `scheduler.rs` 一致：10ms 请求使用 3ms DownPhase 和 7ms
+  rest；1ms 请求在同一拍发送 down/up。新增回归断言确保物理设备 4 不会再次把合成
+  路由从设备 1 带偏。
+- 全量普通测试、input/shell race、Debug/Release 与 x86 worker 构建、PE/图标/权限和
+  便携包复核于 2026-07-28 通过。
+
+- 文件：`artifacts/release/GenshinTools-1.4.5-windows-amd64-portable.zip`
+- 大小：10,925,291 bytes
+- SHA-256：`6d75efd4afc65b029d7f5adb4842ac5808c08faef867b61814019c1339c2df68`
+- 条目数：19；无重复条目
+
+## 1.4.6 参考 Hook 链路完整对齐
+
+- 删除生产 worker 对十个键盘设备的 `FILTER_KEY_ALL`、`IOCTL_READ` 和物理 stroke
+  READ→WRITE 回灌；Interception context 不再接管物理输入，只向固定逻辑键盘 1 发送
+  合成 down/up。这与 FlairBloom `InterceptionBackend` 的职责边界一致。
+- 物理保持状态只由最终阶段安装的 `WH_KEYBOARD_LL` 管理；标记为
+  `0x51485844` 的自身输出先过滤，非注入物理 down/up 分别更新各自键位，回调最终始终
+  `CallNextHookEx`。G/WASD 的状态不访问 F 的 held/generation。
+- 删除驱动捕获专用的 50ms release 猜测、设备 stroke 映射和 suppression 状态。新增
+  Hook 级回归用例验证 `F down → G down/up → F 仍 held → F up → F released`，
+  并将 Hook 事件处理提取为类型安全方法，避免测试使用不安全 uintptr 伪造系统指针。
+- 合成输出继续固定设备 1，10ms 的 3ms down/7ms rest 相位保持不变。
+- 全量普通测试、input/shell race、Debug/Release 与 x86 worker 构建、PE/图标/权限和
+  便携包复核于 2026-07-28 通过。
+
+- 文件：`artifacts/release/GenshinTools-1.4.6-windows-amd64-portable.zip`
+- 大小：10,918,863 bytes
+- SHA-256：`70b3c6b2b014f088b43900fb354cc625b0e6bd73c249f7f4e9960874ff9049bc`
+- 条目数：19；无重复条目
+
 ## 尚未关闭的人工门禁
 
 1. 真实原神/反作弊环境下的输入、截图、覆盖层、启动和可选插件/注入组合。
