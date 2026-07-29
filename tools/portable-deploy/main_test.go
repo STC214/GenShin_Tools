@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"genshintools/internal/platform/win32"
 )
 
 func TestMirrorReleasePreservesDataAndRemovesRetiredFiles(t *testing.T) {
@@ -70,6 +72,107 @@ func TestMirrorReleaseRollsBackPartialInstall(t *testing.T) {
 	assertContent(t, filepath.Join(target, "a.exe"), "old-a")
 	assertContent(t, filepath.Join(target, "retired.exe"), "old-retired")
 	assertContent(t, filepath.Join(target, "data", "config.json"), "user")
+}
+
+func TestDeploymentMutexRejectsConcurrentOwnerAndReleases(t *testing.T) {
+	target := filepath.Join(t.TempDir(), "installed")
+	first, err := acquireDeploymentMutex(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second, err := acquireDeploymentMutex(target); err == nil {
+		win32.CloseHandle(second)
+		t.Fatal("concurrent deployment mutex was accepted")
+	}
+	win32.CloseHandle(first)
+	third, err := acquireDeploymentMutex(target)
+	if err != nil {
+		t.Fatalf("deployment mutex remained owned after close: %v", err)
+	}
+	win32.CloseHandle(third)
+}
+
+func TestRecoverInterruptedInstallIsIdempotentAfterRestoreFailure(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(root, "installed")
+	source := filepath.Join(root, ".genshintools-deploy-fixture", "1.5.3")
+	backup := filepath.Join(root, ".genshintools-backup-fixture")
+	mustWrite(t, filepath.Join(target, "new.exe"), "new")
+	mustWrite(t, filepath.Join(target, "data", "config.json"), "user")
+	mustWrite(t, filepath.Join(backup, "old.exe"), "old")
+	mustWrite(t, filepath.Join(backup, "retired.exe"), "retired")
+	if err := os.MkdirAll(source, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	journal := deployJournal{
+		SchemaVersion: deployJournalSchema,
+		Target:        target,
+		Source:        source,
+		Backup:        backup,
+		Phase:         "installing",
+	}
+	if err := createDeploymentJournal(deploymentJournalPath(target), journal); err != nil {
+		t.Fatal(err)
+	}
+
+	originalMove := movePath
+	t.Cleanup(func() { movePath = originalMove })
+	failed := false
+	movePath = func(oldPath, newPath string) error {
+		if !failed && filepath.Base(oldPath) == "retired.exe" && filepath.Dir(oldPath) == backup {
+			failed = true
+			return errors.New("injected restore failure")
+		}
+		return originalMove(oldPath, newPath)
+	}
+	if err := recoverDeployment(target); err == nil {
+		t.Fatal("expected injected recovery failure")
+	}
+	movePath = originalMove
+
+	if err := recoverDeployment(target); err != nil {
+		t.Fatal(err)
+	}
+	assertContent(t, filepath.Join(target, "old.exe"), "old")
+	assertContent(t, filepath.Join(target, "retired.exe"), "retired")
+	assertContent(t, filepath.Join(target, "data", "config.json"), "user")
+	if _, err := os.Stat(filepath.Join(target, "new.exe")); !os.IsNotExist(err) {
+		t.Fatalf("partially installed file survived recovery: %v", err)
+	}
+	if _, err := os.Stat(deploymentJournalPath(target)); !os.IsNotExist(err) {
+		t.Fatalf("completed recovery journal survived: %v", err)
+	}
+}
+
+func TestRecoverCommittedDeploymentOnlyCleansBackup(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(root, "installed")
+	source := filepath.Join(root, ".genshintools-deploy-fixture", "1.5.3")
+	backup := filepath.Join(root, ".genshintools-backup-fixture")
+	mustWrite(t, filepath.Join(target, "current.exe"), "current")
+	mustWrite(t, filepath.Join(target, "data", "config.json"), "user")
+	mustWrite(t, filepath.Join(backup, "old.exe"), "old")
+	if err := os.MkdirAll(source, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	journal := deployJournal{
+		SchemaVersion: deployJournalSchema,
+		Target:        target,
+		Source:        source,
+		Backup:        backup,
+		Phase:         "committed",
+	}
+	if err := createDeploymentJournal(deploymentJournalPath(target), journal); err != nil {
+		t.Fatal(err)
+	}
+	if err := recoverDeployment(target); err != nil {
+		t.Fatal(err)
+	}
+	assertContent(t, filepath.Join(target, "current.exe"), "current")
+	assertContent(t, filepath.Join(target, "data", "config.json"), "user")
+	if _, err := os.Stat(backup); !os.IsNotExist(err) {
+		t.Fatalf("committed backup survived recovery: %v", err)
+	}
 }
 
 func mustWrite(t *testing.T, path, value string) {

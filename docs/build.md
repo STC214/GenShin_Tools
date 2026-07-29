@@ -60,9 +60,11 @@ Deploy a verified portable package to an existing portable installation:
 
 The deploy command validates the ZIP and every manifest hash before changing the
 target. It preserves only `data/`, transactionally replaces all product files,
-and removes files retired by newer releases. Do not deploy by repeatedly
-extracting with `-Force`, because that leaves obsolete executables, licenses and
-corresponding-source archives in the installation.
+and removes files retired by newer releases. A target-specific system mutex
+rejects concurrent deployers, while a write-through transaction journal recovers
+an interrupted backup/install/rollback on the next run. Do not deploy by
+repeatedly extracting with `-Force`, because that leaves obsolete executables,
+licenses and corresponding-source archives in the installation.
 
 Run the S02 GUI lifecycle, second-instance, tray, recovery and stress checks:
 
