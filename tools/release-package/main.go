@@ -79,16 +79,26 @@ func packageRelease(options options) error {
 	if err != nil {
 		return err
 	}
-	if err := writeArchive(output, manifest, files); err != nil {
+	if err := os.MkdirAll(filepath.Dir(output), 0o755); err != nil {
 		return err
 	}
-	complete := false
-	defer func() {
-		if !complete {
-			cleanupIncompletePackage(output)
-		}
-	}()
-	packageSize, packageHash, err := hashFile(output, maxReleaseBytes)
+	candidateFile, err := os.CreateTemp(filepath.Dir(output), ".release-candidate-*.zip")
+	if err != nil {
+		return err
+	}
+	candidate := candidateFile.Name()
+	if closeErr := candidateFile.Close(); closeErr != nil {
+		_ = os.Remove(candidate)
+		return closeErr
+	}
+	if err := os.Remove(candidate); err != nil {
+		return err
+	}
+	defer os.Remove(candidate)
+	if err := writeArchive(candidate, manifest, files); err != nil {
+		return err
+	}
+	packageSize, packageHash, err := hashFile(candidate, maxReleaseBytes)
 	if err != nil {
 		return err
 	}
@@ -98,21 +108,48 @@ func packageRelease(options options) error {
 	}
 	defer os.RemoveAll(verificationRoot)
 	artifact := selfupdate.Artifact{OS: "windows", Arch: "amd64", URL: "https://updates.example.invalid/" + filepath.Base(output), Size: packageSize, SHA256: packageHash}
-	staged, err := selfupdate.StagePackage(context.Background(), output, verificationRoot, options.version, artifact)
+	staged, err := selfupdate.StagePackage(context.Background(), candidate, verificationRoot, options.version, artifact)
 	if err != nil {
-		_ = os.Remove(output)
 		return fmt.Errorf("reopen portable ZIP: %w", err)
 	}
 	if len(staged.Manifest.Files) != len(manifest.Files) {
-		_ = os.Remove(output)
 		return errors.New("reopened portable ZIP file count differs")
 	}
 	checksum := []byte(packageHash + "  " + filepath.Base(output) + "\n")
+	if err := publishPackage(candidate, output, packageHash, checksum); err != nil {
+		return err
+	}
+	fmt.Printf("Packaged %s\nSHA-256 %s\nFiles %d\n", output, packageHash, len(files)+1)
+	return nil
+}
+
+func publishPackage(candidate, output, candidateHash string, checksum []byte) error {
+	if info, err := os.Lstat(output); err == nil {
+		if !info.Mode().IsRegular() {
+			return errors.New("existing package output is not a regular file")
+		}
+		_, existingHash, hashErr := hashFile(output, maxReleaseBytes)
+		if hashErr != nil {
+			return hashErr
+		}
+		if !strings.EqualFold(existingHash, candidateHash) {
+			return errors.New("refusing to replace an existing same-version package with different content")
+		}
+		// A deterministic rerun may repair a missing checksum, but it never
+		// rewrites the already published immutable ZIP.
+		return writeAtomic(output+".sha256", checksum, 0o644)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	// Publish the sidecar first. A process crash can therefore leave only an
+	// unusable sidecar, never an unverified ZIP without its matching checksum.
 	if err := writeAtomic(output+".sha256", checksum, 0o644); err != nil {
 		return err
 	}
-	complete = true
-	fmt.Printf("Packaged %s\nSHA-256 %s\nFiles %d\n", output, packageHash, len(files)+1)
+	if err := replaceFile(candidate, output); err != nil {
+		removeRegularFile(output + ".sha256")
+		return err
+	}
 	return nil
 }
 
@@ -359,9 +396,4 @@ func removeRegularFile(path string) {
 	if err == nil && info.Mode().IsRegular() {
 		_ = os.Remove(path)
 	}
-}
-
-func cleanupIncompletePackage(output string) {
-	_ = os.Remove(output)
-	removeRegularFile(output + ".sha256")
 }

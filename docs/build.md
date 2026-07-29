@@ -37,6 +37,12 @@ Generate and reopen a deterministic S12-compatible portable ZIP with a SHA-256 s
 ./scripts/package-portable.ps1
 ```
 
+Packaging builds and reopens a hidden candidate before publishing it. A
+same-version ZIP is immutable: deterministic reruns may repair its checksum,
+but different content is rejected instead of overwriting the existing
+candidate. For a new version, the checksum is published before the ZIP so an
+interrupted publish cannot expose an unverified ZIP without its sidecar.
+
 From `1.3.2`, the portable package contains the project-owner supplied legacy
 compiled `AHK_F.exe` and its distribution notice. Binary inspection identifies
 an embedded AutoHotkey v1.0.48.05 runtime, so the package also carries

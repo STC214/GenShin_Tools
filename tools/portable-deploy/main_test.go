@@ -110,6 +110,7 @@ func TestRecoverInterruptedInstallIsIdempotentAfterRestoreFailure(t *testing.T) 
 		Source:        source,
 		Backup:        backup,
 		Phase:         "installing",
+		Incoming:      []string{"new.exe"},
 	}
 	if err := createDeploymentJournal(deploymentJournalPath(target), journal); err != nil {
 		t.Fatal(err)
@@ -161,6 +162,7 @@ func TestRecoverCommittedDeploymentOnlyCleansBackup(t *testing.T) {
 		Source:        source,
 		Backup:        backup,
 		Phase:         "committed",
+		Incoming:      []string{"current.exe"},
 	}
 	if err := createDeploymentJournal(deploymentJournalPath(target), journal); err != nil {
 		t.Fatal(err)
@@ -172,6 +174,93 @@ func TestRecoverCommittedDeploymentOnlyCleansBackup(t *testing.T) {
 	assertContent(t, filepath.Join(target, "data", "config.json"), "user")
 	if _, err := os.Stat(backup); !os.IsNotExist(err) {
 		t.Fatalf("committed backup survived recovery: %v", err)
+	}
+}
+
+func TestRecoverCommittedDeploymentRetainsBackupWhenTargetIsMissing(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(root, "installed")
+	source := filepath.Join(root, ".genshintools-deploy-fixture", "1.5.4")
+	backup := filepath.Join(root, ".genshintools-backup-fixture")
+	mustWrite(t, filepath.Join(backup, "old.exe"), "old")
+	if err := os.MkdirAll(source, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	journal := deployJournal{
+		SchemaVersion: deployJournalSchema,
+		Target:        target,
+		Source:        source,
+		Backup:        backup,
+		Phase:         "committed",
+		Incoming:      []string{"current.exe"},
+	}
+	journalPath := deploymentJournalPath(target)
+	if err := createDeploymentJournal(journalPath, journal); err != nil {
+		t.Fatal(err)
+	}
+	if err := recoverDeployment(target); err == nil {
+		t.Fatal("missing committed target was accepted")
+	}
+	assertContent(t, filepath.Join(backup, "old.exe"), "old")
+	if _, err := os.Stat(journalPath); err != nil {
+		t.Fatalf("recovery evidence was removed after unsafe cleanup refusal: %v", err)
+	}
+}
+
+func TestRecoverCommittedDeploymentRetainsBackupOnTargetMismatch(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(root, "installed")
+	source := filepath.Join(root, ".genshintools-deploy-fixture", "1.5.4")
+	backup := filepath.Join(root, ".genshintools-backup-fixture")
+	mustWrite(t, filepath.Join(target, "current.exe"), "current")
+	mustWrite(t, filepath.Join(target, "unexpected.exe"), "unexpected")
+	mustWrite(t, filepath.Join(backup, "old.exe"), "old")
+	if err := os.MkdirAll(source, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	journal := deployJournal{
+		SchemaVersion: deployJournalSchema,
+		Target:        target,
+		Source:        source,
+		Backup:        backup,
+		Phase:         "committed",
+		Incoming:      []string{"current.exe"},
+	}
+	if err := createDeploymentJournal(deploymentJournalPath(target), journal); err != nil {
+		t.Fatal(err)
+	}
+	if err := recoverDeployment(target); err == nil {
+		t.Fatal("mismatched committed target was accepted")
+	}
+	assertContent(t, filepath.Join(backup, "old.exe"), "old")
+}
+
+func TestRecoverLegacyCommittedJournal(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(root, "installed")
+	source := filepath.Join(root, ".genshintools-deploy-fixture", "1.5.3")
+	backup := filepath.Join(root, ".genshintools-backup-fixture")
+	mustWrite(t, filepath.Join(target, "GenshinTools.exe"), "current")
+	mustWrite(t, filepath.Join(backup, "GenshinTools.exe"), "old")
+	if err := os.MkdirAll(source, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	journal := deployJournal{
+		SchemaVersion: 1,
+		Target:        target,
+		Source:        source,
+		Backup:        backup,
+		Phase:         "committed",
+	}
+	if err := createDeploymentJournal(deploymentJournalPath(target), journal); err != nil {
+		t.Fatal(err)
+	}
+	if err := recoverDeployment(target); err != nil {
+		t.Fatal(err)
+	}
+	assertContent(t, filepath.Join(target, "GenshinTools.exe"), "current")
+	if _, err := os.Stat(backup); !os.IsNotExist(err) {
+		t.Fatalf("legacy committed backup survived recovery: %v", err)
 	}
 }
 

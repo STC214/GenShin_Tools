@@ -25,14 +25,15 @@ import (
 
 var movePath = os.Rename
 
-const deployJournalSchema = 1
+const deployJournalSchema = 2
 
 type deployJournal struct {
-	SchemaVersion int    `json:"schemaVersion"`
-	Target        string `json:"target"`
-	Source        string `json:"source"`
-	Backup        string `json:"backup"`
-	Phase         string `json:"phase"`
+	SchemaVersion int      `json:"schemaVersion"`
+	Target        string   `json:"target"`
+	Source        string   `json:"source"`
+	Backup        string   `json:"backup"`
+	Phase         string   `json:"phase"`
+	Incoming      []string `json:"incoming,omitempty"`
 }
 
 func main() {
@@ -143,6 +144,10 @@ func mirrorRelease(source, target string) error {
 		Source:        source,
 		Backup:        backup,
 		Phase:         "backing-up",
+		Incoming:      make([]string, 0, len(incoming)),
+	}
+	for _, entry := range incoming {
+		journal.Incoming = append(journal.Incoming, entry.Name())
 	}
 	journalFile := deploymentJournalPath(target)
 	if err := createDeploymentJournal(journalFile, journal); err != nil {
@@ -186,6 +191,9 @@ func mirrorRelease(source, target string) error {
 	journal.Phase = "committed"
 	if err := replaceDeploymentJournal(journalFile, journal); err != nil {
 		return rollback(fmt.Errorf("persist commit phase: %w", err))
+	}
+	if err := verifyCommittedTarget(journal); err != nil {
+		return fmt.Errorf("deployment committed but target verification failed; old backup retained: %w", err)
 	}
 	if err := os.RemoveAll(backup); err != nil {
 		return fmt.Errorf("deployment committed; clean old backup on next run: %w", err)
@@ -301,6 +309,13 @@ func recoverDeployment(target string) error {
 		if err := rollbackDeployment(journal); err != nil {
 			return err
 		}
+	} else if journal.Phase == "committed" {
+		if err := verifyCommittedTarget(journal); err != nil {
+			return fmt.Errorf("committed target is incomplete; old backup retained: %w", err)
+		}
+		if err := os.RemoveAll(journal.Backup); err != nil {
+			return err
+		}
 	} else if err := os.RemoveAll(journal.Backup); err != nil {
 		return err
 	}
@@ -314,12 +329,30 @@ func validateDeploymentJournal(journal deployJournal, target string) error {
 	target = filepath.Clean(target)
 	parent := filepath.Dir(target)
 	stagingRoot := filepath.Dir(journal.Source)
-	if journal.SchemaVersion != deployJournalSchema || !strings.EqualFold(filepath.Clean(journal.Target), target) {
+	if (journal.SchemaVersion != 1 && journal.SchemaVersion != deployJournalSchema) ||
+		!strings.EqualFold(filepath.Clean(journal.Target), target) {
 		return errors.New("deployment journal target or schema is invalid")
 	}
-	if filepath.Dir(stagingRoot) != parent || !strings.HasPrefix(filepath.Base(stagingRoot), ".genshintools-deploy-") ||
-		filepath.Dir(journal.Backup) != parent || !strings.HasPrefix(filepath.Base(journal.Backup), ".genshintools-backup-") {
+	if !filepath.IsAbs(journal.Source) || !filepath.IsAbs(journal.Backup) ||
+		!strings.EqualFold(filepath.Dir(stagingRoot), parent) || !strings.HasPrefix(filepath.Base(stagingRoot), ".genshintools-deploy-") ||
+		!strings.EqualFold(filepath.Dir(journal.Backup), parent) || !strings.HasPrefix(filepath.Base(journal.Backup), ".genshintools-backup-") {
 		return errors.New("deployment journal paths are outside the target parent")
+	}
+	if journal.SchemaVersion == deployJournalSchema {
+		if len(journal.Incoming) == 0 || len(journal.Incoming) > 128 {
+			return errors.New("deployment journal incoming entry count is invalid")
+		}
+		seen := make(map[string]bool, len(journal.Incoming))
+		for _, name := range journal.Incoming {
+			key := strings.ToLower(name)
+			if name == "" || name == "." || name == ".." || filepath.Base(name) != name ||
+				strings.ContainsAny(name, `/\:`) || strings.EqualFold(name, "data") || seen[key] {
+				return errors.New("deployment journal incoming entries are invalid")
+			}
+			seen[key] = true
+		}
+	} else if len(journal.Incoming) != 0 {
+		return errors.New("legacy deployment journal has unexpected incoming entries")
 	}
 	switch journal.Phase {
 	case "backing-up", "installing", "restoring", "rolled-back", "committed":
@@ -327,6 +360,53 @@ func validateDeploymentJournal(journal deployJournal, target string) error {
 	default:
 		return errors.New("deployment journal phase is invalid")
 	}
+}
+
+func verifyCommittedTarget(journal deployJournal) error {
+	info, err := os.Lstat(journal.Target)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return errors.New("committed target is not a real directory")
+	}
+	entries, err := os.ReadDir(journal.Target)
+	if err != nil {
+		return err
+	}
+	if journal.SchemaVersion == 1 {
+		for _, entry := range entries {
+			if !strings.EqualFold(entry.Name(), "data") {
+				return nil
+			}
+		}
+		return errors.New("legacy committed target contains no product files")
+	}
+	expected := make(map[string]bool, len(journal.Incoming))
+	for _, name := range journal.Incoming {
+		expected[strings.ToLower(name)] = true
+	}
+	for _, entry := range entries {
+		if strings.EqualFold(entry.Name(), "data") {
+			dataInfo, infoErr := entry.Info()
+			if infoErr != nil {
+				return infoErr
+			}
+			if !dataInfo.IsDir() || dataInfo.Mode()&os.ModeSymlink != 0 {
+				return errors.New("committed data path is not a real directory")
+			}
+			continue
+		}
+		key := strings.ToLower(entry.Name())
+		if !expected[key] {
+			return fmt.Errorf("committed target contains unexpected entry %q", entry.Name())
+		}
+		delete(expected, key)
+	}
+	if len(expected) != 0 {
+		return fmt.Errorf("committed target is missing %d product entries", len(expected))
+	}
+	return nil
 }
 
 func rollbackDeployment(journal deployJournal) error {

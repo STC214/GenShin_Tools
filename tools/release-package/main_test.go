@@ -2,6 +2,8 @@ package main
 
 import (
 	"archive/zip"
+	"crypto/sha256"
+	"encoding/hex"
 	"os"
 	"path/filepath"
 	"strings"
@@ -103,30 +105,47 @@ func TestVerifyBuildInfoAcceptsUTF8BOMAndRejectsTrailingJSON(t *testing.T) {
 	}
 }
 
-func TestPackageChecksumFailureRemovesIncompleteCandidate(t *testing.T) {
+func TestPublishPackageChecksumFailurePreservesExistingPackage(t *testing.T) {
 	root := t.TempDir()
 	output := filepath.Join(root, "portable.zip")
-	if err := os.WriteFile(output, []byte("candidate"), 0o644); err != nil {
+	candidate := filepath.Join(root, "candidate.zip")
+	content := []byte("verified package")
+	if err := os.WriteFile(output, content, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(candidate, content, 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Mkdir(output+".sha256", 0o755); err != nil {
 		t.Fatal(err)
 	}
-	complete := false
-	func() {
-		defer func() {
-			if !complete {
-				cleanupIncompletePackage(output)
-			}
-		}()
-		if err := writeAtomic(output+".sha256", []byte("hash\n"), 0o644); err == nil {
-			t.Fatal("checksum replacement over a directory unexpectedly succeeded")
-		}
-	}()
-	if _, err := os.Stat(output); !os.IsNotExist(err) {
-		t.Fatalf("incomplete candidate remained after checksum failure: %v", err)
+	digest := sha256.Sum256(content)
+	if err := publishPackage(candidate, output, hex.EncodeToString(digest[:]), []byte("hash\n")); err == nil {
+		t.Fatal("checksum replacement over a directory unexpectedly succeeded")
+	}
+	if data, err := os.ReadFile(output); err != nil || string(data) != string(content) {
+		t.Fatalf("existing package changed after checksum failure: %q err=%v", data, err)
 	}
 	if info, err := os.Stat(output + ".sha256"); err != nil || !info.IsDir() {
 		t.Fatalf("non-file checksum target was modified: info=%v err=%v", info, err)
+	}
+}
+
+func TestPublishPackageRefusesDifferentSameVersionContent(t *testing.T) {
+	root := t.TempDir()
+	output := filepath.Join(root, "portable.zip")
+	candidate := filepath.Join(root, "candidate.zip")
+	if err := os.WriteFile(output, []byte("published"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(candidate, []byte("different"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256([]byte("different"))
+	if err := publishPackage(candidate, output, hex.EncodeToString(digest[:]), []byte("hash\n")); err == nil {
+		t.Fatal("different same-version package was accepted")
+	}
+	if data, err := os.ReadFile(output); err != nil || string(data) != "published" {
+		t.Fatalf("published package changed: %q err=%v", data, err)
 	}
 }
