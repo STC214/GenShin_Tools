@@ -52,6 +52,18 @@ Run the complete short S13 automated release matrix:
 ./scripts/test-s13-release.ps1
 ```
 
+Deploy a verified portable package to an existing portable installation:
+
+```powershell
+./scripts/deploy-portable.ps1 -Target 'D:\tools\01_Game_tools\Genshin_Tools'
+```
+
+The deploy command validates the ZIP and every manifest hash before changing the
+target. It preserves only `data/`, transactionally replaces all product files,
+and removes files retired by newer releases. Do not deploy by repeatedly
+extracting with `-Force`, because that leaves obsolete executables, licenses and
+corresponding-source archives in the installation.
+
 Run the S02 GUI lifecycle, second-instance, tray, recovery and stress checks:
 
 ```powershell
