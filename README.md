@@ -17,6 +17,34 @@
 
 鼠标 down/up 继续使用与开源 [QuickInput](https://github.com/ChiyukiGana/Quickinput) 一致的逐事件 `SendInput` 形态。注入启动前会按精确 PID、创建时间和完整路径捕获并停止用户已经运行的 `AHK_F.exe` 或 `quickinput.exe`；注入 helper/Running 屏障与其后的独立五秒延时完成后才按原路径重启。等待被新的游戏生命周期打断时，工具所有权会保留到下一轮而不会提前恢复；若重启后才发生取消，则精确停止新实例并以新 PID/创建时间重新排队。注入失败且没有游戏进程时才恢复原工具。
 
+## 使用
+
+### 首页与托盘启动
+
+主窗口首页提供“注入启动”和“纯净启动”。Win11 通知区域的 Genshin Tools 图标右键菜单也提供同名入口，两处调用完全相同的启动流程、配置校验和运行状态判定。
+
+托盘右键菜单顺序如下：
+
+1. 显示主窗口
+2. 注入启动
+3. 纯净启动
+4. 退出
+
+“注入启动”使用当前已启用且已通过审计的注入模块；“纯净启动”不加载注入模块。如需查看配置不完整、游戏已运行或启动失败等详细状态，可从托盘恢复主窗口查看。
+
+### 构建便携包
+
+构建、校验并生成当前 `VERSION` 对应的 Windows x64 便携 ZIP：
+
+```powershell
+./scripts/test.ps1
+./scripts/build.ps1 -Configuration Both
+./scripts/verify-artifact.ps1
+./scripts/package-portable.ps1
+```
+
+默认输出为 `artifacts/release/GenshinTools-<VERSION>-windows-amd64-portable.zip`，同时生成 SHA-256 校验文件。压缩包可解压到普通可写目录中使用；运行时配置、日志、缓存及模块数据保存在主程序同级的 `data/` 目录。完整工具链与发布规则见 [构建与验证](docs/build.md)。
+
 ## FufuLauncher 致敬与引用
 
 本项目是对 [FufuLauncher/FufuLauncher](https://github.com/FufuLauncher/FufuLauncher) 的独立 Go + Win32 重构。衷心感谢 FufuLauncher Dev Team 及其贡献者公开项目、产品思路和插件生态；本项目的范围梳理、上游行为对照以及插件商店协议适配都以该项目为重要参考。
