@@ -69,7 +69,9 @@ const (
 	trayID          = 1
 	captureHotkeyID = 2001
 	menuShow        = 1001
-	menuExit        = 1002
+	menuInjection   = 1002
+	menuClean       = 1003
+	menuExit        = 1004
 
 	inputRepeatVisible       = 2
 	inputRepeatRecordingBase = 100
@@ -989,12 +991,7 @@ func (app *application) handleMessage(hwnd win32.HWND, message uint32, wParam, l
 		case win32.WM_LBUTTONDBLCLK:
 			app.restore()
 		case win32.WM_RBUTTONUP:
-			switch win32.ShowTrayMenu(hwnd, menuShow, menuExit) {
-			case menuShow:
-				app.restore()
-			case menuExit:
-				app.requestShutdown()
-			}
+			app.dispatchTrayCommand(win32.ShowTrayMenu(hwnd, app.trayMenuItems()))
 		}
 		return 0
 	case win32.WM_MOUSEMOVE:
@@ -1207,6 +1204,48 @@ func (app *application) handleMessage(hwnd win32.HWND, message uint32, wParam, l
 		return 0
 	}
 	return win32.DefWindowProc(hwnd, message, wParam, lParam)
+}
+
+func (app *application) trayMenuItems() []win32.TrayMenuItem {
+	return []win32.TrayMenuItem{
+		{ID: menuShow, Text: app.texts.Text("tray.show")},
+		{Separator: true},
+		{ID: menuInjection, Text: app.texts.Text("home.injectionLaunch")},
+		{ID: menuClean, Text: app.texts.Text("home.cleanLaunch")},
+		{Separator: true},
+		{ID: menuExit, Text: app.texts.Text("tray.exit")},
+	}
+}
+
+type trayCommandHandler struct {
+	run        func(*application)
+	invalidate bool
+}
+
+func trayHandlerForCommand(command uintptr) (trayCommandHandler, bool) {
+	switch command {
+	case menuShow:
+		return trayCommandHandler{run: (*application).restore}, true
+	case menuInjection:
+		return trayCommandHandler{run: (*application).startInjectionLaunch, invalidate: true}, true
+	case menuClean:
+		return trayCommandHandler{run: (*application).startCleanLaunch, invalidate: true}, true
+	case menuExit:
+		return trayCommandHandler{run: (*application).requestShutdown}, true
+	default:
+		return trayCommandHandler{}, false
+	}
+}
+
+func (app *application) dispatchTrayCommand(command uintptr) {
+	handler, ok := trayHandlerForCommand(command)
+	if !ok {
+		return
+	}
+	handler.run(app)
+	if handler.invalidate {
+		win32.Invalidate(app.hwnd)
+	}
 }
 
 func (app *application) addTrayIcon() {

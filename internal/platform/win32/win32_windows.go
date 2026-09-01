@@ -277,6 +277,7 @@ const (
 	NIIF_WARNING         = 0x00000002
 
 	MF_STRING       = 0x0000
+	MF_SEPARATOR    = 0x0800
 	TPM_RIGHTBUTTON = 0x0002
 	TME_LEAVE       = 0x00000002
 	TPM_RETURNCMD   = 0x0100
@@ -842,14 +843,25 @@ func ShowTrayWarning(data NotifyIconData, title, message string) {
 	procShellNotifyIconW.Call(NIM_MODIFY, uintptr(unsafe.Pointer(&data)))
 }
 
-func ShowTrayMenu(hwnd HWND, showID, exitID uintptr) uintptr {
+type TrayMenuItem struct {
+	ID        uintptr
+	Text      string
+	Separator bool
+}
+
+func ShowTrayMenu(hwnd HWND, items []TrayMenuItem) uintptr {
 	menu, _, _ := procCreatePopupMenu.Call()
 	if menu == 0 {
 		return 0
 	}
 	defer procDestroyMenu.Call(menu)
-	procAppendMenuW.Call(menu, MF_STRING, showID, uintptr(unsafe.Pointer(UTF16("显示主窗口"))))
-	procAppendMenuW.Call(menu, MF_STRING, exitID, uintptr(unsafe.Pointer(UTF16("退出"))))
+	for _, item := range items {
+		if item.Separator {
+			procAppendMenuW.Call(menu, MF_SEPARATOR, 0, 0)
+			continue
+		}
+		procAppendMenuW.Call(menu, MF_STRING, item.ID, uintptr(unsafe.Pointer(UTF16(item.Text))))
+	}
 	var point Point
 	procGetCursorPos.Call(uintptr(unsafe.Pointer(&point)))
 	SetForegroundWindow(hwnd)
