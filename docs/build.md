@@ -43,6 +43,13 @@ but different content is rejected instead of overwriting the existing
 candidate. For a new version, the checksum is published before the ZIP so an
 interrupted publish cannot expose an unverified ZIP without its sidecar.
 
+The current verified candidate is
+`artifacts/release/GenshinTools-1.5.6-windows-amd64-portable.zip` (9,676,186
+bytes, 18 entries, SHA-256
+`b7b24cb7a0de39ea4b02972c0539fc3d83bddc6ab851b2cdfea8e5aeed0529fd`).
+Versioned archives belong under `artifacts/release/`; the repository root does
+not retain historical ZIPs or checksum sidecars.
+
 From `1.3.2`, the portable package contains the project-owner supplied legacy
 compiled `AHK_F.exe` and its distribution notice. Binary inspection identifies
 an embedded AutoHotkey v1.0.48.05 runtime, so the package also carries
@@ -102,11 +109,16 @@ Optionally run a one-minute captured soak for each of keyboard/left/right (about
 ./scripts/test-s03-input.ps1 -SoakMinutes 1
 ```
 
-Clean generated artifacts:
+Clean transient build outputs and caches:
 
 ```powershell
 ./scripts/clean.ps1
 ```
+
+This removes `build/`, `dist/`, `.cache/`, `.tmp/` and generated resource
+objects. It intentionally retains verified release ZIPs under `artifacts/`;
+historical release candidates must be removed explicitly after confirming the
+current ZIP and sidecar.
 
 ## Versioning
 
@@ -114,7 +126,7 @@ Clean generated artifacts:
 - `scripts/build.ps1` stamps the same version into Go build information and Windows VERSIONINFO.
 - The numeric Windows file version adds a fourth zero component; `0.1.0` becomes `0.1.0.0`.
 - The Git commit, UTC build time, Go version and target are recorded in `dist/build-info.json`.
-- Set `BUILD_COMMIT` to override the commit identity in source archives without `.git`.
+- `BUILD_COMMIT` is only for a source archive that has no `.git` directory. A release built from a Git worktree must be clean and must use the identity detected by `scripts/build.ps1`; do not override a dirty worktree with `HEAD`.
 - Set `SOURCE_DATE_EPOCH`, or pass `-BuildTimeUtc`, to make the recorded build time deterministic.
 
 Example deterministic invocation:

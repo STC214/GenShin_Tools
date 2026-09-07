@@ -4,6 +4,8 @@
 
 当前正在按照既定顺序实施。项目不会实现米游社/HoYoLAB/BBS、登录与账号切换、抽卡统计、签到、资讯、数据中心、帮助文档、养成计算器、附加程序和内置浏览器等已排除功能。
 
+当前版本为 `1.5.6`，对应产品源码提交 `9c4588a8847a6a850992819aceded3659ee7576c`。最新版便携包固定输出到 `artifacts/release/`，项目根目录不再保留旧版本 ZIP。
+
 ## 许可证
 
 本项目原创代码与文档采用 [MIT License](LICENSE)。第三方依赖、FufuLauncher、商店插件和按需下载的二进制仍分别受其自身许可证约束，详见 [LICENSE_POLICY.md](LICENSE_POLICY.md) 与 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
@@ -16,6 +18,8 @@
 从 1.4.8 起，产品界面和运行链路已停用内置键盘连发。旧配置中的键盘模式会在启动时迁移为禁用的左键连点模式，旧键盘连发开关热键被忽略。1.4.9 起退役的 `GenshinTools-input.exe` 不再构建或进入便携包，升级后首次启动也会清理安装根目录中的同名旧文件。用户不再需要为了 Genshin Tools 的产品功能安装 Interception 驱动。仓库保留旧实现和测试记录仅用于历史审计，不构成可用功能入口。键盘连发只使用便携包内的 `AHK_F.exe`。
 
 鼠标 down/up 继续使用与开源 [QuickInput](https://github.com/ChiyukiGana/Quickinput) 一致的逐事件 `SendInput` 形态。注入启动前会按精确 PID、创建时间和完整路径捕获并停止用户已经运行的 `AHK_F.exe` 或 `quickinput.exe`；注入 helper/Running 屏障与其后的独立五秒延时完成后才按原路径重启。等待被新的游戏生命周期打断时，工具所有权会保留到下一轮而不会提前恢复；若重启后才发生取消，则精确停止新实例并以新 PID/创建时间重新排队。注入失败且没有游戏进程时才恢复原工具。
+
+从 1.5.6 起，停止兼容输入工具时使用同一个已打开进程句柄核验映像路径、创建时间和退出状态，避免 PID 重开及自然退出与 `TerminateProcess` 并发造成的误报。若终止调用返回错误但该句柄已确认退出，则按目标已达成处理；仍在运行时保留原错误。注入审计、启动预检、输入准备及 helper 失败会写入 `data\logs\genshin-tools.log`，后台任务错误包含 `kind`、`taskID` 和完整错误文本。
 
 ## 使用
 
@@ -44,6 +48,8 @@
 ```
 
 默认输出为 `artifacts/release/GenshinTools-<VERSION>-windows-amd64-portable.zip`，同时生成 SHA-256 校验文件。压缩包可解压到普通可写目录中使用；运行时配置、日志、缓存及模块数据保存在主程序同级的 `data/` 目录。完整工具链与发布规则见 [构建与验证](docs/build.md)。
+
+当前候选包为 `GenshinTools-1.5.6-windows-amd64-portable.zip`，大小 `9,676,186` bytes，SHA-256 为 `b7b24cb7a0de39ea4b02972c0539fc3d83bddc6ab851b2cdfea8e5aeed0529fd`，包含 18 个经过 `release.json` 逐项校验的文件。
 
 ## FufuLauncher 致敬与引用
 
@@ -86,16 +92,18 @@
 - [S11 程序设置、语言与 UI 收尾设计](docs/s11-design.md)
 - [S11 程序设置、语言与 UI 收尾验收记录](docs/s11-verification.md)
 - [S12 本程序更新与上游自动对照设计](docs/s12-design.md)
+- [S13 发布回归验证记录](docs/s13-verification.md)
+- [当前全量项目审计](docs/full-audit-s12.md)
 
 ## 当前结论
 
-- 执行顺序：后续代码工作严格按照 `S01`～`S13` 推进；当前 `S00`～`S12` 已完成，最新 scope-v2 上游差异已逐项处置并提升基线，项目级 MIT 许可证已确定，`S13` 全量自动发布矩阵及便携候选 ZIP 已通过。真实游戏/桌面矩阵由项目所有者执行。
+- 执行顺序：`S00`～`S13` 的代码、自动门禁和便携发布链路均已完成；最新 scope-v2 上游差异已逐项处置并提升基线，项目级 MIT 许可证已确定。当前 1.5.6 候选包已通过全仓测试、PE/版本/清单校验、ZIP 重开及 SHA-256 校验；真实游戏/桌面矩阵由项目所有者执行。
 - UI：纯 Windows 原生、简洁暗色、少动画；不复刻上游 WinUI 的复杂视觉层。
 - 输入：内置功能仅保留鼠标左/右键连点及各自独立开关热键；鼠标继续使用逐事件 `SendInput`，每次输出前核对前台游戏窗口，并仅接受路径、PID 与创建时间均已核验的原神进程。键盘连发只由便携包 `AHK_F.exe` 提供，并可选择随游戏启动/关闭。
 - 更新：自动发现和生成上游差异报告，但不自动把上游代码或新功能合入本项目。
 - 稳定性：所有后台工作与 Win32 UI 线程隔离，按专项风险清单逐阶段过门禁。
 - 基线：上游 `master` 固定到已审查的 `5f6af35fcb90807d5db390ed4af58ca09ddd381c`（2026-07-22 UTC）；逐项结论见 `docs/upstream-disposition-2026-07-22.md`。
-- 注入：默认关闭；只接受 `data\injection\modules` 中来源、许可证、SHA-256、PE、文件版本和游戏版本全部匹配的模块，并由独立管理员 helper 重复核验。FuFuPlugin 仅按需下载，不打包进本项目发布物。
+- 注入：默认关闭；只接受 `data\injection\modules` 中来源、许可证、SHA-256、PE、文件版本和游戏版本全部匹配的模块，并由独立管理员 helper 重复核验。兼容工具停止使用单句柄身份校验，所有启动失败均保留结构化日志。FuFuPlugin 仅按需下载，不打包进本项目发布物。
 - 插件生态：商店来源固定为 FufuLauncher 官方服务，不提供自定义目录 URL，也不建设或运营独立插件商店。
 
 

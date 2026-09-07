@@ -49,3 +49,11 @@ go test -race ./internal/injection ./internal/launch ./internal/config ./interna
 S09 自动化退出门禁已关闭，稳定性清单新增 `J13`～`J19` 并在实现中逐项对照。项目未复制、执行或打包上游 `Launcher.dll`/`Launcher_2.exe`，也没有随包第三方注入模块。
 
 真实原神、真实反作弊环境、UAC 人工取消、杀毒软件隔离 helper，以及未来具体第三方模块的兼容/许可证验证保留到 S13；这不影响当前 fail-closed 行为，因为无模块、未知版本或任何预检失败时注入均不可用，纯净启动仍可用。
+
+## 5. 1.5.6 维护复核
+
+- 兼容输入工具的创建时间与映像路径改为从同一个已打开进程句柄读取，消除 PID 重开和 PID 复用窗口。
+- `TerminateProcess` 返回错误后对原句柄执行有界等待；句柄已 signaled 时确认目标自然退出，仍运行时保留终止错误。
+- `TestTerminateCompatibilityProcessAcceptsAccessDeniedAfterNaturalExit` 和 `TestTerminateCompatibilityProcessKeepsAccessDeniedForRunningProcess` 分别锁定两种结果。
+- `TestInjectionLaunchFailureIsPersisted` 重新打开 JSON Lines 日志并核验 `error`、`kind=launch`、`taskID` 字段。
+- 全仓测试、注入/input/shell 定向测试、PE/版本/manifest、真实 helper 请求解析与结果回写均通过。产品源码提交为 `9c4588a8847a6a850992819aceded3659ee7576c`。

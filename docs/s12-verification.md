@@ -31,6 +31,13 @@ scripts/verify-artifact.ps1
 
 仓库不保存发布私钥。Release 构建通过 `GENSHINTOOLS_UPDATE_MANIFEST_URL` 与 `GENSHINTOOLS_UPDATE_PUBLIC_KEYS_BASE64` 注入 URL 和公钥；只配置一项、空 key、非法 key ID 或非 32 字节 key 会在构建前拒绝。未配置时更新功能安全关闭，不下载任何载荷。
 
+## 1.5.6 发布身份复核
+
+- Git 工作树在构建前保持干净，构建脚本自动记录产品提交 `9c4588a8847a`，未使用环境变量覆盖 dirty 身份。
+- 便携 ZIP、`release.json`、每个文件的长度/SHA-256 和外部 sidecar 已重新打开核验。
+- 当前候选固定保存为 `artifacts/release/GenshinTools-1.5.6-windows-amd64-portable.zip`；项目根目录和发布目录中的历史候选均已清理。
+- 当前 ZIP 为 9,676,186 bytes、18 个条目，SHA-256 为 `b7b24cb7a0de39ea4b02972c0539fc3d83bddc6ab851b2cdfea8e5aeed0529fd`，且不包含运行时 `data/`。
+
 ## 未纳入 S12 的验证
 
 真实 Windows 多显示器/DPI 长时间运行、真实游戏输入 soak、休眠唤醒和干净机器首次安装属于 S13 人工门禁；短时自动矩阵已通过，但这些场景尚未执行。

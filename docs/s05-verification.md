@@ -50,7 +50,7 @@ Windows 启动遵守 [CreateProcessW](https://learn.microsoft.com/windows/win32/
 | schema 4 与 UTF-8 BOM 配置 | 通过 |
 | 全项目普通测试与 race | 通过 |
 
-页面截图：[s05-launch.png](../build/s05-launch.png)（`build/` 是本地忽略目录，可由脚本重新生成）。
+页面截图由对应捕获脚本生成到 `build/s05-launch.png`；`build/` 是可再生的本地忽略目录，当前清洁工作树不保留该文件。
 
 ## 发布前复查
 
