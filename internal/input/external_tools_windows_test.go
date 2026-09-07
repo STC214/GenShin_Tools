@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"testing"
@@ -33,6 +34,79 @@ func TestStopExternalCompatibilityToolsRejectsUnverifiableIdentity(t *testing.T)
 	}})
 	if err == nil {
 		t.Fatal("captured tool without a creation time was accepted")
+	}
+}
+
+func TestCompatibilityProcessExitedDistinguishesRunningAndExited(t *testing.T) {
+	command := exec.Command("cmd.exe", "/c", "exit", "0")
+	if err := command.Start(); err != nil {
+		t.Fatal(err)
+	}
+	handle, err := windows.OpenProcess(windows.SYNCHRONIZE, false, uint32(command.Process.Pid))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer windows.CloseHandle(handle)
+	if exited, err := compatibilityProcessExited(handle, 5*time.Second); err != nil || !exited {
+		t.Fatalf("exited process result = %t, %v", exited, err)
+	}
+	_ = command.Process.Release()
+
+	running := exec.Command("cmd.exe", "/c", "ping", "-n", "3", "127.0.0.1", ">nul")
+	if err := running.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = running.Process.Kill(); _, _ = running.Process.Wait() }()
+	runningHandle, err := windows.OpenProcess(windows.SYNCHRONIZE, false, uint32(running.Process.Pid))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer windows.CloseHandle(runningHandle)
+	if exited, err := compatibilityProcessExited(runningHandle, 0); err != nil || exited {
+		t.Fatalf("running process result = %t, %v", exited, err)
+	}
+}
+
+func TestTerminateCompatibilityProcessAcceptsAccessDeniedAfterNaturalExit(t *testing.T) {
+	accessDenied := fmt.Errorf("terminate: %w", windows.ERROR_ACCESS_DENIED)
+	waits := 0
+	err := terminateCompatibilityProcess(123, compatibilityProcessOperations{
+		exited: func(handle windows.Handle, wait time.Duration) (bool, error) {
+			if handle != 123 {
+				t.Fatalf("handle = %d", handle)
+			}
+			waits++
+			if waits == 1 {
+				if wait != 0 {
+					t.Fatalf("initial wait = %s", wait)
+				}
+				return false, nil
+			}
+			if wait != 100*time.Millisecond {
+				t.Fatalf("confirmation wait = %s", wait)
+			}
+			return true, nil
+		},
+		terminate: func(handle windows.Handle, exitCode uint32) error {
+			if handle != 123 || exitCode != 0 {
+				t.Fatalf("terminate arguments = %d, %d", handle, exitCode)
+			}
+			return accessDenied
+		},
+	})
+	if err != nil || waits != 2 {
+		t.Fatalf("natural-exit race result = %v, waits=%d", err, waits)
+	}
+}
+
+func TestTerminateCompatibilityProcessKeepsAccessDeniedForRunningProcess(t *testing.T) {
+	accessDenied := fmt.Errorf("terminate: %w", windows.ERROR_ACCESS_DENIED)
+	err := terminateCompatibilityProcess(123, compatibilityProcessOperations{
+		exited:    func(windows.Handle, time.Duration) (bool, error) { return false, nil },
+		terminate: func(windows.Handle, uint32) error { return accessDenied },
+	})
+	if !errors.Is(err, windows.ERROR_ACCESS_DENIED) {
+		t.Fatalf("running-process error = %v", err)
 	}
 }
 

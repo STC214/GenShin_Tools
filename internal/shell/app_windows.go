@@ -879,6 +879,7 @@ func (app *application) handleMessage(hwnd win32.HWND, message uint32, wParam, l
 					}
 					if update.err != "" {
 						app.injectionStatus = update.err
+						app.logInjectionFailure(update)
 						if update.kind == 1 {
 							app.injectionLaunching = false
 							app.injectionHelperDone = false
@@ -1204,6 +1205,14 @@ func (app *application) handleMessage(hwnd win32.HWND, message uint32, wParam, l
 		return 0
 	}
 	return win32.DefWindowProc(hwnd, message, wParam, lParam)
+}
+
+func (app *application) logInjectionFailure(update injectionUpdate) {
+	kind := "audit"
+	if update.kind == 1 {
+		kind = "launch"
+	}
+	app.logger.Error("injection task failed", map[string]any{"error": update.err, "kind": kind, "taskID": update.taskID})
 }
 
 func (app *application) trayMenuItems() []win32.TrayMenuItem {
@@ -2620,6 +2629,7 @@ func (app *application) startInjectionLaunch() {
 		audit, err := injection.AuditModule(app.layout.Modules, moduleID, candidate)
 		if err != nil {
 			app.injectionStatus = fmt.Sprintf(app.texts.Text("injection.status.launchFailed"), err)
+			app.logger.Error("injection launch preflight failed", map[string]any{"error": err.Error(), "moduleID": moduleID})
 			return
 		}
 		if audit.Manifest.ReadyEvent != "" {
@@ -2627,12 +2637,19 @@ func (app *application) startInjectionLaunch() {
 		}
 	}
 	app.injectionStatus = app.texts.Text("injection.status.starting")
+	app.logger.Info("injection launch started", map[string]any{
+		"elevatedHelper":  settings.ElevatedHelper,
+		"helperTimeoutMS": settings.HelperTimeoutMS,
+		"moduleIDs":       effectiveModuleIDs,
+		"remoteTimeoutMS": settings.RemoteTimeoutMS,
+	})
 	// Remove every launcher-owned hook first, then capture user-owned AHK and
 	// QuickInput instances. The background launch task stops those exact
 	// lifetimes before creating the suspended game, so no repeater can install
 	// ahead of the injected plugin chain.
 	if err := app.holdPostLaunchInputHooks("injection launch starting"); err != nil {
 		app.injectionStatus = fmt.Sprintf(app.texts.Text("injection.status.launchFailed"), err)
+		app.logger.Error("injection launch input preparation failed", map[string]any{"error": err.Error()})
 		if app.inputNative != nil {
 			_ = app.inputNative.SetObservationHooksReady(true)
 		}

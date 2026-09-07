@@ -138,6 +138,10 @@ func queryProcessPath(processID uint32) string {
 		return ""
 	}
 	defer windows.CloseHandle(process)
+	return queryProcessPathHandle(process)
+}
+
+func queryProcessPathHandle(process windows.Handle) string {
 	buffer := make([]uint16, 32768)
 	size := uint32(len(buffer))
 	if err := windows.QueryFullProcessImageName(process, 0, &buffer[0], &size); err != nil || size == 0 {
@@ -607,22 +611,77 @@ func stopCapturedCompatibilityTool(tool ExternalCompatibilityTool) error {
 		return err
 	}
 	defer windows.CloseHandle(process)
-	if tool.CreationTime != 0 && processCreationTime(tool.PID) != tool.CreationTime {
+	creationTime := processCreationTimeHandle(process)
+	if creationTime == 0 {
+		if exited, waitErr := compatibilityProcessExited(process, 0); waitErr == nil && exited {
+			return nil
+		}
+		return errors.New("captured process creation time is unavailable")
+	}
+	if tool.CreationTime != 0 && creationTime != tool.CreationTime {
 		return errors.New("captured PID now belongs to another process")
 	}
-	currentPath := queryProcessPath(tool.PID)
-	if currentPath == "" || !strings.EqualFold(filepath.Clean(currentPath), filepath.Clean(tool.Path)) {
+	currentPath := queryProcessPathHandle(process)
+	if currentPath == "" {
+		if exited, waitErr := compatibilityProcessExited(process, 0); waitErr == nil && exited {
+			return nil
+		}
+		return errors.New("captured process image is unavailable")
+	}
+	if !strings.EqualFold(filepath.Clean(currentPath), filepath.Clean(tool.Path)) {
 		return errors.New("captured process image changed")
 	}
-	if err := windows.TerminateProcess(process, 0); err != nil {
+	// The process can exit naturally after its identity was verified but before
+	// TerminateProcess runs. Windows reports ERROR_ACCESS_DENIED when termination
+	// is requested for an already-terminated process, which used to turn this
+	// harmless race into an injection-launch failure.
+	return terminateCompatibilityProcess(process, compatibilityProcessOperations{
+		exited:    compatibilityProcessExited,
+		terminate: windows.TerminateProcess,
+	})
+}
+
+type compatibilityProcessOperations struct {
+	exited    func(windows.Handle, time.Duration) (bool, error)
+	terminate func(windows.Handle, uint32) error
+}
+
+func terminateCompatibilityProcess(process windows.Handle, operations compatibilityProcessOperations) error {
+	exited, err := operations.exited(process, 0)
+	if err != nil || exited {
 		return err
 	}
-	status, err := windows.WaitForSingleObject(process, uint32((2 * time.Second).Milliseconds()))
+	if terminateErr := operations.terminate(process, 0); terminateErr != nil {
+		exited, waitErr := operations.exited(process, 100*time.Millisecond)
+		if waitErr == nil && exited {
+			return nil
+		}
+		if waitErr != nil {
+			return errors.Join(terminateErr, fmt.Errorf("confirm compatibility process exit: %w", waitErr))
+		}
+		return terminateErr
+	}
+	exited, err = operations.exited(process, 2*time.Second)
 	if err != nil {
 		return err
 	}
-	if status != windows.WAIT_OBJECT_0 {
-		return fmt.Errorf("process did not exit (wait status 0x%08X)", status)
+	if !exited {
+		return errors.New("compatibility process did not exit within 2s")
 	}
 	return nil
+}
+
+func compatibilityProcessExited(process windows.Handle, wait time.Duration) (bool, error) {
+	status, err := windows.WaitForSingleObject(process, uint32(max(wait.Milliseconds(), 0)))
+	if err != nil {
+		return false, err
+	}
+	switch status {
+	case windows.WAIT_OBJECT_0:
+		return true, nil
+	case uint32(windows.WAIT_TIMEOUT):
+		return false, nil
+	default:
+		return false, fmt.Errorf("unexpected compatibility process wait status 0x%08X", status)
+	}
 }

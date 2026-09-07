@@ -657,6 +657,10 @@ func processCreationTime(processID uint32) int64 {
 		return 0
 	}
 	defer windows.CloseHandle(process)
+	return processCreationTimeHandle(process)
+}
+
+func processCreationTimeHandle(process windows.Handle) int64 {
 	var creation, exit, kernel, user windows.Filetime
 	if err := windows.GetProcessTimes(process, &creation, &exit, &kernel, &user); err != nil {
 		return 0
