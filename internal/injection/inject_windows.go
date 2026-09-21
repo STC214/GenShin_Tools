@@ -134,7 +134,7 @@ func injectRemoteDLL(process windows.Handle, processID uint32, dllPath string, d
 		}
 		status, err := windows.WaitForSingleObject(thread, wait)
 		if err != nil {
-			return err
+			return fmt.Errorf("WaitForSingleObject remote loader pid=%d: %w", processID, err)
 		}
 		if status == waitObject0 {
 			break
@@ -143,7 +143,7 @@ func injectRemoteDLL(process windows.Handle, processID uint32, dllPath string, d
 			return fmt.Errorf("unexpected remote thread wait status 0x%08X", status)
 		}
 	}
-	loaded, err := remoteModuleLoaded(processID, dllPath)
+	loaded, err := remoteModuleLoadedUntil(processID, dllPath, deadline)
 	if err != nil {
 		return err
 	}
@@ -154,7 +154,11 @@ func injectRemoteDLL(process windows.Handle, processID uint32, dllPath string, d
 }
 
 func remoteModuleLoaded(pid uint32, dllPath string) (bool, error) {
-	modules, err := loadedModules(pid)
+	return remoteModuleLoadedUntil(pid, dllPath, time.Now().Add(500*time.Millisecond))
+}
+
+func remoteModuleLoadedUntil(pid uint32, dllPath string, deadline time.Time) (bool, error) {
+	modules, err := loadedModules(pid, deadline)
 	if err != nil {
 		return false, err
 	}
@@ -171,18 +175,39 @@ type loadedModule struct {
 	path string
 }
 
-func loadedModules(pid uint32) ([]loadedModule, error) {
+// Snapshot module lists can change while the loader initializes. Retry only
+// ERROR_BAD_LENGTH, retaining the caller's existing injection deadline.
+func moduleSnapshotUntil(pid uint32, deadline time.Time, snapshot func(uint32, uint32) (windows.Handle, error)) (windows.Handle, error) {
+	for attempts := 1; ; attempts++ {
+		handle, err := snapshot(th32csSnapModule|th32csSnapModule32, pid)
+		if err == nil {
+			return handle, nil
+		}
+		remaining := time.Until(deadline)
+		if !errors.Is(err, windows.ERROR_BAD_LENGTH) || remaining <= 0 {
+			return 0, fmt.Errorf("CreateToolhelp32Snapshot pid=%d attempts=%d: %w", pid, attempts, err)
+		}
+		time.Sleep(min(10*time.Millisecond, remaining))
+		if !time.Now().Before(deadline) {
+			return 0, fmt.Errorf("CreateToolhelp32Snapshot pid=%d attempts=%d deadline exceeded: %w", pid, attempts, err)
+		}
+	}
+}
+
+func loadedModules(pid uint32, deadline time.Time) ([]loadedModule, error) {
 	if pid == 0 {
 		return nil, errors.New("game PID is required")
 	}
-	snapshot, err := windows.CreateToolhelp32Snapshot(th32csSnapModule|th32csSnapModule32, pid)
+	snapshot, err := moduleSnapshotUntil(pid, deadline, windows.CreateToolhelp32Snapshot)
 	if err != nil {
 		return nil, err
 	}
 	defer windows.CloseHandle(snapshot)
 	modules := make([]loadedModule, 0, 64)
 	entry := windows.ModuleEntry32{Size: uint32(unsafe.Sizeof(windows.ModuleEntry32{}))}
+	operation := "Module32First"
 	for err = windows.Module32First(snapshot, &entry); err == nil; err = windows.Module32Next(snapshot, &entry) {
+		operation = "Module32Next"
 		path := filepath.Clean(windows.UTF16ToString(entry.ExePath[:]))
 		if path != "." && path != "" {
 			modules = append(modules, loadedModule{path: path})
@@ -191,7 +216,7 @@ func loadedModules(pid uint32) ([]loadedModule, error) {
 	if errors.Is(err, windows.ERROR_NO_MORE_FILES) {
 		return modules, nil
 	}
-	return nil, err
+	return nil, fmt.Errorf("%s pid=%d: %w", operation, pid, err)
 }
 
 // ReadyEventSignaled checks an opt-in module readiness handshake without

@@ -1,14 +1,64 @@
 package injection
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"golang.org/x/sys/windows"
 )
+
+func TestModuleSnapshotRetriesBadLength(t *testing.T) {
+	attempts := 0
+	handle, err := moduleSnapshotUntil(123, time.Now().Add(time.Second), func(flags, pid uint32) (windows.Handle, error) {
+		attempts++
+		if flags != th32csSnapModule|th32csSnapModule32 || pid != 123 {
+			t.Fatalf("unexpected snapshot arguments: flags=%d pid=%d", flags, pid)
+		}
+		if attempts < 3 {
+			return windows.InvalidHandle, windows.ERROR_BAD_LENGTH
+		}
+		return windows.Handle(42), nil
+	})
+	if err != nil || handle != 42 || attempts != 3 {
+		t.Fatalf("handle=%v attempts=%d err=%v", handle, attempts, err)
+	}
+}
+
+func TestModuleSnapshotFailureBoundaries(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		err       error
+		budget    time.Duration
+		wantCalls int
+	}{
+		{"access denied is not retried", windows.ERROR_ACCESS_DENIED, time.Second, 1},
+		{"expired deadline", windows.ERROR_BAD_LENGTH, -time.Second, 1},
+		{"persistent transient error", windows.ERROR_BAD_LENGTH, 25 * time.Millisecond, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			start := time.Now()
+			handle, err := moduleSnapshotUntil(123, start.Add(tc.budget), func(uint32, uint32) (windows.Handle, error) {
+				calls++
+				return windows.InvalidHandle, tc.err
+			})
+			if handle != 0 || !errors.Is(err, tc.err) || !strings.Contains(err.Error(), "CreateToolhelp32Snapshot pid=123 attempts=") {
+				t.Fatalf("handle=%v calls=%d err=%v", handle, calls, err)
+			}
+			if tc.wantCalls > 0 && calls != tc.wantCalls {
+				t.Fatalf("calls=%d want=%d", calls, tc.wantCalls)
+			}
+			if time.Since(start) > time.Second {
+				t.Fatal("snapshot retry exceeded bounded wait")
+			}
+		})
+	}
+}
 
 func TestInjectionFixtureChild(t *testing.T) {
 	if os.Getenv("GENSHINTOOLS_S09_CHILD") != "1" {

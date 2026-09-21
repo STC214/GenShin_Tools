@@ -43,10 +43,14 @@ but different content is rejected instead of overwriting the existing
 candidate. For a new version, the checksum is published before the ZIP so an
 interrupted publish cannot expose an unverified ZIP without its sidecar.
 
-The current verified candidate is
-`artifacts/release/GenshinTools-1.5.6-windows-amd64-portable.zip` (9,676,186
-bytes, 18 entries, SHA-256
-`b7b24cb7a0de39ea4b02972c0539fc3d83bddc6ab851b2cdfea8e5aeed0529fd`).
+The current version's portable archive is
+`artifacts/release/GenshinTools-1.5.7-windows-amd64-portable.zip`.
+Its adjacent `.zip.sha256` file records the archive digest; the embedded
+`release.json` records individual product file sizes and digests, and
+`build-info.json` identifies the clean source commit used for the build.
+Version 1.5.7 adds bounded retries for transient module snapshot failures
+after DLL loading, without retrying unrelated errors or resetting the
+injection timeout budget.
 Versioned archives belong under `artifacts/release/`; the repository root does
 not retain historical ZIPs or checksum sidecars.
 
