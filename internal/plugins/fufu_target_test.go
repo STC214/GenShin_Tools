@@ -102,6 +102,28 @@ func TestLoadFufuTargetConfigAndUpdatePreservesUnknownData(t *testing.T) {
 	}
 }
 
+func TestLoadFufuTargetConfigAcceptsCurrent17Fields(t *testing.T) {
+	directory := t.TempDir()
+	path := filepath.Join(directory, "config.ini")
+	input := "[General]\r\nName=FufuLauncher-Plugin\r\nDescription=游戏7.1 版本1.7.0.0\r\nDeveloper=ME46231\r\nFile=FufuLauncher.UnlockerIsland.dll\r\nVersion=1.7.0\r\n" +
+		"[EnablePaimonFollow]\r\nName=启用派蒙跟随\r\nType=bool\r\nValue=0\r\n" +
+		"[HideProfileUID]\r\nName=隐藏资料页UID\r\nType=bool\r\nValue=0\r\n" +
+		"[RainbowFixedColorIdx]\r\nName=固定颜色索引\r\nType=int\r\nValue=0\r\n"
+	if err := os.WriteFile(path, []byte(input), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	target, err := LoadFufuTargetConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target.Version != "1.7.0" || len(target.Settings) != 3 || len(target.Schema.Fields) != 3 {
+		t.Fatalf("unexpected 1.7 target: %+v", target)
+	}
+	if target.Settings[0].Field.ID != "fufu.enablepaimonfollow" || target.Settings[1].Field.ID != "fufu.hideprofileuid" {
+		t.Fatalf("unexpected 1.7 setting ids: %+v", target.Settings)
+	}
+}
+
 func TestSetFufuTargetEnabledUsesDisabledSuffix(t *testing.T) {
 	directory := t.TempDir()
 	dll := filepath.Join(directory, FufuMainDLL)

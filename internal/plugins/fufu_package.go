@@ -69,7 +69,7 @@ func DownloadFufuPackage(ctx context.Context, client *http.Client, item CatalogI
 // validate the ZIP structure and PE before activation.
 func DownloadFufuMainPackage(ctx context.Context, client *http.Client, destination string) (string, int64, error) {
 	return downloadFufuMainPackage(ctx, client, destination, FufuMainOfficialURL, map[string]bool{
-		"github.com": true, "raw.githubusercontent.com": true,
+		"api.github.com": true, "github.com": true, "raw.githubusercontent.com": true,
 	})
 }
 
@@ -99,7 +99,7 @@ func downloadFufuMainPackage(ctx context.Context, client *http.Client, destinati
 	if err != nil {
 		return "", 0, err
 	}
-	request.Header.Set("Accept", "application/zip, application/octet-stream")
+	request.Header.Set("Accept", "application/vnd.github.raw+json, application/zip, application/octet-stream")
 	request.Header.Set("User-Agent", "GenshinTools-FufuMainAdapter/1")
 	response, err := clientCopy.Do(request)
 	if err != nil {

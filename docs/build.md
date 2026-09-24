@@ -43,14 +43,19 @@ but different content is rejected instead of overwriting the existing
 candidate. For a new version, the checksum is published before the ZIP so an
 interrupted publish cannot expose an unverified ZIP without its sidecar.
 
-The current version's portable archive is
-`artifacts/release/GenshinTools-1.5.7-windows-amd64-portable.zip`.
+The current version's portable archive output path is
+`artifacts/release/GenshinTools-1.6.0-windows-amd64-portable.zip`.
 Its adjacent `.zip.sha256` file records the archive digest; the embedded
 `release.json` records individual product file sizes and digests, and
 `build-info.json` identifies the clean source commit used for the build.
 Version 1.5.7 adds bounded retries for transient module snapshot failures
 after DLL loading, without retrying unrelated errors or resetting the
 injection timeout budget.
+Version 1.6.0 adopts the official FuFuPlugin 1.7.0 package path through the
+GitHub Contents API and re-inspects the selected game immediately before
+plugin repair, compatibility audit and injection launch. A game update that
+finishes while the launcher remains open therefore refreshes the candidate
+instead of reaching the elevated helper with stale version metadata.
 Versioned archives belong under `artifacts/release/`; the repository root does
 not retain historical ZIPs or checksum sidecars.
 

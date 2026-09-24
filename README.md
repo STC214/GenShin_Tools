@@ -4,7 +4,7 @@
 
 当前正在按照既定顺序实施。项目不会实现米游社/HoYoLAB/BBS、登录与账号切换、抽卡统计、签到、资讯、数据中心、帮助文档、养成计算器、附加程序和内置浏览器等已排除功能。
 
-当前版本为 `1.5.7`，对应产品源码提交记录在便携包的 `build-info.json` 中。最新版便携包固定输出到 `artifacts/release/`，项目根目录不再保留旧版本 ZIP。
+当前版本为 `1.6.0`，对应产品源码提交记录在便携包的 `build-info.json` 中。最新版便携包固定输出到 `artifacts/release/`，项目根目录不再保留旧版本 ZIP。
 
 ## 许可证
 
@@ -22,6 +22,8 @@
 从 1.5.6 起，停止兼容输入工具时使用同一个已打开进程句柄核验映像路径、创建时间和退出状态，避免 PID 重开及自然退出与 `TerminateProcess` 并发造成的误报。若终止调用返回错误但该句柄已确认退出，则按目标已达成处理；仍在运行时保留原错误。注入审计、启动预检、输入准备及 helper 失败会写入 `data\logs\genshin-tools.log`，后台任务错误包含 `kind`、`taskID` 和完整错误文本。
 
 从 1.5.7 起，注入 helper 在 DLL 加载后的模块快照检查中，仅对 `ERROR_BAD_LENGTH` 做有截止时间的重试，并复用原注入超时预算。其他错误立即返回；失败日志补充具体 API、PID 和快照尝试次数，避免模块列表瞬时变化被直接判为注入失败。
+
+从 1.6.0 起，FuFuPlugin 下载改用其迁移后的 FufuLauncher 组织仓库与 GitHub Contents API raw 媒体接口，并已用游戏 7.1、FuFuPlugin 1.7.0 官方包完成在线安装审计。插件修复、兼容审计和注入启动都会先重新检查当前游戏路径、版本与渠道，避免启动器跨游戏更新保持运行时继续使用旧候选；刷新后的游戏版本仍必须与插件安装时生成的显式兼容清单一致。
 
 ## 使用
 
@@ -51,7 +53,7 @@
 
 默认输出为 `artifacts/release/GenshinTools-<VERSION>-windows-amd64-portable.zip`，同时生成 SHA-256 校验文件。压缩包可解压到普通可写目录中使用；运行时配置、日志、缓存及模块数据保存在主程序同级的 `data/` 目录。完整工具链与发布规则见 [构建与验证](docs/build.md)。
 
-当前版本便携包为 `GenshinTools-1.5.7-windows-amd64-portable.zip`，SHA-256 见同目录的 `.zip.sha256` 文件；包内 `release.json` 记录各产品文件的大小与校验值。
+当前版本便携包输出名为 `GenshinTools-1.6.0-windows-amd64-portable.zip`，生成后 SHA-256 见同目录的 `.zip.sha256` 文件；包内 `release.json` 记录各产品文件的大小与校验值。
 
 ## FufuLauncher 致敬与引用
 
@@ -61,7 +63,7 @@
 - 插件模块包与商店数据固定使用 FufuLauncher 当前公开的官方来源；本项目不自建、不运营另一套插件商店，也不发布自有商店目录协议。
 - `data\plugins\catalog.json` 只是 Fufu 商店 API 响应的本地校验缓存，不是独立商店或可供第三方托管的目录格式。
 - 插件目录约定参考 Fufu 的开源 [FufuLauncher.UnlockerIsland](https://github.com/FufuLauncher/FufuLauncher.UnlockerIsland)：识别 `Plugins\<id>\config.ini` 的 `File=*.dll`。本项目不复制其 Launcher 二进制，而由现有隔离 helper 在加载前增加路径、ZIP、SHA-256、PE、依赖和当前游戏版本复核。
-- “配置目标”中的 FuFuPlugin 主插件按 Fufu 当前源码声明的 [FuFuPlugin.zip 官方 GitHub 路径](https://github.com/CodeCubist/FufuLauncher--Plugins/blob/main/FuFuPlugin.zip)按需下载，本仓库不随包再分发该二进制。界面读取上游 `config.ini`，一次性生成全部 `bool/int/float/string/key` 配置控件；配置、已安装插件和商店插件列表均使用按条目数量自适应的原生滚动条，并在行间保留小间距。下载/修复、`.dll/.disabled` 启停和注入开关保持功能兼容，但不复刻原界面。
+- “配置目标”中的 FuFuPlugin 主插件按 Fufu 当前源码声明的 [FuFuPlugin.zip 官方 GitHub 路径](https://github.com/FufuLauncher/FufuLauncher--Plugins/blob/main/FuFuPlugin.zip)按需下载，本仓库不随包再分发该二进制。界面读取上游 `config.ini`，一次性生成全部 `bool/int/float/string/key` 配置控件；配置、已安装插件和商店插件列表均使用按条目数量自适应的原生滚动条，并在行间保留小间距。下载/修复、`.dll/.disabled` 启停和注入开关保持功能兼容，但不复刻原界面。
 - 主插件包没有随 Fufu 商店 API 提供固定 SHA-256；本项目会记录每次实际下载的 SHA-256，并在激活前执行受限 ZIP、amd64 PE、依赖和当前游戏兼容审计。其二进制授权不能由 FufuLauncher 主仓库的 MIT 许可证推定，本地标记为 `UNSPECIFIED-FUFU-BUNDLE`。
 - FuFuPlugin 修复会迁移新旧 INI 中仍兼容的用户配置，新字段采用上游默认值；同一语义版本的不同包内容使用独立修订指纹参与事务恢复和回滚。商店依赖必须先使用依赖插件自己的验证令牌完成审计安装，程序不会把某个插件的令牌转发给其他依赖包。
 - 人机验证使用系统默认浏览器打开 Fufu 官方验证页；项目仍不嵌入浏览器。用户可粘贴验证页返回的 `dl_token` 或完整 JSON，令牌只在内存中使用且不会保存。
@@ -76,6 +78,7 @@
 - [功能范围矩阵](docs/upstream-scope-matrix.md)
 - [Go + Win32 稳定性风险与验收清单](docs/go-win32-stability-checklist.md)
 - [上游自动对照方案](docs/upstream-sync-plan.md)
+- [2026-09-24 FuFuPlugin 1.7.0 聚焦采用记录](docs/upstream-adoption-2026-09-24.md)
 - [上游基线锁定文件](upstream.lock.json)
 - [构建与验证](docs/build.md)
 - [S01 验收记录](docs/s01-verification.md)
@@ -99,7 +102,7 @@
 
 ## 当前结论
 
-- 执行顺序：`S00`～`S13` 的代码、自动门禁和便携发布链路均已完成；最新 scope-v2 上游差异已逐项处置并提升基线，项目级 MIT 许可证已确定。1.5.7 包含注入模块快照重试修复，发布门禁包括全仓测试、PE/版本/清单校验、ZIP 重开及 SHA-256 校验；真实游戏/桌面矩阵由项目所有者执行。
+- 执行顺序：`S00`～`S13` 的代码、自动门禁和便携发布链路均已完成；最新 scope-v2 上游差异已逐项处置并提升基线，项目级 MIT 许可证已确定。1.6.0 对接 FuFuPlugin 1.7.0 官方包、迁移 GitHub 下载端点并在插件操作前刷新游戏候选；发布门禁包括全仓测试、PE/版本/清单校验、ZIP 重开及 SHA-256 校验；真实游戏/桌面矩阵由项目所有者执行。
 - UI：纯 Windows 原生、简洁暗色、少动画；不复刻上游 WinUI 的复杂视觉层。
 - 输入：内置功能仅保留鼠标左/右键连点及各自独立开关热键；鼠标继续使用逐事件 `SendInput`，每次输出前核对前台游戏窗口，并仅接受路径、PID 与创建时间均已核验的原神进程。键盘连发只由便携包 `AHK_F.exe` 提供，并可选择随游戏启动/关闭。
 - 更新：自动发现和生成上游差异报告，但不自动把上游代码或新功能合入本项目。

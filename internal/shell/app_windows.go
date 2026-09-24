@@ -2448,9 +2448,17 @@ func (app *application) startFufuMainRepair() {
 		app.injectionStatus = app.pluginStatus
 		return
 	}
+	candidate, changed, err := refreshInjectionCandidate(*app.gameState.Candidate)
+	if err != nil {
+		app.injectionStatus = fmt.Sprintf(app.texts.Text("fufu.status.repairFailed"), err)
+		return
+	}
+	if changed {
+		app.logRefreshedInjectionCandidate(*app.gameState.Candidate, candidate)
+		app.gameState.Candidate = &candidate
+	}
 	state := plugins.CloneState(app.pluginState)
 	layout := app.pluginLayout
-	candidate := *app.gameState.Candidate
 	texts := app.texts
 	app.pluginBusy = true
 	app.injectionStatus = app.texts.Text("fufu.status.downloading")
@@ -2567,8 +2575,16 @@ func (app *application) startInjectionAudit() {
 		app.injectionStatus = app.texts.Text("injection.status.auditNeedGame")
 		return
 	}
+	candidate, changed, err := refreshInjectionCandidate(*app.gameState.Candidate)
+	if err != nil {
+		app.injectionStatus = fmt.Sprintf(app.texts.Text("injection.status.auditFailed"), err)
+		return
+	}
+	if changed {
+		app.logRefreshedInjectionCandidate(*app.gameState.Candidate, candidate)
+		app.gameState.Candidate = &candidate
+	}
 	app.tasks.Cancel(app.injectionAuditTask)
-	candidate := *app.gameState.Candidate
 	app.injectionStatus = app.texts.Text("injection.status.auditing")
 	texts := app.texts
 	app.injectionAuditTask = app.tasks.Run(func(ctx context.Context, id uint64) {
@@ -2602,6 +2618,16 @@ func (app *application) startInjectionLaunch() {
 	if !app.commitInjectionSettings(app.settings.Injection) {
 		return
 	}
+	candidate, changed, err := refreshInjectionCandidate(*app.gameState.Candidate)
+	if err != nil {
+		app.injectionStatus = fmt.Sprintf(app.texts.Text("injection.status.launchFailed"), err)
+		app.logger.Error("injection game refresh failed", map[string]any{"error": err.Error()})
+		return
+	}
+	if changed {
+		app.logRefreshedInjectionCandidate(*app.gameState.Candidate, candidate)
+		app.gameState.Candidate = &candidate
+	}
 	settings := app.settings.Injection
 	launchSettings := explicitLaunchConfig(app.settings.Launch)
 	available := make(map[string]bool, len(app.pluginItems))
@@ -2619,7 +2645,6 @@ func (app *application) startInjectionLaunch() {
 	}
 	app.tasks.Cancel(app.injectionAuditTask)
 	app.tasks.Cancel(app.injectionLaunchTask)
-	candidate := *app.gameState.Candidate
 	effectiveModuleIDs := append([]string(nil), moduleIDs...)
 	if len(effectiveModuleIDs) == 0 && settings.ModuleID != "" {
 		effectiveModuleIDs = append(effectiveModuleIDs, settings.ModuleID)
@@ -2683,6 +2708,28 @@ func (app *application) startInjectionLaunch() {
 			update.err = fmt.Sprintf(texts.Text("injection.status.launchFailed"), err)
 		}
 		app.publishInjection(update)
+	})
+}
+
+func refreshInjectionCandidate(previous game.Candidate) (game.Candidate, bool, error) {
+	current, err := game.InspectRoot(previous.Root, previous.ExeName)
+	if err != nil {
+		return game.Candidate{}, false, fmt.Errorf("refresh game candidate: %w", err)
+	}
+	changed := !strings.EqualFold(filepath.Clean(previous.Root), filepath.Clean(current.Root)) ||
+		!strings.EqualFold(filepath.Clean(previous.Executable), filepath.Clean(current.Executable)) ||
+		!strings.EqualFold(previous.ExeName, current.ExeName) ||
+		previous.Version != current.Version || previous.Server != current.Server
+	return current, changed, nil
+}
+
+func (app *application) logRefreshedInjectionCandidate(previous, current game.Candidate) {
+	app.logger.Info("game candidate refreshed before plugin operation", map[string]any{
+		"executable":      current.Executable,
+		"previousServer":  previous.Server.String(),
+		"previousVersion": previous.Version,
+		"server":          current.Server.String(),
+		"version":         current.Version,
 	})
 }
 

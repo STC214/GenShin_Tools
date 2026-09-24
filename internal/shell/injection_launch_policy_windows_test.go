@@ -1,8 +1,11 @@
 package shell
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
+	"genshintools/internal/game"
 	"genshintools/internal/launch"
 )
 
@@ -39,5 +42,41 @@ func TestLaunchBusyCoversHelperStartingAndRunningStates(t *testing.T) {
 	}
 	if (&application{}).launchBusy() {
 		t.Fatal("idle application was treated as launch-busy")
+	}
+}
+
+func TestRefreshInjectionCandidateDetectsGameUpdate(t *testing.T) {
+	root := t.TempDir()
+	executable := filepath.Join(root, "YuanShen.exe")
+	configPath := filepath.Join(root, "config.ini")
+	if err := os.WriteFile(executable, []byte("fixture"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeConfig := func(version string) {
+		t.Helper()
+		data := []byte("[General]\r\ngame_version=" + version + "\r\nchannel=1\r\n")
+		if err := os.WriteFile(configPath, data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeConfig("7.0.0")
+	previous, err := game.InspectRoot(root, "YuanShen.exe")
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeConfig("7.1.0")
+	current, changed, err := refreshInjectionCandidate(previous)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !changed || current.Version != "7.1.0" || current.Server != game.ServerCNOfficial {
+		t.Fatalf("refreshed candidate = %+v, changed=%v", current, changed)
+	}
+	stable, changed, err := refreshInjectionCandidate(current)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changed || stable.Version != current.Version {
+		t.Fatalf("stable refresh = %+v, changed=%v", stable, changed)
 	}
 }

@@ -13,9 +13,9 @@ const (
 	FufuMainTargetID      = "fufuplugin"
 	FufuMainTargetFolder  = "FuFuPlugin"
 	FufuMainDLL           = "FufuLauncher.UnlockerIsland.dll"
-	FufuMainOfficialURL   = "https://github.com/CodeCubist/FufuLauncher--Plugins/blob/main/FuFuPlugin.zip?raw=true"
+	FufuMainOfficialURL   = "https://api.github.com/repos/FufuLauncher/FufuLauncher--Plugins/contents/FuFuPlugin.zip?ref=main"
 	FufuMainSourceURL     = "https://github.com/FufuLauncher/FufuLauncher"
-	FufuMainPackageSource = "https://github.com/CodeCubist/FufuLauncher--Plugins"
+	FufuMainPackageSource = "https://github.com/FufuLauncher/FufuLauncher--Plugins"
 )
 
 var fufuFieldIDPart = regexp.MustCompile(`[^a-z0-9._-]+`)
