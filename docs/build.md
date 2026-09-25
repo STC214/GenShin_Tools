@@ -44,7 +44,7 @@ candidate. For a new version, the checksum is published before the ZIP so an
 interrupted publish cannot expose an unverified ZIP without its sidecar.
 
 The current version's portable archive output path is
-`artifacts/release/GenshinTools-1.6.0-windows-amd64-portable.zip`.
+`artifacts/release/GenshinTools-1.6.1-windows-amd64-portable.zip`.
 Its adjacent `.zip.sha256` file records the archive digest; the embedded
 `release.json` records individual product file sizes and digests, and
 `build-info.json` identifies the clean source commit used for the build.
