@@ -124,6 +124,45 @@ func TestLoadFufuTargetConfigAcceptsCurrent17Fields(t *testing.T) {
 	}
 }
 
+func TestLoadFufuTargetConfigAcceptsLatest171CameraSettings(t *testing.T) {
+	directory := t.TempDir()
+	path := filepath.Join(directory, "config.ini")
+	input := "[General]\r\nName=FufuLauncher-Plugin\r\nDescription=game 7.1 build 1.7.0.1\r\nDeveloper=ME46231\r\nFile=FufuLauncher.UnlockerIsland.dll\r\nVersion=1.7.0\r\n" +
+		"[EnableCameraOffset]\r\nName=Enable camera offset\r\nType=bool\r\nValue=0\r\n" +
+		"[CameraOffsetX]\r\nName=Camera offset X\r\nType=float\r\nValue=0\r\n" +
+		"[CameraOffsetZ]\r\nName=Camera offset Z\r\nType=float\r\nValue=0\r\n" +
+		"[CameraOffsetY]\r\nName=Camera offset Y\r\nType=float\r\nValue=0\r\n" +
+		"[EnableFreeCam]\r\nName=Enable free camera\r\nType=bool\r\nValue=0\r\n" +
+		"[FreeCamKey]\r\nName=Free camera toggle key\r\nType=key\r\nValue=45\r\n" +
+		"[FreeCamLockKey]\r\nName=Free camera lock key\r\nType=key\r\nValue=46\r\n" +
+		"[FreeCamMoveSpeed]\r\nName=Free camera speed\r\nType=string\r\nValue=8.00\r\n" +
+		"[FreeCamSprintMult]\r\nName=Free camera acceleration\r\nType=string\r\nValue=3.00\r\n" +
+		"[FreeCamMouseSensitivity]\r\nName=Free camera sensitivity\r\nType=string\r\nValue=0.12\r\n"
+	if err := os.WriteFile(path, []byte(input), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	target, err := LoadFufuTargetConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target.Version != "1.7.0" || len(target.Settings) != 10 {
+		t.Fatalf("unexpected 1.7.0.1 camera settings: version=%s settings=%d", target.Version, len(target.Settings))
+	}
+	ids := make(map[string]bool, len(target.Schema.Fields))
+	for _, field := range target.Schema.Fields {
+		ids[field.ID] = true
+	}
+	for _, id := range []string{
+		"fufu.enablecameraoffset", "fufu.cameraoffsetx", "fufu.cameraoffsetz", "fufu.cameraoffsety",
+		"fufu.enablefreecam", "fufu.freecamkey", "fufu.freecamlockkey", "fufu.freecammovespeed",
+		"fufu.freecamsprintmult", "fufu.freecammousesensitivity",
+	} {
+		if !ids[id] {
+			t.Errorf("upstream setting %q was not recognized", id)
+		}
+	}
+}
+
 func TestSetFufuTargetEnabledUsesDisabledSuffix(t *testing.T) {
 	directory := t.TempDir()
 	dll := filepath.Join(directory, FufuMainDLL)

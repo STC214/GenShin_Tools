@@ -42,3 +42,22 @@
   game 7.0 to 7.1 candidate refresh.
 - `GENSHINTOOLS_LIVE_FUFU_MAIN=1` validates download and installation of the
   current official bundle without executing its DLL.
+
+## Follow-up: FuFuPlugin 1.7.0.1 bundle (2026-09-25)
+
+- FufuLauncher release `1.7.0.1` was published at
+  `https://github.com/FufuLauncher/FufuLauncher/releases/tag/1.7.0.1`.
+- The plugin bundle changed at repository commit
+  `8c14463fba916c03a6bd6f1d1f8b1ef61392e16e`; its ZIP is 194,717 bytes with
+  SHA-256 `c655ef59c01e151285947a5151a47ff95e1c7cc41609df34283346785e934ed4`.
+- Bundle metadata is game `7.1`, plugin `1.7.0`, build description `1.7.0.1`.
+  The ten new INI sections cover camera offset (enable and X/Y/Z) and free
+  camera (enable, toggle/lock keys, movement speed, sprint multiplier, and
+  mouse sensitivity).
+- No production code change was needed: `LoadFufuTargetConfig` derives the UI
+  schema from the package INI, and the existing typed editor supports the new
+  `bool`, `float`, `key`, and `string` fields. A regression test now covers all
+  ten sections; the live package-download/install test also passed against the
+  current official ZIP without loading or executing its DLL.
+- The launcher release's background-media download UI is not part of this
+  project's FuFuPlugin integration and was not copied into the project.
