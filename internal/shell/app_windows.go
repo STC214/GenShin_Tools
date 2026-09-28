@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
 	"strconv"
@@ -80,6 +81,8 @@ const (
 )
 
 var active *application
+
+var fufuBuildVersionPattern = regexp.MustCompile(`\b[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+\b`)
 
 type application struct {
 	hwnd        win32.HWND
@@ -3681,6 +3684,21 @@ func (app *application) paintPlugins(dc win32.HDC, client win32.Rect, left int32
 	}
 }
 
+func fufuPluginSelectorText(format, notInstalled string, target plugins.FufuTargetConfig, installed bool) string {
+	if !installed {
+		return fmt.Sprintf(format, notInstalled)
+	}
+	label := fmt.Sprintf(format, fmt.Sprintf("%s  |  %s", target.Name, target.Developer))
+	version := target.Version
+	if matches := fufuBuildVersionPattern.FindAllString(target.Description, -1); len(matches) > 0 {
+		version = matches[len(matches)-1]
+	}
+	if version == "" {
+		return label
+	}
+	return version + "  |  " + label
+}
+
 func (app *application) paintFufuConfig(dc win32.HDC, client win32.Rect, left int32) {
 	cardBrush := win32.CreateSolidBrush(win32.Color(25, 29, 39))
 	defer win32.DeleteObject(uintptr(cardBrush))
@@ -3697,15 +3715,11 @@ func (app *application) paintFufuConfig(dc win32.HDC, client win32.Rect, left in
 		rect.Right -= win32.Scale(12, app.dpi)
 		win32.DrawText(dc, value, &rect, win32.DT_LEFT|win32.DT_VCENTER|win32.DT_SINGLELINE|win32.DT_END_ELLIPSIS)
 	}
-	targetName := app.texts.Text("fufu.target.notInstalled")
-	if app.fufuTargetInstalled {
-		targetName = fmt.Sprintf("%s  |  %s  |  %s", app.fufuTarget.Name, app.fufuTarget.Version, app.fufuTarget.Developer)
-	}
 	selectorRect, repairRect, toggleRect := fufuHeaderRects(left, right, app.pluginContentY(170), app.pluginContentY(224), app.dpi)
 	app.paintStaticSurface(dc, selectorRect, cardBrush)
 	app.paintButtonSurface(dc, repairRect, accentBrush)
 	app.paintButtonSurface(dc, toggleRect, warningBrush)
-	draw(fmt.Sprintf(app.texts.Text("fufu.target.selector"), targetName), selectorRect, win32.Color(235, 238, 248))
+	draw(fufuPluginSelectorText(app.texts.Text("fufu.target.selector"), app.texts.Text("fufu.target.notInstalled"), app.fufuTarget, app.fufuTargetInstalled), selectorRect, win32.Color(235, 238, 248))
 	draw(app.texts.Text("fufu.target.repair"), repairRect, win32.Color(225, 229, 242))
 	draw(fmt.Sprintf(app.texts.Text("fufu.target.injection"), onOffText(app.texts.Language(), app.fufuTargetEnabled && app.settings.Injection.Enabled)), toggleRect, win32.Color(255, 205, 150))
 	for visible := 0; visible < fufuVisibleRows; visible++ {

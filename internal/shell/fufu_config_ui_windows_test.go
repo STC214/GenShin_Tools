@@ -1,6 +1,7 @@
 package shell
 
 import (
+	"strings"
 	"testing"
 
 	"genshintools/internal/plugins"
@@ -53,5 +54,24 @@ func TestFufuHeaderActionUsesHorizontalDPIScaling(t *testing.T) {
 	}
 	if pointInButton(repair, repair.Left-1, 200) || pointInButton(toggle, toggle.Left-1, 200) {
 		t.Fatalf("header visual gaps must not activate an action: repair=%+v toggle=%+v", repair, toggle)
+	}
+}
+
+func TestFufuPluginSelectorShowsFullBuildVersionFirst(t *testing.T) {
+	format := "配置目标：FuFuPlugin（主插件）  |  %s"
+	target := plugins.FufuTargetConfig{
+		Name: "FufuLauncher-Plugin", Description: "9月25号构建版本 游戏7.1 版本1.7.0.2",
+		Version: "1.7.0", Developer: "ME46231",
+	}
+	want := "1.7.0.2  |  配置目标：FuFuPlugin（主插件）  |  FufuLauncher-Plugin  |  ME46231"
+	if got := fufuPluginSelectorText(format, "未安装", target, true); got != want {
+		t.Fatalf("selector text = %q, want %q", got, want)
+	}
+	target.Description = "build without a full version"
+	if got := fufuPluginSelectorText(format, "未安装", target, true); !strings.HasPrefix(got, "1.7.0  |  ") {
+		t.Fatalf("selector did not fall back to the plugin version: %q", got)
+	}
+	if got := fufuPluginSelectorText(format, "未安装", target, false); got != "配置目标：FuFuPlugin（主插件）  |  未安装" {
+		t.Fatalf("uninstalled selector text = %q", got)
 	}
 }

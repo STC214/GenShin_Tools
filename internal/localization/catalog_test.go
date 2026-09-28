@@ -48,3 +48,12 @@ func TestMissingKeyFallsBackToKey(t *testing.T) {
 		t.Fatalf("missing key = %q", got)
 	}
 }
+
+func TestFufuRepairButtonUsesActionOnly(t *testing.T) {
+	if got := New(ZH, "").Text("fufu.target.repair"); got != "下载/修复" {
+		t.Fatalf("Chinese repair button = %q", got)
+	}
+	if got := New(EN, "").Text("fufu.target.repair"); got != "Download/Repair" {
+		t.Fatalf("English repair button = %q", got)
+	}
+}
