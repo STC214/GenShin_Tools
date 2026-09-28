@@ -61,3 +61,30 @@
   current official ZIP without loading or executing its DLL.
 - The launcher release's background-media download UI is not part of this
   project's FuFuPlugin integration and was not copied into the project.
+
+## Follow-up: FuFuPlugin 1.7.0.2 bundle (2026-09-28)
+
+- FufuLauncher released `1.7.0.2` on 2026-09-26 to address plugin performance
+  and monitor ordering. The public plugin ZIP changed at commit
+  `400e52343a0435c379c9c539fc10f7f01febb9fd` and is 194,972 bytes,
+  SHA-256 `2d92b407b1eff7020e9d4df628d4af4bc127358770f36bcd7c082189325864f6`.
+- The ZIP still contains only `config.ini` and
+  `FufuLauncher.UnlockerIsland.dll`. Its 53 INI sections and plugin version
+  `1.7.0` are unchanged from build `1.7.0.1`; the description now identifies
+  build `1.7.0.2`. The DLL SHA-256 changed from
+  `ed7b7a6c8d938188152ea887d7a84b816efc07a54f3eb9244f6a86c68646eaea`
+  to `fd2f0b2686c165a4a9b8acd2d8862ed59e18102937090e5d53afc5c5c52bcf69`.
+- The existing official-URL downloader already acquires the replacement ZIP;
+  the transactional installer keys rollback by content revision rather than
+  only by the unchanged plugin version. A live regression test pins both
+  released ZIP hashes and verifies install, same-version replacement, and
+  rollback without executing either DLL.
+- Source commits after the release add `PreventDetectionPopup` to the launcher
+  repository's INI, but this field is absent from the published ZIP. The
+  dynamic INI adapter will accept it when a bundle includes it; no unreleased
+  default is introduced locally.
+- Upstream's separate Yae injector now enumerates the full x64 remote module
+  path rather than using a truncated thread exit code. This project already
+  verifies the loaded module by ToolHelp path under its injection deadline, so
+  no injection code is copied. Launcher UI, account, and monitor-ordering code
+  remain outside the FuFuPlugin package contract.

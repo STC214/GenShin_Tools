@@ -75,6 +75,76 @@ func TestLiveFufuMainPackageDownloadAndInstall(t *testing.T) {
 	}
 }
 
+func TestLiveFufuMainSameVersionBuildReplacementAndRollback(t *testing.T) {
+	if os.Getenv("GENSHINTOOLS_LIVE_FUFU_MAIN") != "1" {
+		t.Skip("set GENSHINTOOLS_LIVE_FUFU_MAIN=1 to audit released Fufu main bundle revisions")
+	}
+	root := t.TempDir()
+	modules := filepath.Join(root, "modules")
+	layout, err := NewLayout(filepath.Join(root, "data"), modules)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := layout.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	gameRoot := filepath.Join(root, "game")
+	if err := os.MkdirAll(gameRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	executable := filepath.Join(gameRoot, "YuanShen.exe")
+	testExecutable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	copyFileForPluginTest(t, testExecutable, executable)
+	candidate := game.Candidate{Root: gameRoot, Executable: executable, ExeName: "YuanShen.exe", Version: "live-audit"}
+	state := DefaultState()
+	builds := []struct {
+		ref         string
+		sha256      string
+		description string
+	}{
+		{"8c14463fba916c03a6bd6f1d1f8b1ef61392e16e", "c655ef59c01e151285947a5151a47ff95e1c7cc41609df34283346785e934ed4", "1.7.0.1"},
+		{"400e52343a0435c379c9c539fc10f7f01febb9fd", "2d92b407b1eff7020e9d4df628d4af4bc127358770f36bcd7c082189325864f6", "1.7.0.2"},
+	}
+	var previousRevision string
+	for index, build := range builds {
+		endpoint := "https://api.github.com/repos/FufuLauncher/FufuLauncher--Plugins/contents/FuFuPlugin.zip?ref=" + build.ref
+		packagePath := filepath.Join(layout.Staging, build.description+".zip")
+		hash, _, err := downloadFufuMainPackage(t.Context(), nil, packagePath, endpoint, map[string]bool{"api.github.com": true, "github.com": true, "raw.githubusercontent.com": true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if hash != build.sha256 {
+			t.Fatalf("released %s package SHA-256 = %s, want %s", build.description, hash, build.sha256)
+		}
+		result, err := InstallFufuMainPackage(t.Context(), packagePath, layout, candidate, &state)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if result.Manifest.Version != "1.7.0" || !strings.Contains(result.Manifest.Description, build.description) {
+			t.Fatalf("unexpected released bundle metadata: %+v", result.Manifest)
+		}
+		revision := state.Installed[FufuMainTargetID].ActiveRevision
+		if index == 0 {
+			previousRevision = revision
+		} else if revision == previousRevision || !containsExact(state.Installed[FufuMainTargetID].RollbackVersions, previousRevision) {
+			t.Fatalf("same-version bundle replacement lost the prior revision: %+v", state.Installed[FufuMainTargetID])
+		}
+	}
+	if _, err := Rollback(t.Context(), layout, &state, FufuMainTargetID, previousRevision, candidate); err != nil {
+		t.Fatal(err)
+	}
+	target, err := LoadFufuTargetConfig(filepath.Join(modules, FufuMainTargetID, "config.ini"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Installed[FufuMainTargetID].ActiveRevision != previousRevision || !strings.Contains(target.Description, "1.7.0.1") {
+		t.Fatalf("rollback did not restore the previous released build: state=%+v description=%q", state.Installed[FufuMainTargetID], target.Description)
+	}
+}
+
 func TestLoadFufuTargetConfigAndUpdatePreservesUnknownData(t *testing.T) {
 	directory := t.TempDir()
 	path := filepath.Join(directory, "config.ini")
