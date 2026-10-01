@@ -107,6 +107,7 @@ func TestLiveFufuMainSameVersionBuildReplacementAndRollback(t *testing.T) {
 	}{
 		{"8c14463fba916c03a6bd6f1d1f8b1ef61392e16e", "c655ef59c01e151285947a5151a47ff95e1c7cc41609df34283346785e934ed4", "1.7.0.1"},
 		{"400e52343a0435c379c9c539fc10f7f01febb9fd", "2d92b407b1eff7020e9d4df628d4af4bc127358770f36bcd7c082189325864f6", "1.7.0.2"},
+		{"254961f42c34362e4557315052b40b7375fc71d2", "a0ade0ba0d75f02bfbf84d9ad157f36315b25815aef7c5d65ec30c8724fa601a", "1.7.0.3"},
 	}
 	var previousRevision string
 	for index, build := range builds {
@@ -125,6 +126,27 @@ func TestLiveFufuMainSameVersionBuildReplacementAndRollback(t *testing.T) {
 		}
 		if result.Manifest.Version != "1.7.0" || !strings.Contains(result.Manifest.Description, build.description) {
 			t.Fatalf("unexpected released bundle metadata: %+v", result.Manifest)
+		}
+		if build.description == "1.7.0.3" {
+			target, err := LoadFufuTargetConfig(filepath.Join(modules, FufuMainTargetID, "config.ini"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(target.Settings) != 58 {
+				t.Fatalf("1.7.0.3 has %d settings, want 58", len(target.Settings))
+			}
+			for _, id := range []string{"fufu.preventdetectionpopup", "fufu.resinitem000106", "fufu.resinitem000201", "fufu.resinitem107009", "fufu.resinitem107012", "fufu.resinitem220007"} {
+				found := false
+				for _, setting := range target.Settings {
+					if setting.Field.ID == id && setting.Field.Type == "bool" && setting.Field.Default == "1" {
+						found = true
+						break
+					}
+				}
+				if !found {
+					t.Fatalf("1.7.0.3 setting %s missing or has unexpected default", id)
+				}
+			}
 		}
 		revision := state.Installed[FufuMainTargetID].ActiveRevision
 		if index == 0 {

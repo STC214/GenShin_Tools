@@ -88,3 +88,26 @@
   verifies the loaded module by ToolHelp path under its injection deadline, so
   no injection code is copied. Launcher UI, account, and monitor-ordering code
   remain outside the FuFuPlugin package contract.
+
+## Follow-up: FuFuPlugin 1.7.0.3 bundle (2026-10-01)
+
+- FufuLauncher published release `1.7.0.3` on 2026-10-01. The public plugin
+  repository's `main` commit `254961f42c34362e4557315052b40b7375fc71d2`
+  replaced the four published ZIP variants; this project continues to download
+  only the official `FuFuPlugin.zip` at the existing Contents API URL.
+- The new ZIP is 196,336 bytes, SHA-256
+  `a0ade0ba0d75f02bfbf84d9ad157f36315b25815aef7c5d65ec30c8724fa601a`.
+  It still contains only `config.ini` and `FufuLauncher.UnlockerIsland.dll`.
+  The DLL SHA-256 is
+  `690485c04321c18913a04b88e2b2e7a30f939f105c45f068d033efc57fb14b83`.
+- The INI retains plugin version `1.7.0` and game version `7.1`, but its build
+  description is `1.7.0.3`. It has 59 sections (58 settings): six new default-on
+  `bool` fields are `PreventDetectionPopup` and five `ResinItem*` options.
+  The existing dynamic INI adapter and same-version content-revision rollback
+  require no runtime change. The live regression now checks the new bundle hash,
+  installation, all six new fields, replacement, and rollback without loading
+  the DLL.
+- The launcher tag comparison from `1.7.0.2` to `1.7.0.3` also includes UI,
+  account/community, installer, and update-notice changes outside this
+  project's FuFuPlugin integration. The repository-wide baseline is unchanged:
+  its older compare still exceeds GitHub's 300-file response cap.
