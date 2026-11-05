@@ -3,6 +3,7 @@ param(
     [ValidateRange(1, 25)]
     [int]$ShellIterations = 10,
     [switch]$SkipOnlineProvider,
+    [switch]$BackgroundOnly,
     [string]$BuildTimeUtc
 )
 
@@ -67,6 +68,7 @@ function Write-S13Report {
         shellIterations = $ShellIterations
         buildTimeUtc = $BuildTimeUtc
         onlineProviderSkipped = [bool]$SkipOnlineProvider
+        backgroundOnly = [bool]$BackgroundOnly
         results = $Results
         manualGates = @(
             'real game input and anti-cheat compatibility',
@@ -92,19 +94,26 @@ function Assert-S13EnvironmentRestored {
 
 Push-Location $ProjectRoot
 try {
-    Invoke-S13Step 'full source, race, formatting and vet gate' { & .\scripts\test.ps1 -Race }
+    Invoke-S13Step 'source, race, formatting and vet gate' { & .\scripts\test.ps1 -Race -BackgroundOnly:$BackgroundOnly }
     Invoke-S13Step 'clean deterministic Debug/Release/helper/updater build' { & .\scripts\build.ps1 -Configuration Both -BuildTimeUtc $BuildTimeUtc }
     Invoke-S13Step 'PE version, icon, subsystem and portable layout audit' { & .\scripts\verify-artifact.ps1 }
-    Invoke-S13Step 'Win32 shell lifecycle and short close stress' { & .\scripts\test-s02-shell.ps1 -StressIterations $ShellIterations }
-    Invoke-S13Step 'captured Interception keyboard worker/QuickInput-style mouse and hook lifecycle' { & .\scripts\test-s03-input.ps1 -SoakMinutes 0 }
-    Invoke-S13Step 'real-process pure launch fixture' { & .\scripts\test-s05-launch.ps1 }
+    if ($BackgroundOnly) {
+        foreach ($Name in @('Win32 shell lifecycle and short close stress', 'captured input and hook lifecycle', 'GUI-driven pure launch fixture')) {
+            $Results.Add([ordered]@{ name = $Name; status = 'skipped'; durationMs = 0; error = 'User requested background-only validation; no visible windows, focus changes or input emission' })
+        }
+    } else {
+        Invoke-S13Step 'Win32 shell lifecycle and short close stress' { & .\scripts\test-s02-shell.ps1 -StressIterations $ShellIterations }
+        Invoke-S13Step 'captured Interception keyboard worker/QuickInput-style mouse and hook lifecycle' { & .\scripts\test-s03-input.ps1 -SoakMinutes 0 }
+        Invoke-S13Step 'real-process pure launch fixture' { & .\scripts\test-s05-launch.ps1 }
+    }
     Invoke-S13Step 'bounded injection/helper regression' { & .\scripts\test-s09-injection.ps1 }
     if (-not $SkipOnlineProvider) {
         Invoke-S13Step 'read-only Sophon provider schema audit' { & .\scripts\test-s06-provider.ps1 }
     }
     Invoke-S13Step 'deterministic portable ZIP, reopen and SHA-256' { & .\scripts\package-portable.ps1 }
     Invoke-S13Step 'child script process-environment isolation' { Assert-S13EnvironmentRestored }
-    Write-S13Report -Status 'automated-passed'
+    $Status = if ($BackgroundOnly) { 'automated-background-passed' } else { 'automated-passed' }
+    Write-S13Report -Status $Status
     Write-Host "[S13] AUTOMATED PASS report=$ReportPath"
 } catch {
     Write-S13Report -Status 'failed'

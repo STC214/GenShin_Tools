@@ -98,15 +98,21 @@ claim review/adoption of every change since July or automatic code imports.
 Run from the project root using the documented Go/Win32 toolchain:
 
 ```powershell
-./scripts/test.ps1 -Race
+./scripts/test.ps1 -Race -BackgroundOnly
 $env:GENSHINTOOLS_LIVE_FUFU_MAIN = '1'
 $env:GENSHINTOOLS_LIVE_FUFU_STORE = '1'
 go test -count=1 -v ./internal/plugins -run 'TestLiveFufu|TestFufuCatalogLiveIntegration'
 ./scripts/test-s06-provider.ps1
-./scripts/test-s13-release.ps1
+./scripts/test-s13-release.ps1 -BackgroundOnly
 ```
 
 Local raw package, original source archive and literal command transcripts are
 under `artifacts/upstream-2026-11-05/`. The complete release matrix separately
 records real-desktop/game gates that automation has not exercised; successful
 offline/live-package tests do not assert real-game stability or account outcomes.
+
+During review the user requested no foreground/topmost/focus-changing validation
+while gaming. The final release run therefore uses `-BackgroundOnly`: visible
+capture/overlay windows, real input loopback, GUI lifecycle and GUI-driven launch
+checks are explicitly skipped. No additional foreground validation is performed;
+the report distinguishes `automated-background-passed` from the full matrix.

@@ -80,6 +80,12 @@ Run the complete short S13 automated release matrix:
 ./scripts/test-s13-release.ps1
 ```
 
+When the desktop is in use, run `./scripts/test-s13-release.ps1 -BackgroundOnly`.
+This excludes visible capture/overlay windows, real input loopback, GUI lifecycle
+and GUI-driven launch checks. The JSON report records those skips and uses
+`automated-background-passed`, rather than claiming a complete desktop matrix.
+For source checks alone, use `./scripts/test.ps1 -Race -BackgroundOnly`.
+
 Deploy a verified portable package to an existing portable installation:
 
 ```powershell

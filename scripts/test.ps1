@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
-    [switch]$Race
+    [switch]$Race,
+    [switch]$BackgroundOnly
 )
 
 $ErrorActionPreference = 'Stop'
@@ -41,9 +42,14 @@ try {
     }
     & (Join-Path $PSScriptRoot 'test-environment.ps1')
     Invoke-Checked go mod verify
-    Invoke-Checked go test -count=1 ./...
+    $TestArguments = @('test', '-count=1')
+    if ($BackgroundOnly) {
+        $TestArguments += @('-skip', '^(TestNativeCaptureUsesVerifiedProcessGenerationAndWritesPNG|TestNativeWindowIsNoActivateClickThroughAndCloses|TestCaptured.*|.*Loopback.*)$')
+        Write-Host 'Background-only: skipping visible capture/overlay windows and real input loopback tests'
+    }
+    Invoke-Checked -Command go -Arguments @($TestArguments + './...')
     if ($Race) {
-        Invoke-Checked go test -race -count=1 ./...
+        Invoke-Checked -Command go -Arguments @($TestArguments + @('-race', './...'))
     }
     # Win32 callbacks legitimately reconstruct SDK-owned structures from LPARAM.
     # Keep every other vet analyzer enabled and isolate unsafe use in the shell boundary.
