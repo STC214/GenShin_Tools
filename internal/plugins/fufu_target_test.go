@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"genshintools/internal/game"
+	"genshintools/internal/injection"
 )
 
 func TestDownloadFufuMainPackageWritesAndHashesBoundedResponse(t *testing.T) {
@@ -62,7 +63,7 @@ func TestLiveFufuMainPackageDownloadAndInstall(t *testing.T) {
 		t.Fatal(err)
 	}
 	copyFileForPluginTest(t, testExecutable, executable)
-	result, err := InstallFufuMainPackage(context.Background(), packagePath, layout, game.Candidate{Root: gameRoot, Executable: executable, ExeName: "YuanShen.exe", Version: "live-audit"}, &state)
+	result, err := InstallFufuMainPackage(context.Background(), packagePath, layout, game.Candidate{Root: gameRoot, Executable: executable, ExeName: "YuanShen.exe", Version: "7.2.0"}, &state)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -98,7 +99,7 @@ func TestLiveFufuMainSameVersionBuildReplacementAndRollback(t *testing.T) {
 		t.Fatal(err)
 	}
 	copyFileForPluginTest(t, testExecutable, executable)
-	candidate := game.Candidate{Root: gameRoot, Executable: executable, ExeName: "YuanShen.exe", Version: "live-audit"}
+	candidate := game.Candidate{Root: gameRoot, Executable: executable, ExeName: "YuanShen.exe", Version: "7.1.0"}
 	state := DefaultState()
 	builds := []struct {
 		ref         string
@@ -164,6 +165,71 @@ func TestLiveFufuMainSameVersionBuildReplacementAndRollback(t *testing.T) {
 	}
 	if state.Installed[FufuMainTargetID].ActiveRevision != previousRevision || !strings.Contains(target.Description, "1.7.0.1") {
 		t.Fatalf("rollback did not restore the previous released build: state=%+v description=%q", state.Installed[FufuMainTargetID], target.Description)
+	}
+}
+
+func TestLiveFufu1722UpgradeAndRollback(t *testing.T) {
+	if os.Getenv("GENSHINTOOLS_LIVE_FUFU_MAIN") != "1" {
+		t.Skip("set GENSHINTOOLS_LIVE_FUFU_MAIN=1 to audit the pinned 1.7.2.2 release")
+	}
+	fixture := newPackageFixture(t)
+	state := DefaultState()
+	candidate := fixture.candidate
+	var oldRevision string
+	for index, build := range []struct{ ref, hash, version, game string }{
+		{"254961f42c34362e4557315052b40b7375fc71d2", "a0ade0ba0d75f02bfbf84d9ad157f36315b25815aef7c5d65ec30c8724fa601a", "1.7.0", "7.1.0"},
+		{"06da24fcf988d0da41e11fe1d764c32fc573e332", "2e40fdbde2d065734fbcdcd95eb4fc23a0573adb803ab4a06d8400a110cd7bdd", "1.7.2", "7.2.0"},
+	} {
+		packagePath := filepath.Join(fixture.root, build.version+".zip")
+		endpoint := "https://api.github.com/repos/FufuLauncher/FufuLauncher--Plugins/contents/FuFuPlugin.zip?ref=" + build.ref
+		hash, _, err := downloadFufuMainPackage(t.Context(), nil, packagePath, endpoint, map[string]bool{"api.github.com": true, "github.com": true, "raw.githubusercontent.com": true})
+		if err != nil || hash != build.hash {
+			t.Fatalf("release %s: hash=%s err=%v", build.version, hash, err)
+		}
+		candidate.Version = build.game
+		result, err := InstallFufuMainPackage(t.Context(), packagePath, fixture.layout, candidate, &state)
+		if err != nil || result.Manifest.Version != build.version {
+			t.Fatalf("install %s: result=%+v err=%v", build.version, result, err)
+		}
+		configPath := filepath.Join(fixture.layout.Modules, FufuMainTargetID, "config.ini")
+		target, err := LoadFufuTargetConfig(configPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if index == 0 {
+			oldRevision = state.Installed[FufuMainTargetID].ActiveRevision
+			if err := UpdateConfig(configPath, target.Schema, "fufu.targetfps", "144"); err != nil {
+				t.Fatal(err)
+			}
+			continue
+		}
+		if len(target.Settings) != 62 || target.GameVersionRule != "7.2" || !strings.Contains(target.Description, "1.7.2.2") {
+			t.Fatalf("unexpected 1.7.2.2 target: %+v", target)
+		}
+		values, err := ReadConfig(configPath, target.Schema)
+		if err != nil || values["fufu.targetfps"] != "144" {
+			t.Fatalf("user settings lost: values=%v err=%v", values, err)
+		}
+		for id, want := range map[string]string{"fufu.enablecameradistance": "0", "fufu.cameramaxdistance": "12.0", "fufu.disablecameracollision": "0", "fufu.enabledomainmap": "0"} {
+			if values[id] != want {
+				t.Errorf("new field %s = %q, want %q", id, values[id], want)
+			}
+		}
+		audit, err := injection.AuditModule(fixture.layout.Modules, FufuMainTargetID, candidate)
+		if err != nil || !audit.Manifest.RequireSignature || audit.Manifest.GameVersionRule != "7.2" {
+			t.Fatalf("signature/version audit: %+v err=%v", audit.Manifest, err)
+		}
+		if _, err := Rollback(t.Context(), fixture.layout, &state, FufuMainTargetID, "1.7.0", candidate); err == nil || !strings.Contains(err.Error(), "not explicitly compatible") {
+			t.Fatalf("7.1 plugin rollback for game 7.2: %v", err)
+		}
+	}
+	candidate.Version = "7.1.0"
+	if _, err := Rollback(t.Context(), fixture.layout, &state, FufuMainTargetID, "1.7.0", candidate); err != nil {
+		t.Fatal(err)
+	}
+	target, err := LoadFufuTargetConfig(filepath.Join(fixture.layout.Modules, FufuMainTargetID, "config.ini"))
+	if err != nil || !strings.Contains(target.Description, "1.7.0.3") || state.Installed[FufuMainTargetID].ActiveRevision != oldRevision {
+		t.Fatalf("rollback did not restore the old release: target=%+v err=%v", target, err)
 	}
 }
 

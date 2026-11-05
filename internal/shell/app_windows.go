@@ -6376,7 +6376,7 @@ func (app *application) paintResources(dc win32.HDC, client win32.Rect, left int
 		if state.Progress.ETA > 0 {
 			eta = state.Progress.ETA.Round(time.Second).String()
 		}
-		draw(fmt.Sprintf(app.texts.Text("resource.progress"), state.Progress.FilesDone, state.Progress.FilesTotal, formatBytes(uint64(state.Progress.BytesDone)), formatBytes(uint64(state.Progress.BytesTotal)), formatBytes(uint64(state.Progress.Speed)), eta), staticRow(498, 534, cardBrush), win32.Color(145, 154, 180))
+		draw(fmt.Sprintf(app.texts.Text("resource.progress"), state.Progress.FilesDone, state.Progress.FilesTotal, formatBytes(uint64(state.Progress.BytesDone)), formatBytes(uint64(state.Progress.BytesTotal)), formatBytes(uint64(state.Progress.ReusedBytes)), formatBytes(uint64(state.Progress.Speed)), eta), staticRow(498, 534, cardBrush), win32.Color(145, 154, 180))
 	}
 	draw(app.texts.Text("resource.safety"), staticRow(540, 576, cardBrush), win32.Color(126, 136, 160))
 }

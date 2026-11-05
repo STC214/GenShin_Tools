@@ -17,12 +17,13 @@ import (
 )
 
 type Progress struct {
-	FilesDone  int
-	FilesTotal int
-	BytesDone  int64
-	BytesTotal int64
-	Speed      float64
-	ETA        time.Duration
+	FilesDone   int
+	FilesTotal  int
+	BytesDone   int64
+	BytesTotal  int64
+	ReusedBytes int64
+	Speed       float64
+	ETA         time.Duration
 }
 
 type Downloader struct {
@@ -68,7 +69,11 @@ func (d *Downloader) Download(ctx context.Context, manifest Manifest, stagingRoo
 		}
 		total += file.Size
 	}
-	if err := RequireDiskSpace(stagingRoot, uint64(total)); err != nil {
+	cached, cachedBytes, err := verifiedStagedFiles(ctx, manifest, stagingRoot)
+	if err != nil {
+		return err
+	}
+	if err := RequireDiskSpace(stagingRoot, uint64(total-cachedBytes)); err != nil {
 		return err
 	}
 	if err := os.MkdirAll(stagingRoot, 0o755); err != nil {
@@ -80,6 +85,7 @@ func (d *Downloader) Download(ctx context.Context, manifest Manifest, stagingRoo
 	jobs := make(chan ManifestFile)
 	errCh := make(chan error, 1)
 	var downloaded atomic.Int64
+	var reused atomic.Int64
 	var filesDone atomic.Int64
 	started := time.Now()
 	var callbackMu sync.Mutex
@@ -87,19 +93,20 @@ func (d *Downloader) Download(ctx context.Context, manifest Manifest, stagingRoo
 		if d.OnProgress == nil {
 			return
 		}
+		callbackMu.Lock()
+		defer callbackMu.Unlock()
+		reusedBytes := reused.Load()
 		bytesDone := downloaded.Load()
 		elapsed := time.Since(started).Seconds()
 		var speed float64
 		if elapsed > 0 {
-			speed = float64(bytesDone) / elapsed
+			speed = float64(bytesDone-reusedBytes) / elapsed
 		}
 		var eta time.Duration
 		if speed > 0 && bytesDone < total {
 			eta = time.Duration(float64(total-bytesDone)/speed) * time.Second
 		}
-		callbackMu.Lock()
-		d.OnProgress(Progress{FilesDone: int(filesDone.Load()), FilesTotal: len(manifest.Files), BytesDone: bytesDone, BytesTotal: total, Speed: speed, ETA: eta})
-		callbackMu.Unlock()
+		d.OnProgress(Progress{FilesDone: int(filesDone.Load()), FilesTotal: len(manifest.Files), BytesDone: bytesDone, BytesTotal: total, ReusedBytes: reusedBytes, Speed: speed, ETA: eta})
 	}
 
 	var workers sync.WaitGroup
@@ -117,7 +124,7 @@ func (d *Downloader) Download(ctx context.Context, manifest Manifest, stagingRoo
 				}
 			}()
 			for file := range jobs {
-				if err := d.downloadFile(ctx, client, file, stagingRoot, attempts, &downloaded, report); err != nil {
+				if err := d.downloadFile(ctx, client, file, stagingRoot, attempts, cached[file.Path], &downloaded, &reused, report); err != nil {
 					select {
 					case errCh <- fmt.Errorf("download %q: %w", file.Path, err):
 						cancel()
@@ -155,7 +162,26 @@ func (d *Downloader) Download(ctx context.Context, manifest Manifest, stagingRoo
 	return nil
 }
 
-func (d *Downloader) downloadFile(ctx context.Context, client *http.Client, item ManifestFile, root string, attempts int, progress *atomic.Int64, report func()) error {
+func verifiedStagedFiles(ctx context.Context, manifest Manifest, root string) (map[string]bool, int64, error) {
+	cached := make(map[string]bool)
+	var bytes int64
+	for _, item := range manifest.Files {
+		if err := ctx.Err(); err != nil {
+			return nil, 0, err
+		}
+		path := filepath.Join(root, item.Path)
+		if err := ensureContained(root, path); err != nil {
+			return nil, 0, err
+		}
+		if err := VerifyFileContext(ctx, path, item.Size, item.Hash); err == nil {
+			cached[item.Path] = true
+			bytes += item.Size
+		}
+	}
+	return cached, bytes, ctx.Err()
+}
+
+func (d *Downloader) downloadFile(ctx context.Context, client *http.Client, item ManifestFile, root string, attempts int, cached bool, progress, reused *atomic.Int64, report func()) error {
 	destination := filepath.Join(root, item.Path)
 	if err := ensureContained(root, destination); err != nil {
 		return err
@@ -163,12 +189,13 @@ func (d *Downloader) downloadFile(ctx context.Context, client *http.Client, item
 	if err := os.MkdirAll(filepath.Dir(destination), 0o755); err != nil {
 		return err
 	}
-	if err := VerifyFileContext(ctx, destination, item.Size, item.Hash); err == nil {
+	if cached {
 		progress.Add(item.Size)
+		reused.Add(item.Size)
 		return nil
 	}
 	if len(item.Chunks) > 0 {
-		return d.downloadChunkedFile(ctx, client, item, destination, attempts, progress, report)
+		return d.downloadChunkedFile(ctx, client, item, destination, attempts, progress, reused, report)
 	}
 	part := destination + ".part"
 	var last error

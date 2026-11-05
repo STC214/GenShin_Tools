@@ -2,6 +2,7 @@ package plugins
 
 import (
 	"archive/zip"
+	"encoding/binary"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -153,7 +154,44 @@ func TestInstallFufuPackageAcceptsAuditedInstalledDependency(t *testing.T) {
 	}
 }
 
-func (fixture packageFixture) fufuPackageFile(t *testing.T, id, version, dllName, prefix string) (string, CatalogItem) {
+func TestInstallFufuPackageHonorsDeclaredGameVersion(t *testing.T) {
+	for _, test := range []struct {
+		rule   string
+		accept bool
+	}{{"6.7", true}, {"7.2", false}, {"6.7,broken", false}} {
+		t.Run(test.rule, func(t *testing.T) {
+			fixture := newPackageFixture(t)
+			packagePath, item := fixture.fufuPackageFile(t, "Drop", "1.0.3", "Drop.dll", "", "GameVersion="+test.rule+"\n")
+			state := DefaultState()
+			_, err := InstallFufuPackage(t.Context(), packagePath, item, fixture.layout, fixture.candidate, &state)
+			if (err == nil) != test.accept {
+				t.Fatalf("accept=%v err=%v", test.accept, err)
+			}
+			if !test.accept && len(state.Installed) != 0 {
+				t.Fatal("incompatible package changed installed state")
+			}
+		})
+	}
+}
+
+func TestInstallFufuMainRejectsUnsignedRecentBundle(t *testing.T) {
+	fixture := newPackageFixture(t)
+	// Clear the certificate directory in the disposable amd64 fixture, so this
+	// remains deterministic on Windows versions with embedded-signed system DLLs.
+	peOffset := int(binary.LittleEndian.Uint32(fixture.dll[0x3c:]))
+	certificateOffset := peOffset + 24 + 112 + 4*8
+	clear(fixture.dll[certificateOffset : certificateOffset+8])
+	packagePath, _ := fixture.fufuPackageFile(t, FufuMainTargetID, "1.7.2", FufuMainDLL, "",
+		"Developer=Tests\nVersion=1.7.2\nDescription=游戏7.2 版本1.7.2.2\n")
+	fixture.candidate.Version = "7.2.0"
+	state := DefaultState()
+	_, err := InstallFufuMainPackage(t.Context(), packagePath, fixture.layout, fixture.candidate, &state)
+	if err == nil || !strings.Contains(err.Error(), "signature") || len(state.Installed) != 0 {
+		t.Fatalf("unsigned recent main release accepted: err=%v state=%+v", err, state)
+	}
+}
+
+func (fixture packageFixture) fufuPackageFile(t *testing.T, id, version, dllName, prefix string, general ...string) (string, CatalogItem) {
 	t.Helper()
 	packagePath := filepath.Join(fixture.root, "fufu-"+strings.ToLower(id)+".zip")
 	file, err := os.Create(packagePath)
@@ -166,7 +204,7 @@ func (fixture packageFixture) fufuPackageFile(t *testing.T, id, version, dllName
 			t.Fatal(err)
 		}
 	}
-	for name, data := range map[string][]byte{prefix + "config.ini": []byte("[General]\nFile = " + dllName + "\nName = Fixture\n"), prefix + dllName: fixture.dll} {
+	for name, data := range map[string][]byte{prefix + "config.ini": []byte("[General]\nFile = " + dllName + "\nName = Fixture\n" + strings.Join(general, "")), prefix + dllName: fixture.dll} {
 		entry, err := archive.Create(name)
 		if err != nil {
 			t.Fatal(err)

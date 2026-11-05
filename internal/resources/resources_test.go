@@ -106,6 +106,39 @@ func TestDownloaderResumeRetryAndVerify(t *testing.T) {
 	}
 }
 
+func TestDownloaderReusesOnlyHashVerifiedStagedFiles(t *testing.T) {
+	content := []byte("verified staged resource")
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		_, _ = w.Write(content)
+	}))
+	defer server.Close()
+	manifest := testManifest(content, server.URL)
+	root := t.TempDir()
+	stageFile(t, root, manifest.Files[0].Path, content)
+	cached, cachedBytes, err := verifiedStagedFiles(t.Context(), manifest, root)
+	if err != nil || cachedBytes != int64(len(content)) || !cached[manifest.Files[0].Path] {
+		t.Fatalf("verified cache disk accounting: cached=%v bytes=%d err=%v", cached, cachedBytes, err)
+	}
+	downloader := NewDownloader()
+	var latest Progress
+	downloader.OnProgress = func(p Progress) { latest = p }
+	if err := downloader.Download(t.Context(), manifest, root); err != nil {
+		t.Fatal(err)
+	}
+	if requests.Load() != 0 || latest.ReusedBytes != int64(len(content)) || latest.BytesDone != latest.BytesTotal || latest.Speed != 0 {
+		t.Fatalf("verified cache not reused: requests=%d progress=%+v", requests.Load(), latest)
+	}
+	stageFile(t, root, manifest.Files[0].Path, bytes.Repeat([]byte("x"), len(content)))
+	if err := downloader.Download(t.Context(), manifest, root); err != nil {
+		t.Fatal(err)
+	}
+	if requests.Load() != 1 || latest.ReusedBytes != 0 {
+		t.Fatalf("corrupt cache reused: requests=%d progress=%+v", requests.Load(), latest)
+	}
+}
+
 func TestDownloaderCancellationLeavesOnlyPartialFile(t *testing.T) {
 	content := []byte(strings.Repeat("x", 256*1024))
 	started := make(chan struct{})

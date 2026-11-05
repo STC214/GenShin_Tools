@@ -18,7 +18,7 @@ import (
 	"github.com/klauspost/compress/zstd"
 )
 
-func (d *Downloader) downloadChunkedFile(ctx context.Context, client *http.Client, item ManifestFile, destination string, attempts int, progress *atomic.Int64, report func()) error {
+func (d *Downloader) downloadChunkedFile(ctx context.Context, client *http.Client, item ManifestFile, destination string, attempts int, progress, reused *atomic.Int64, report func()) error {
 	part := destination + ".part"
 	validBytes, firstChunk, err := verifiedChunkPrefix(ctx, part, item.Chunks)
 	if err != nil {
@@ -26,6 +26,7 @@ func (d *Downloader) downloadChunkedFile(ctx context.Context, client *http.Clien
 	}
 	if validBytes > 0 {
 		progress.Add(validBytes)
+		reused.Add(validBytes)
 	}
 	output, err := os.OpenFile(part, os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {

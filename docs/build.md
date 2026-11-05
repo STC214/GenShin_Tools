@@ -44,7 +44,7 @@ candidate. For a new version, the checksum is published before the ZIP so an
 interrupted publish cannot expose an unverified ZIP without its sidecar.
 
 The current version's portable archive output path is
-`artifacts/release/GenshinTools-1.6.3-windows-amd64-portable.zip`.
+`artifacts/release/GenshinTools-1.7.0-windows-amd64-portable.zip`.
 Its adjacent `.zip.sha256` file records the archive digest; the embedded
 `release.json` records individual product file sizes and digests, and
 `build-info.json` identifies the clean source commit used for the build.
@@ -58,6 +58,12 @@ finishes while the launcher remains open therefore refreshes the candidate
 instead of reaching the elevated helper with stale version metadata.
 Versioned archives belong under `artifacts/release/`; the repository root does
 not retain historical ZIPs or checksum sidecars.
+
+Version 1.7.0 follows FufuLauncher 1.7.2.2 / game 7.2, adds declared plugin
+game-version checks and offline Authenticode checks at install and helper audit,
+reports verified resource reuse, and extends transactional legacy channel-SDK
+cleanup. See `docs/upstream-adoption-2026-11-05.md` for pinned package hashes,
+scope dispositions, commands, and the distinction from the repository baseline.
 
 From `1.3.2`, the portable package contains the project-owner supplied legacy
 compiled `AHK_F.exe` and its distribution notice. Binary inspection identifies

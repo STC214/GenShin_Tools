@@ -137,6 +137,50 @@ func TestAdvancedConversionPlanReusesRenamedLayout(t *testing.T) {
 	}
 }
 
+func TestOfficialServerSwitchCleansNewLegacySDKWithoutNetwork(t *testing.T) {
+	gameRoot := t.TempDir()
+	legacy := []string{`YuanShen_Data\Plugins\PluginEOSSDK.dll`, `GenshinImpact_Data\Plugins\PluginEOSSDK.dll`, "sdk_pkg_version"}
+	for _, path := range append(append([]string{}, legacy...), "YuanShen.exe", "config.ini", `YuanShen_Data\Plugins\user.dll`) {
+		full := filepath.Join(gameRoot, path)
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte("[General]\ngame_version=7.2.0\nchannel=14\nsub_channel=0\ncps=bilibili\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		t.Error("switch to official server unexpectedly requires network")
+		return nil, fmt.Errorf("offline")
+	})}
+	tx, err := resources.NewTransaction(t.TempDir(), gameRoot, "official-72")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Prepare(); err != nil {
+		t.Fatal(err)
+	}
+	plan, err := PrepareQuickServerSwitch(t.Context(), client, gameRoot, tx.StagingRoot, QuickOfficial)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(plan); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range legacy {
+		if _, err := os.Stat(filepath.Join(gameRoot, path)); !os.IsNotExist(err) {
+			t.Fatalf("retired SDK %s remains: %v", path, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(gameRoot, `YuanShen_Data\Plugins\user.dll`)); err != nil {
+		t.Fatalf("unrelated plugin was changed: %v", err)
+	}
+	config, err := os.ReadFile(filepath.Join(gameRoot, "config.ini"))
+	if err != nil || !strings.Contains(string(config), "game_version=7.2.0") || !strings.Contains(string(config), "channel=1\r\n") {
+		t.Fatalf("official config=%q err=%v", config, err)
+	}
+}
+
 func testMD5ManifestFile(path string, data []byte) resources.ManifestFile {
 	digest := md5.Sum(data)
 	return resources.ManifestFile{Path: path, Size: int64(len(data)), Hash: resources.Hash{Algorithm: "md5", Digest: hex.EncodeToString(digest[:])}}

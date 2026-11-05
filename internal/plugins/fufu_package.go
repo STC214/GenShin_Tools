@@ -553,6 +553,19 @@ func extractAndAdaptFufuPackage(ctx context.Context, packagePath string, item Ca
 	}
 	id := strings.ToLower(item.ID)
 	module := injection.Manifest{SchemaVersion: injection.ManifestSchemaVersion, ID: id, Name: item.Name, SourceURL: item.SourceURL, License: item.License, AdapterAPI: injection.AdapterAPIVersion, DLL: dllName, SHA256: metadata.SHA256, Architecture: metadata.Architecture, FileVersion: metadata.FileVersion, AllowUnversioned: metadata.FileVersion == "", GameVersions: []string{candidate.Version}, GameExecutables: []string{candidate.ExeName}}
+	configData, err := readFileBounded(configPath, 1<<20)
+	if err != nil {
+		return Manifest{}, err
+	}
+	configLines, err := parseINILines(configData)
+	if err != nil {
+		return Manifest{}, err
+	}
+	module.GameVersionRule = fufuDeclaredGameVersion(iniValues(configLines), id == FufuMainTargetID)
+	if err := injection.CheckGameVersionRule(module.GameVersionRule, candidate.Version); err != nil {
+		return Manifest{}, err
+	}
+	module.RequireSignature = metadata.HasSignature || id == FufuMainTargetID && injection.CheckGameVersionRule(">=1.7.1", item.Version) == nil
 	moduleData, err := json.MarshalIndent(module, "", "  ")
 	if err != nil {
 		return Manifest{}, err

@@ -1,6 +1,7 @@
 package input
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -38,7 +39,13 @@ func TestStopExternalCompatibilityToolsRejectsUnverifiableIdentity(t *testing.T)
 }
 
 func TestCompatibilityProcessExitedDistinguishesRunningAndExited(t *testing.T) {
-	command := exec.Command("cmd.exe", "/c", "exit", "0")
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	command := exec.CommandContext(ctx, executable, "-test.run=^TestCompatibilityProcessFixture$")
 	if err := command.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -47,12 +54,15 @@ func TestCompatibilityProcessExitedDistinguishesRunningAndExited(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer windows.CloseHandle(handle)
-	if exited, err := compatibilityProcessExited(handle, 5*time.Second); err != nil || !exited {
+	defer func() { _ = command.Process.Kill() }()
+	if err := command.Wait(); err != nil {
+		t.Fatal(err)
+	}
+	if exited, err := compatibilityProcessExited(handle, 0); err != nil || !exited {
 		t.Fatalf("exited process result = %t, %v", exited, err)
 	}
-	_ = command.Process.Release()
-
-	running := exec.Command("cmd.exe", "/c", "ping", "-n", "3", "127.0.0.1", ">nul")
+	running := exec.CommandContext(ctx, executable, "-test.run=^TestCompatibilityProcessFixture$")
+	running.Env = append(os.Environ(), "GENSHINTOOLS_COMPAT_PROCESS_FIXTURE=wait")
 	if err := running.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -64,6 +74,12 @@ func TestCompatibilityProcessExitedDistinguishesRunningAndExited(t *testing.T) {
 	defer windows.CloseHandle(runningHandle)
 	if exited, err := compatibilityProcessExited(runningHandle, 0); err != nil || exited {
 		t.Fatalf("running process result = %t, %v", exited, err)
+	}
+}
+
+func TestCompatibilityProcessFixture(t *testing.T) {
+	if os.Getenv("GENSHINTOOLS_COMPAT_PROCESS_FIXTURE") == "wait" {
+		time.Sleep(time.Minute)
 	}
 }
 

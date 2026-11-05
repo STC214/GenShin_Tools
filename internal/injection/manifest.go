@@ -38,6 +38,8 @@ type Manifest struct {
 	Architecture     string   `json:"architecture"`
 	FileVersion      string   `json:"fileVersion,omitempty"`
 	AllowUnversioned bool     `json:"allowUnversioned,omitempty"`
+	RequireSignature bool     `json:"requireSignature,omitempty"`
+	GameVersionRule  string   `json:"gameVersionRule,omitempty"`
 	GameVersions     []string `json:"gameVersions"`
 	GameExecutables  []string `json:"gameExecutables"`
 	RequiredExports  []string `json:"requiredExports,omitempty"`
@@ -56,6 +58,7 @@ type Audit struct {
 type ModuleFileMetadata struct {
 	Architecture string
 	IsDLL        bool
+	HasSignature bool
 	SHA256       string
 	FileVersion  string
 	Exports      []string
@@ -78,7 +81,7 @@ func InspectModuleFile(path string) (ModuleFileMetadata, error) {
 	if err != nil {
 		return ModuleFileMetadata{}, err
 	}
-	return ModuleFileMetadata{Architecture: metadata.Architecture, IsDLL: metadata.IsDLL, SHA256: hash, FileVersion: version, Exports: append([]string(nil), metadata.Exports...), Imports: append([]string(nil), metadata.Imports...)}, nil
+	return ModuleFileMetadata{Architecture: metadata.Architecture, IsDLL: metadata.IsDLL, HasSignature: metadata.HasSignature, SHA256: hash, FileVersion: version, Exports: append([]string(nil), metadata.Exports...), Imports: append([]string(nil), metadata.Imports...)}, nil
 }
 
 func AuditModule(modulesRoot, id string, candidate game.Candidate) (Audit, error) {
@@ -148,6 +151,11 @@ func AuditModule(modulesRoot, id string, candidate game.Candidate) (Audit, error
 	if !peInfo.IsDLL {
 		return Audit{}, errors.New("module PE is not marked as a DLL")
 	}
+	if manifest.RequireSignature || peInfo.HasSignature {
+		if err := VerifyModuleSignature(dllPath); err != nil {
+			return Audit{}, err
+		}
+	}
 	for _, imported := range peInfo.Imports {
 		if filepath.Base(imported) != imported {
 			return Audit{}, fmt.Errorf("module import %q is not a DLL file name", imported)
@@ -180,6 +188,9 @@ func AuditModule(modulesRoot, id string, candidate game.Candidate) (Audit, error
 	}
 	if candidate.Version == "" || !containsFold(manifest.GameVersions, candidate.Version) {
 		return Audit{}, fmt.Errorf("game version %q is not explicitly compatible", candidate.Version)
+	}
+	if err := CheckGameVersionRule(manifest.GameVersionRule, candidate.Version); err != nil {
+		return Audit{}, err
 	}
 	if !containsFold(manifest.GameExecutables, candidate.ExeName) {
 		return Audit{}, fmt.Errorf("game executable %q is not explicitly compatible", candidate.ExeName)

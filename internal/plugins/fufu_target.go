@@ -19,18 +19,20 @@ const (
 )
 
 var fufuFieldIDPart = regexp.MustCompile(`[^a-z0-9._-]+`)
+var fufuMainGameVersion = regexp.MustCompile(`游戏\s*([0-9]+\.[0-9]+)`)
 
 // FufuTargetConfig is the public, INI-driven configuration contract used by
 // Fufu's configuration-target page. Unknown keys and comments remain owned by
 // the upstream plugin and are preserved when a Value is changed.
 type FufuTargetConfig struct {
-	Name        string
-	Description string
-	Developer   string
-	Version     string
-	DLL         string
-	Settings    []FufuSetting
-	Schema      ConfigSchema
+	Name            string
+	Description     string
+	Developer       string
+	Version         string
+	DLL             string
+	GameVersionRule string
+	Settings        []FufuSetting
+	Schema          ConfigSchema
 }
 
 type FufuSetting struct {
@@ -66,6 +68,7 @@ func LoadFufuTargetConfig(configPath string) (FufuTargetConfig, error) {
 	if target.Name == "" || target.Developer == "" || target.DLL == "" || filepath.Base(target.DLL) != target.DLL || !strings.EqualFold(filepath.Ext(target.DLL), ".dll") {
 		return FufuTargetConfig{}, errors.New("Fufu target General metadata is incomplete or unsafe")
 	}
+	target.GameVersionRule = fufuDeclaredGameVersion(values, strings.EqualFold(target.DLL, FufuMainDLL))
 	sections := orderedINISections(lines)
 	used := map[string]bool{}
 	for _, section := range sections {
@@ -101,6 +104,22 @@ func LoadFufuTargetConfig(configPath string) (FufuTargetConfig, error) {
 		}
 	}
 	return target, nil
+}
+
+func fufuDeclaredGameVersion(values map[string]string, main bool) string {
+	for _, key := range []string{"GameVersion", "SupportedGameVersions", "GameVersions", "游戏版本", "支持游戏版本"} {
+		if rule := strings.TrimSpace(values[iniLookupKey("General", key)]); rule != "" {
+			return rule
+		}
+	}
+	// The released main bundle still declares its supported game in Description,
+	// rather than General.GameVersion. Never infer this from third-party prose.
+	if main {
+		if match := fufuMainGameVersion.FindStringSubmatch(values[iniLookupKey("General", "Description")]); len(match) == 2 {
+			return match[1]
+		}
+	}
+	return ""
 }
 
 func orderedINISections(lines []string) []string {

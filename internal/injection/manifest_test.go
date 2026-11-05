@@ -125,6 +125,8 @@ func TestAuditModuleFailsClosed(t *testing.T) {
 	}{
 		{name: "hash mismatch", change: func(f *moduleFixture) { f.manifest.SHA256 = "00" + f.manifest.SHA256[2:] }},
 		{name: "unknown game version", change: func(f *moduleFixture) { f.candidate.Version = "9.9.9" }},
+		{name: "incompatible declared game version", change: func(f *moduleFixture) { f.manifest.GameVersionRule = "7.2" }},
+		{name: "malformed declared game version", change: func(f *moduleFixture) { f.manifest.GameVersionRule = "6.7,broken" }},
 		{name: "missing export", change: func(f *moduleFixture) { f.manifest.RequiredExports = []string{"DefinitelyMissingExport"} }},
 		{name: "wrong file version", change: func(f *moduleFixture) { f.manifest.FileVersion = "0.0.0.0" }},
 		{name: "unversioned lie", change: func(f *moduleFixture) { f.manifest.FileVersion, f.manifest.AllowUnversioned = "", true }},

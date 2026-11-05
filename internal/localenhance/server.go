@@ -75,10 +75,6 @@ func PrepareQuickServerSwitch(ctx context.Context, client *http.Client, gameRoot
 	if client == nil {
 		client = &http.Client{Timeout: 45 * time.Second}
 	}
-	metadata, err := fetchSDKMetadata(ctx, client)
-	if err != nil {
-		return resources.RepairPlan{}, err
-	}
 	configData, err := updateServerConfig(filepath.Join(gameRoot, "config.ini"), target)
 	if err != nil {
 		return resources.RepairPlan{}, err
@@ -95,17 +91,25 @@ func PrepareQuickServerSwitch(ctx context.Context, client *http.Client, gameRoot
 	deprecated := []string{
 		`YuanShen_Data\Plugins\PCGameSDK.dll`,
 		`YuanShen_Data\Plugins\EOSSDK-Win64-Shipping.dll`,
+		`YuanShen_Data\Plugins\PluginEOSSDK.dll`,
 		`GenshinImpact_Data\Plugins\PCGameSDK.dll`,
 		`GenshinImpact_Data\Plugins\EOSSDK-Win64-Shipping.dll`,
-		metadata.PackageVersionFile,
+		`GenshinImpact_Data\Plugins\PluginEOSSDK.dll`,
+		"sdk_pkg_version",
 	}
 	if target == QuickOfficial {
 		for _, path := range deprecated {
-			if _, err := os.Stat(filepath.Join(gameRoot, path)); err == nil {
+			if _, err := os.Lstat(filepath.Join(gameRoot, path)); err == nil {
 				plan.Items = append(plan.Items, resources.PlanItem{File: resources.ManifestFile{Path: path}, Action: resources.ActionDelete, Reason: "remove Bilibili channel SDK"})
+			} else if !errors.Is(err, os.ErrNotExist) {
+				return resources.RepairPlan{}, err
 			}
 		}
 		return plan, nil
+	}
+	metadata, err := fetchSDKMetadata(ctx, client)
+	if err != nil {
+		return resources.RepairPlan{}, err
 	}
 
 	cacheRelative := `.server-cache\bilibili-sdk.zip`

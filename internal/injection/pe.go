@@ -11,6 +11,7 @@ import (
 type peMetadata struct {
 	Architecture string
 	IsDLL        bool
+	HasSignature bool
 	Exports      []string
 	Imports      []string
 }
@@ -37,7 +38,18 @@ func inspectPE(path string) (peMetadata, error) {
 	if err != nil {
 		return peMetadata{}, err
 	}
-	return peMetadata{Architecture: architecture, IsDLL: file.Characteristics&pe.IMAGE_FILE_DLL != 0, Exports: exports, Imports: imports}, nil
+	directories, _, err := peDirectories(file)
+	if err != nil {
+		return peMetadata{}, err
+	}
+	// Unlike other directories, the certificate table uses a file offset.
+	certificate := directories[pe.IMAGE_DIRECTORY_ENTRY_SECURITY]
+	if certificate.VirtualAddress != 0 || certificate.Size != 0 {
+		if certificate.VirtualAddress == 0 || certificate.Size < 8 || uint64(certificate.VirtualAddress)+uint64(certificate.Size) > uint64(len(data)) {
+			return peMetadata{}, errors.New("invalid PE certificate table")
+		}
+	}
+	return peMetadata{Architecture: architecture, IsDLL: file.Characteristics&pe.IMAGE_FILE_DLL != 0, HasSignature: certificate.Size != 0, Exports: exports, Imports: imports}, nil
 }
 
 func readImports(file *pe.File, data []byte) ([]string, error) {

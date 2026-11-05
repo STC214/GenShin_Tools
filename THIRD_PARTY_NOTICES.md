@@ -5,8 +5,10 @@
 - Project: FufuLauncher/FufuLauncher
 - Source: <https://github.com/FufuLauncher/FufuLauncher>
 - Audited baseline: `5f6af35fcb90807d5db390ed4af58ca09ddd381c`
+- Focused 2026-11-05 review: release `1.7.2.2` at `af192350c8b07b5c01b18adefa62971964309c80`; main-plugin bundle `06da24fcf988d0da41e11fe1d764c32fc573e332`. See `docs/upstream-adoption-2026-11-05.md`; this does not replace the repository-wide baseline.
 - Live store contract rechecked: 2026-07-22 (`fu1.fun/api/v1/plugins` and current upstream store client sources)
 - Role: behavioral reference for this independent Go + Win32 reimplementation, plus the fixed upstream source for plugin-store metadata and official download verification pages
+- Current compatibility reference also includes the public `General.GameVersion` rule syntax and offline Authenticode verification behavior. No upstream trust certificate is installed or redistributed.
 - License: MIT License
 - License copy: `LICENSES/FufuLauncher-MIT.txt`
 
