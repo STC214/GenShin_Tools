@@ -39,6 +39,7 @@ try {
     if ($Unformatted.Count -ne 0) {
         throw "gofmt is required for: $($Unformatted -join ', ')"
     }
+    & (Join-Path $PSScriptRoot 'test-environment.ps1')
     Invoke-Checked go mod verify
     Invoke-Checked go test -count=1 ./...
     if ($Race) {

@@ -72,6 +72,11 @@
    input state machine and release/cancellation tests. Replace a flaky
    five-second cmd process-exit test with an owned Go test subprocess, bounded
    context, explicit wait, and cleanup; no orphan ping subprocess remains.
+8. **Release-matrix follow-up — fixed.** The first complete matrix caught a
+   PowerShell/modern .NET distinction between absent and empty environment
+   variables: restoring null through a string parameter left `GOOS` empty.
+   Restore actual null with `NullString.Value` in shared helpers and the build
+   script. The source gate now exercises absent, empty, and nonempty snapshots.
 
 ## Scope preserved
 

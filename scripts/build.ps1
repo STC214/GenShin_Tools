@@ -287,6 +287,7 @@ END
         Remove-Item -LiteralPath $GeneratedResource -Force -ErrorAction SilentlyContinue
     }
     foreach ($Name in $BuildEnvironmentNames) {
-        [Environment]::SetEnvironmentVariable($Name, $PreviousBuildEnvironment[$Name], 'Process')
+        $PreviousValue = if ($null -eq $PreviousBuildEnvironment[$Name]) { [NullString]::Value } else { $PreviousBuildEnvironment[$Name] }
+        [Environment]::SetEnvironmentVariable($Name, $PreviousValue, 'Process')
     }
 }

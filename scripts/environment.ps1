@@ -13,6 +13,10 @@ function Restore-ProcessEnvironment {
         [Parameter(Mandatory)] [string[]]$Names
     )
     foreach ($Name in $Names) {
-        [Environment]::SetEnvironmentVariable($Name, $Snapshot[$Name], 'Process')
+        # PowerShell binds $null to an empty string for string parameters.
+        # Modern .NET preserves empty environment values, so force actual null
+        # for an originally absent variable instead of leaving a new empty one.
+        $Value = if ($null -eq $Snapshot[$Name]) { [NullString]::Value } else { $Snapshot[$Name] }
+        [Environment]::SetEnvironmentVariable($Name, $Value, 'Process')
     }
 }
