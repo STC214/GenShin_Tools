@@ -77,6 +77,11 @@
    variables: restoring null through a string parameter left `GOOS` empty.
    Restore actual null with `NullString.Value` in shared helpers and the build
    script. The source gate now exercises absent, empty, and nonempty snapshots.
+9. **Background review follow-up — fixed.** An updater regression exposed
+   transient Windows access denial while promoting a freshly extracted release
+   directory. Use the existing strictly bounded sharing/access retry helper for
+   that same-volume move, without overwrite flags. Repeated race tests cover
+   update staging; a regression verifies an existing release is never replaced.
 
 ## Scope preserved
 

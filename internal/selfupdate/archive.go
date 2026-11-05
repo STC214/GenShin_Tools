@@ -167,7 +167,7 @@ func StagePackage(ctx context.Context, packagePath, stagingRoot, expectedVersion
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return StagedRelease{}, err
 	}
-	if err := os.Rename(temporary, destination); err != nil {
+	if err := renameNewDirectory(temporary, destination); err != nil {
 		return StagedRelease{}, err
 	}
 	committed = true
