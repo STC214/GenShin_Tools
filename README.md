@@ -4,7 +4,9 @@
 
 当前正在按照既定顺序实施。项目不会实现米游社/HoYoLAB/BBS、登录与账号切换、抽卡统计、签到、资讯、数据中心、帮助文档、养成计算器、附加程序和内置浏览器等已排除功能。
 
-当前版本为 `1.7.0`，对应产品源码提交记录在便携包的 `build-info.json` 中。最新版便携包固定输出到 `artifacts/release/`，项目根目录不再保留旧版本 ZIP。
+当前版本为 `1.7.1`，对应产品源码提交记录在便携包的 `build-info.json` 中。最新版便携包固定输出到 `artifacts/release/`，项目根目录不再保留旧版本 ZIP。
+
+从 1.7.1 起，主插件配置中的所有 `key` 字段显示并接受按键名称（例如 `F10`、`Insert`、`Space`），保存时自动转换为插件原有数字键码。数字行、小键盘和左右修饰键保持不同身份；无效输入或保存失败会恢复原值，已有 INI 无需迁移。
 
 ## 许可证
 
@@ -55,7 +57,7 @@
 
 默认输出为 `artifacts/release/GenshinTools-<VERSION>-windows-amd64-portable.zip`，同时生成 SHA-256 校验文件。压缩包可解压到普通可写目录中使用；运行时配置、日志、缓存及模块数据保存在主程序同级的 `data/` 目录。完整工具链与发布规则见 [构建与验证](docs/build.md)。
 
-当前版本便携包输出名为 `GenshinTools-1.7.0-windows-amd64-portable.zip`，生成后 SHA-256 见同目录的 `.zip.sha256` 文件；包内 `release.json` 记录各产品文件的大小与校验值。
+当前版本便携包输出名为 `GenshinTools-1.7.1-windows-amd64-portable.zip`，生成后 SHA-256 见同目录的 `.zip.sha256` 文件；包内 `release.json` 记录各产品文件的大小与校验值。
 
 ## FufuLauncher 致敬与引用
 

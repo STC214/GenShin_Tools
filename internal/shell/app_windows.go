@@ -2216,7 +2216,7 @@ func (app *application) rebuildFufuControls() {
 			continue
 		}
 		controlID := uint16(3000 + index)
-		edit, createErr := win32.CreateControl("EDIT", values[setting.Field.ID], win32.WS_CHILD|win32.WS_BORDER|win32.WS_TABSTOP|win32.ES_AUTOHSCROLL, 0, 0, 100, 32, app.hwnd, uintptr(controlID), app.instance)
+		edit, createErr := win32.CreateControl("EDIT", configFieldDisplayValue(setting.Field, values[setting.Field.ID]), win32.WS_CHILD|win32.WS_BORDER|win32.WS_TABSTOP|win32.ES_AUTOHSCROLL, 0, 0, 100, 32, app.hwnd, uintptr(controlID), app.instance)
 		if createErr != nil {
 			app.pluginStatus = fmt.Sprintf(app.texts.Text("fufu.status.controlFailed"), setting.Field.Name, createErr)
 			continue
@@ -2247,16 +2247,25 @@ func (app *application) saveFufuField(fieldID string) bool {
 		return true
 	}
 	value := win32.GetWindowText(control)
-	if value == app.fufuValues[fieldID] {
+	previousDisplay := configFieldDisplayValue(setting.Field, app.fufuValues[fieldID])
+	if value == previousDisplay {
 		return true
 	}
+	stored, err := configFieldStoredValue(setting.Field, value)
+	if err != nil {
+		app.pluginStatus = fmt.Sprintf(app.texts.Text("fufu.status.saveFailed"), err)
+		win32.SetWindowText(control, previousDisplay)
+		return false
+	}
+	value = stored
 	if err := plugins.UpdateConfig(filepath.Join(app.fufuTargetDirectory(), "config.ini"), app.fufuTarget.Schema, setting.Field.ID, value); err != nil {
 		app.pluginStatus = fmt.Sprintf(app.texts.Text("fufu.status.saveFailed"), err)
 		app.logger.Error("save Fufu target setting", map[string]any{"field": setting.Field.ID, "error": err.Error()})
-		win32.SetWindowText(control, app.fufuValues[fieldID])
+		win32.SetWindowText(control, previousDisplay)
 		return false
 	}
 	app.fufuValues[fieldID] = value
+	win32.SetWindowText(control, configFieldDisplayValue(setting.Field, value))
 	app.pluginStatus = fmt.Sprintf(app.texts.Text("fufu.status.saved"), setting.Field.Name)
 	return true
 }

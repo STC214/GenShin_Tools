@@ -984,10 +984,94 @@ func KeyName(virtualKey uint32) string {
 		}
 	}
 	switch virtualKey {
+	case 0x01:
+		return "Mouse Left"
+	case 0x02:
+		return "Mouse Right"
+	case 0x04:
+		return "Mouse Middle"
+	case 0x05:
+		return "Mouse X1"
+	case 0x06:
+		return "Mouse X2"
+	case 0x0c:
+		return "Clear"
+	case 0xa0:
+		return "Left Shift"
+	case 0xa1:
+		return "Right Shift"
+	case 0xa2:
+		return "Left Ctrl"
+	case 0xa3:
+		return "Right Ctrl"
+	case 0xa4:
+		return "Left Alt"
+	case 0xa5:
+		return "Right Alt"
+	case 0xa6:
+		return "Browser Back"
+	case 0xa7:
+		return "Browser Forward"
+	case 0xa8:
+		return "Browser Refresh"
+	case 0xa9:
+		return "Browser Stop"
+	case 0xaa:
+		return "Browser Search"
+	case 0xab:
+		return "Browser Favorites"
+	case 0xac:
+		return "Browser Home"
+	case 0xad:
+		return "Volume Mute"
+	case 0xae:
+		return "Volume Down"
+	case 0xaf:
+		return "Volume Up"
+	case 0xb0:
+		return "Media Next Track"
+	case 0xb1:
+		return "Media Previous Track"
+	case 0xb2:
+		return "Media Stop"
+	case 0xb3:
+		return "Media Play/Pause"
+	case 0xb4:
+		return "Launch Mail"
+	case 0xb5:
+		return "Launch Media Select"
+	case 0xb6:
+		return "Launch App 1"
+	case 0xb7:
+		return "Launch App 2"
+	case 0xc1:
+		return "ABNT C1"
+	case 0xc2:
+		return "ABNT C2"
+	case 0xe2:
+		// The extra ISO-layout key can share a keycap with the ANSI backslash
+		// key. Give it a distinct name so editing never changes its identity.
+		return "ISO Backslash"
 	case 0x21:
 		return "Page Up"
 	case 0x22:
 		return "Page Down"
+	case 0x23:
+		return "End"
+	case 0x24:
+		return "Home"
+	case 0x25:
+		return "Left"
+	case 0x26:
+		return "Up"
+	case 0x27:
+		return "Right"
+	case 0x28:
+		return "Down"
+	case 0x2d:
+		return "Insert"
+	case 0x2e:
+		return "Delete"
 	}
 	// These keys have ambiguous legacy scan-code encodings. In particular,
 	// MAPVK_VK_TO_VSC_EX returns E1 1D for Pause, but GetKeyNameTextW only has
